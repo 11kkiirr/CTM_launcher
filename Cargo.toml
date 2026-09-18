@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = ["crates/mc_core", "crates/mc_tui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+authors = ["CTMLauncher Contributors"]
+description = "A modular terminal Minecraft launcher inspired by Prism Launcher"
+
+[workspace.dependencies]
+mc_core = { path = "crates/mc_core" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "multipart",
+    "rustls-tls",
+    "gzip",
+] }
+
+# Errors
+thiserror = "2"
+anyhow = "1"
+
+# Archives / formats
+zip = { version = "2", default-features = false, features = ["deflate", "bzip2", "zstd"] }
+tar = "0.4"
+flate2 = "1"
+
+# Paths
+directories = "5"
+
+# Utilities
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+sha1 = "0.10"
+sha2 = "0.10"
+md-5 = "0.10"
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+bytes = "1"
+urlencoding = "2"
+regex = "1"
+
+# TUI
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+strip = true

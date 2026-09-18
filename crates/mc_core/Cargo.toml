@@ -1,0 +1,31 @@
+[package]
+name = "mc_core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Core domain logic for CTMLauncher: auth, instances, installers, modpacks, launch"
+
+[dependencies]
+tokio.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+zip.workspace = true
+tar.workspace = true
+flate2.workspace = true
+directories.workspace = true
+uuid.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+md-5.workspace = true
+hex.workspace = true
+chrono.workspace = true
+bytes.workspace = true
+urlencoding.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

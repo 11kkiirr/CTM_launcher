@@ -1,0 +1,21 @@
+[package]
+name = "mc_tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Ratatui terminal UI for CTMLauncher"
+
+[[bin]]
+name = "ctmlauncher"
+path = "src/main.rs"
+
+[dependencies]
+mc_core.workspace = true
+tokio.workspace = true
+futures.workspace = true
+anyhow.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+reqwest.workspace = true
+serde.workspace = true

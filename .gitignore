@@ -1,0 +1,27 @@
+# Rust / Cargo build artifacts
+/target/
+**/target/
+**/*.rs.bk
+*.pdb
+
+# Keep Cargo.lock committed: this workspace ships binaries (`ctmlauncher`),
+# so a reproducible, pinned dependency graph is intentional.
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.iml
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+
+# Launcher runtime data, in case it is ever pointed at the repo
+/instances/
+/.minecraft/
