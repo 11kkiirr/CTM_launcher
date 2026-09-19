@@ -32,6 +32,10 @@ impl ModrinthClient {
 
     /// Search projects with optional project-type, game-version, loader and
     /// sort filters (`relevance`, `downloads`, `follows`, `newest`, `updated`).
+    ///
+    /// `categories` adds extra OR'd category facets (e.g. `["client-side"]` or
+    /// `["optimization", "magic"]`).  These are combined with the other facets
+    /// as an AND group.
     pub async fn search(
         &self,
         query: &str,
@@ -41,6 +45,7 @@ impl ModrinthClient {
         sort: Option<&str>,
         limit: u32,
         offset: u32,
+        categories: &[String],
     ) -> Result<SearchResults> {
         let mut facets: Vec<Vec<String>> = Vec::new();
         if let Some(kind) = project_type {
@@ -51,6 +56,11 @@ impl ModrinthClient {
         }
         if let Some(loader) = loader {
             facets.push(vec![format!("categories:{loader}")]);
+        }
+        if !categories.is_empty() {
+            let cat_facets: Vec<String> =
+                categories.iter().map(|c| format!("categories:{c}")).collect();
+            facets.push(cat_facets);
         }
 
         let mut params: Vec<(&str, String)> = vec![

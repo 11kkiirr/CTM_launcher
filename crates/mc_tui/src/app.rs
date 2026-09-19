@@ -33,7 +33,7 @@ use crate::forms::{
 };
 use crate::settings::LauncherSettings;
 use crate::theme::Theme;
-use crate::views::browse::{Browse, BrowseFocus, BrowseKind};
+use crate::views::browse::{Browse, BrowseFocus, BrowseKind, SideFilter};
 use crate::wizard::BuildKind;
 
 /// The Azure application (client) id used for Microsoft device-code auth.
@@ -179,6 +179,14 @@ pub enum HitAction {
     BrowseVersion(usize),
     /// Modrinth browser: install the selected version.
     BrowseInstall,
+    /// Modrinth browser: quick-install the latest compatible release from the list.
+    BrowseQuickInstall(usize),
+    /// Modrinth browser: sidebar filter action.
+    BrowseFilter(crate::views::browse::FilterItem),
+    /// Modrinth browser: go to previous page.
+    BrowsePagePrev,
+    /// Modrinth browser: go to next page.
+    BrowsePageNext,
     /// A click inside a modal overlay.
     Overlay(OverlayAction),
 }
@@ -673,15 +681,8 @@ impl App {
                     });
             }
             EngineEvent::BrowseResults(results) => {
-                self.browse.offset = results.offset + results.hits.len() as u32;
                 self.browse.total = results.total_hits;
-                if results.offset == 0 {
-                    self.browse.results = results.hits;
-                } else {
-                    for hit in results.hits {
-                        self.browse.results.push(hit);
-                    }
-                }
+                self.browse.results = results.hits;
                 self.browse.loading = false;
                 if self.browse.selected >= self.browse.results.len() {
                     self.browse.selected = self.browse.results.len().saturating_sub(1);
@@ -997,6 +998,10 @@ impl App {
             HitAction::BrowseResult(idx) => self.browse_select_result(idx),
             HitAction::BrowseVersion(idx) => self.browse_select_version(idx),
             HitAction::BrowseInstall => self.browse_install(),
+            HitAction::BrowseQuickInstall(idx) => self.browse_quick_install(idx),
+            HitAction::BrowseFilter(item) => self.browse_filter_click(item),
+            HitAction::BrowsePagePrev => self.browse_prev_page(),
+            HitAction::BrowsePageNext => self.browse_next_page(),
             HitAction::Overlay(action) => self.dispatch_overlay_action(action),
         }
     }
@@ -1933,7 +1938,7 @@ impl App {
         self.progress = Some((None, format!("Searching '{query}'...")));
         tokio::spawn(async move {
             let result = modrinth
-                .search(&query, Some("modpack"), None, None, None, 30, 0)
+                .search(&query, Some("modpack"), None, None, None, 30, 0, &[])
                 .await;
             let _ = tx.send(EngineEvent::ProgressDone);
             match result {
@@ -2213,6 +2218,7 @@ impl App {
                     None,
                     30,
                     0,
+                    &[],
                 )
                 .await;
             let _ = tx.send(EngineEvent::ProgressDone);
@@ -2265,19 +2271,54 @@ impl App {
         self.browse_do_search(0);
     }
 
-    pub(crate) fn browse_load_more(&mut self) {
+    pub(crate) fn browse_next_page(&mut self) {
         if self.browse.loading {
             return;
         }
-        if self.browse.offset as usize >= self.browse.total as usize && self.browse.total > 0 {
+        let next = self.browse.offset + 30;
+        if next >= self.browse.total && self.browse.total > 0 {
             return;
         }
-        self.browse_do_search(self.browse.offset);
+        self.browse.offset = next;
+        self.browse.selected = 0;
+        self.browse.results.clear();
+        self.browse_do_search(next);
+    }
+
+    pub(crate) fn browse_prev_page(&mut self) {
+        if self.browse.loading {
+            return;
+        }
+        if self.browse.offset == 0 {
+            return;
+        }
+        let prev = self.browse.offset.saturating_sub(30);
+        self.browse.offset = prev;
+        self.browse.selected = 0;
+        self.browse.results.clear();
+        self.browse_do_search(prev);
     }
 
     fn browse_do_search(&mut self, offset: u32) {
         let kind = self.browse.kind;
         let query = self.browse.query.clone();
+        let sort = self.browse.sort;
+        let filter_compat = self.browse.filter_compat;
+        let filter_side = self.browse.filter_side;
+        let filter_categories = self.browse.filter_categories.clone();
+        let filter_loaders = self.browse.filter_loaders.clone();
+        let game_version = if filter_compat {
+            self.selected_instance()
+                .map(|i| i.metadata.game_version.clone())
+        } else {
+            None
+        };
+        let loader = if filter_compat {
+            self.selected_instance()
+                .map(|i| i.metadata.loader.as_str().to_string())
+        } else {
+            None
+        };
         let modrinth = self.modrinth.clone();
         let tx = self.engine_tx.clone();
         self.browse.loading = true;
@@ -2288,8 +2329,29 @@ impl App {
         };
         self.progress = Some((None, label));
         tokio::spawn(async move {
+            let mut categories = filter_categories;
+            // Add selected loaders as category facets (Modrinth uses categories for loader filtering).
+            for loader in &filter_loaders {
+                categories.push(loader.clone());
+            }
+            match filter_side {
+                SideFilter::Client => categories.push("client-side".to_string()),
+                SideFilter::Server => categories.push("server-side".to_string()),
+                SideFilter::All => {}
+            }
+            let gv = game_version.as_deref();
+            let ld = loader.as_deref();
             let result = modrinth
-                .search(&query, Some(kind.project_type()), None, None, Some(kind.sort()), 30, offset)
+                .search(
+                    &query,
+                    Some(kind.project_type()),
+                    gv,
+                    ld,
+                    Some(sort.as_str()),
+                    30,
+                    offset,
+                    &categories,
+                )
                 .await;
             let _ = tx.send(EngineEvent::ProgressDone);
             match result {
@@ -2482,6 +2544,132 @@ impl App {
                 }
             }
         });
+    }
+
+    /// Quick-install the latest compatible release for a mod directly from the
+    /// browse list (without opening the detail view).
+    pub(crate) fn browse_quick_install(&mut self, idx: usize) {
+        let Some(hit) = self.browse.results.get(idx).cloned() else {
+            return;
+        };
+        let Some(instance) = self.selected_instance().cloned() else {
+            self.set_toast("Select an instance first", true);
+            return;
+        };
+        let is_modpack = self.browse.kind == BrowseKind::Modpacks;
+        if is_modpack {
+            self.set_toast("Open a modpack to install it", true);
+            return;
+        }
+        let dest_dir = match self.browse.kind {
+            BrowseKind::Mods => instance.mods_dir(),
+            BrowseKind::Resourcepacks => instance.resourcepacks_dir(),
+            _ => instance.shaders_dir(),
+        };
+        let game_version = instance.metadata.game_version.clone();
+        let loader = instance.metadata.loader.as_str().to_string();
+        let client = self.client.clone();
+        let modrinth = self.modrinth.clone();
+        let tx = self.engine_tx.clone();
+        let title = hit.title.clone();
+        let project_id = hit.project_id.clone();
+        self.progress = Some((None, format!("Installing {}...", title)));
+        tokio::spawn(async move {
+            let result: Result<Vec<String>, CoreError> = async {
+                let Some(version) = modrinth
+                    .latest_version(&project_id, Some(&game_version), Some(&loader))
+                    .await?
+                else {
+                    return Err(CoreError::Modrinth(
+                        "no compatible version found".into(),
+                    ));
+                };
+                let Some(file) = version.primary_file() else {
+                    return Err(CoreError::Modrinth(
+                        "version has no downloadable file".into(),
+                    ));
+                };
+                modrinth::install_version_file(&client, file, &dest_dir, None).await?;
+                let mut installed = vec![file.filename.clone()];
+                let deps = modrinth::resolve_dependencies(
+                    &modrinth,
+                    &version,
+                    Some(&game_version),
+                    Some(&loader),
+                    3,
+                )
+                .await?;
+                for dep in deps {
+                    if let Some(dep_file) = dep.primary_file() {
+                        if modrinth::install_version_file(&client, dep_file, &dest_dir, None)
+                            .await
+                            .is_ok()
+                        {
+                            installed.push(dep_file.filename.clone());
+                        }
+                    }
+                }
+                Ok(installed)
+            }
+            .await;
+            let _ = tx.send(EngineEvent::ProgressDone);
+            match result {
+                Ok(files) => {
+                    let _ = tx.send(EngineEvent::ModsChanged);
+                    let _ = tx.send(EngineEvent::Toast(format!(
+                        "Installed {} file(s) from {}",
+                        files.len(),
+                        title
+                    )));
+                }
+                Err(err) => {
+                    let _ = tx.send(EngineEvent::Error(format!("Install failed: {err}")));
+                }
+            }
+        });
+    }
+
+    /// Handle a click on a sidebar filter item.
+    pub(crate) fn browse_filter_click(&mut self, item: crate::views::browse::FilterItem) {
+        use crate::views::browse::FilterItem;
+        match item {
+            FilterItem::Sort => {
+                self.browse.sort = self.browse.sort.cycle();
+                self.browse_load_first_page();
+            }
+            FilterItem::Side => {
+                self.browse.filter_side = self.browse.filter_side.cycle();
+                self.browse_load_first_page();
+            }
+            FilterItem::Compat => {
+                self.browse.filter_compat = !self.browse.filter_compat;
+                self.browse_load_first_page();
+            }
+            FilterItem::Loader(idx) => {
+                let loaders = self.browse.kind.loaders();
+                if let Some(loader) = loaders.get(idx) {
+                    let loader = loader.to_string();
+                    if let Some(pos) = self.browse.filter_loaders.iter().position(|l| *l == loader) {
+                        self.browse.filter_loaders.remove(pos);
+                    } else {
+                        self.browse.filter_loaders.push(loader);
+                    }
+                    self.browse_load_first_page();
+                }
+            }
+            FilterItem::Category(idx) => {
+                let cats = self.browse.kind.categories();
+                if let Some(cat) = cats.get(idx) {
+                    let cat = cat.to_string();
+                    if let Some(pos) = self.browse.filter_categories.iter().position(|c| *c == cat) {
+                        self.browse.filter_categories.remove(pos);
+                    } else {
+                        self.browse.filter_categories.push(cat);
+                    }
+                    self.browse_load_first_page();
+                }
+            }
+        }
     }
 
     pub(crate) fn toggle_selected_mod(&mut self) {
@@ -3730,9 +3918,11 @@ fn footer_hints(nav: Nav) -> &'static [(&'static str, &'static str)] {
             ("1-4", "type"),
             ("s", "search"),
             ("Enter", "open"),
-            ("n", "next page"),
-            ("v", "versions"),
-            ("i", "install"),
+            ("i", "quick install"),
+            ("[/]", "pages"),
+            ("f", "compat"),
+            ("c", "side"),
+            ("o", "sort"),
         ],
         Nav::Mods => &[
             ("t", "pane"),
