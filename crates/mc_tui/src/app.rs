@@ -354,51 +354,79 @@ impl App {
     ) -> anyhow::Result<()> {
         use futures::StreamExt;
         let mut reader = crossterm::event::EventStream::new();
-        let mut ticker = tokio::time::interval(Duration::from_millis(80));
+        let mut ticker = tokio::time::interval(Duration::from_millis(33));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        // Coalesce input: only redraw when something changed, and at most once
+        // per frame budget. This keeps rapid mouse movement from flooding the
+        // terminal and building up a laggy backlog of frames.
+        let frame_budget = Duration::from_millis(16);
+        let mut needs_draw = true;
+        let mut last_draw = Instant::now() - frame_budget;
 
         while !self.should_quit {
-            terminal.draw(|frame| self.render(frame))?;
+            if needs_draw && last_draw.elapsed() >= frame_budget {
+                terminal.draw(|frame| self.render(frame))?;
+                last_draw = Instant::now();
+                needs_draw = false;
+            }
 
             tokio::select! {
                 maybe_event = reader.next() => {
                     if let Some(Ok(event)) = maybe_event {
-                        self.handle_terminal_event(event);
+                        if self.handle_terminal_event(event) {
+                            needs_draw = true;
+                        }
                     }
                 }
                 maybe_msg = self.engine_rx.recv() => {
                     if let Some(msg) = maybe_msg {
                         self.handle_engine_event(msg);
+                        needs_draw = true;
                     }
                 }
-                _ = ticker.tick() => self.on_tick(),
+                _ = ticker.tick() => {
+                    if self.on_tick() {
+                        needs_draw = true;
+                    }
+                }
             }
         }
         Ok(())
     }
 
-    pub(crate) fn handle_terminal_event(&mut self, event: crossterm::event::Event) {
+    /// Handle a terminal event, returning whether the UI needs a redraw.
+    pub(crate) fn handle_terminal_event(&mut self, event: crossterm::event::Event) -> bool {
         match event {
             crossterm::event::Event::Key(key) => {
                 if key.kind == crossterm::event::KeyEventKind::Press {
                     self.handle_key(key);
+                    true
+                } else {
+                    false
                 }
             }
             crossterm::event::Event::Mouse(mouse) => self.handle_mouse(mouse),
-            crossterm::event::Event::Resize(_, _) => {}
-            _ => {}
+            crossterm::event::Event::Resize(_, _) => true,
+            crossterm::event::Event::FocusGained => true,
+            _ => false,
         }
     }
 
-    pub(crate) fn on_tick(&mut self) {
-        self.drain_process();
+    /// Periodic work; returns whether the UI needs a redraw.
+    pub(crate) fn on_tick(&mut self) -> bool {
+        let mut changed = self.drain_process();
         if let Some(toast) = &self.toast {
             if toast.at.elapsed() > Duration::from_secs(6) {
                 self.toast = None;
+                changed = true;
             }
         }
+        changed
     }
 
-    pub(crate) fn drain_process(&mut self) {
+    /// Drain process output; returns whether anything changed.
+    pub(crate) fn drain_process(&mut self) -> bool {
         let mut lines = Vec::new();
         let mut exited: Option<Option<i32>> = None;
 
@@ -413,10 +441,12 @@ impl App {
             }
         }
 
+        let had_lines = !lines.is_empty();
         for line in lines {
             self.log_buffer.push_line(&line);
         }
 
+        let mut changed = had_lines;
         if let Some(code) = exited {
             let version = self
                 .running
@@ -426,14 +456,16 @@ impl App {
             self.running = None;
             self.progress = None;
             self.on_process_exit(&version, code);
+            changed = true;
         }
 
-        if self.settings.log_auto_scroll {
+        if had_lines && self.settings.log_auto_scroll {
             let len = self.log_buffer.visible().count();
             if len > 0 {
                 self.log_state.select(Some(len - 1));
             }
         }
+        changed
     }
 
     pub(crate) fn on_process_exit(&mut self, version: &str, code: Option<i32>) {
@@ -698,30 +730,52 @@ impl App {
         }
     }
 
-    pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) {
-        self.mouse_pos = Some((mouse.column, mouse.row));
+    /// Handle a mouse event; returns whether the UI needs a redraw.
+    ///
+    /// Motion events only trigger a redraw when the hovered element actually
+    /// changes, which prevents a flood of redraws while the pointer moves.
+    pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
+        let new_pos = (mouse.column, mouse.row);
+        let old_action = self.mouse_pos.and_then(|pos| self.hit_action_at(pos));
+        self.mouse_pos = Some(new_pos);
+        let new_action = self.hit_action_at(new_pos);
+        let hover_changed = old_action != new_action;
+
         if self.overlay.is_some() {
             if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
                 self.handle_overlay_click();
+                return true;
             }
-            return;
+            return hover_changed;
         }
+
         match mouse.kind {
-            MouseEventKind::ScrollDown => self.scroll_active(1),
-            MouseEventKind::ScrollUp => self.scroll_active(-1),
+            MouseEventKind::ScrollDown => {
+                self.scroll_active(1);
+                true
+            }
+            MouseEventKind::ScrollUp => {
+                self.scroll_active(-1);
+                true
+            }
             MouseEventKind::Down(MouseButton::Left) => {
-                let pos = (mouse.column, mouse.row);
-                if let Some(hit) = self
-                    .hitboxes
-                    .iter()
-                    .find(|h| rect_contains(h.rect, pos))
-                    .copied()
-                {
-                    self.dispatch_hit(hit.action);
+                if let Some(hit) = self.hit_action_at(new_pos) {
+                    self.dispatch_hit(hit);
+                    true
+                } else {
+                    hover_changed
                 }
             }
-            _ => {}
+            _ => hover_changed,
         }
+    }
+
+    /// The hitbox action under a screen position, if any.
+    pub(crate) fn hit_action_at(&self, pos: (u16, u16)) -> Option<HitAction> {
+        self.hitboxes
+            .iter()
+            .find(|h| rect_contains(h.rect, pos))
+            .map(|h| h.action)
     }
 
     pub(crate) fn dispatch_hit(&mut self, action: HitAction) {
@@ -1472,10 +1526,16 @@ impl App {
                 };
                 let version_id = resolved.id.clone();
                 let required = resolved.details.required_java_major();
-                let java = match instance.metadata.jvm.java_path.clone() {
-                    Some(path) => java::probe(&path).await?,
-                    None => select_java(&instance, required).await?,
-                };
+                let component = resolved.details.java_component().map(str::to_string);
+                let java = select_java(
+                    &client,
+                    &paths,
+                    &instance,
+                    component.as_deref(),
+                    required,
+                    Some(progress.clone()),
+                )
+                .await?;
 
                 let launcher = Launcher::new(client.clone(), paths.clone(), progress);
                 let plan = launcher

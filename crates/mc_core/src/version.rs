@@ -96,6 +96,14 @@ impl VersionDetails {
             .map(|j| j.major_version)
             .unwrap_or(8)
     }
+
+    /// The Mojang runtime component name this version expects, if declared.
+    pub fn java_component(&self) -> Option<&str> {
+        self.java_version
+            .as_ref()
+            .map(|j| j.component.as_str())
+            .filter(|c| !c.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -170,13 +170,31 @@ impl Launcher {
     }
 }
 
-/// Select a Java runtime for a version: explicit path, then best match, then
-/// any discovered runtime.
-pub async fn select_java(instance: &Instance, required_major: u32) -> Result<JavaInstallation> {
+/// Select a Java runtime for a version.
+///
+/// Order of preference:
+/// 1. The instance's explicit Java path.
+/// 2. An installed runtime that satisfies the required major version.
+/// 3. The Mojang-provided runtime for the version's component (downloaded on
+///    demand into the launcher's `java/` directory).
+/// 4. Any discovered runtime, as a last resort.
+pub async fn select_java(
+    client: &reqwest::Client,
+    paths: &Paths,
+    instance: &Instance,
+    component: Option<&str>,
+    required_major: u32,
+    progress: Option<ProgressCallback>,
+) -> Result<JavaInstallation> {
     if let Some(path) = &instance.metadata.jvm.java_path {
         return java::probe(path).await;
     }
     if let Some(found) = java::find_for_major(required_major).await {
+        return Ok(found);
+    }
+    if let Ok(found) =
+        java::ensure_runtime(client, paths, component, required_major, progress).await
+    {
         return Ok(found);
     }
     java::discover()
