@@ -12,8 +12,8 @@ use crate::util::{download_file, sha1_file, ProgressCallback};
 
 pub use client::ModrinthClient;
 pub use models::{
-    Dependency, DependencyType, InstalledMod, Project, SearchHit, SearchResults, Version,
-    VersionFile,
+    Dependency, DependencyType, GalleryImage, InstalledMod, Project, SearchHit, SearchResults,
+    Version, VersionFile,
 };
 
 /// Suffix appended to disabled mod files.

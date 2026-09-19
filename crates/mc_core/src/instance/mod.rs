@@ -290,6 +290,10 @@ impl Instance {
         self.game_dir().join("resourcepacks")
     }
 
+    pub fn shaders_dir(&self) -> PathBuf {
+        self.game_dir().join("shaders")
+    }
+
     pub fn saves_dir(&self) -> PathBuf {
         self.game_dir().join("saves")
     }

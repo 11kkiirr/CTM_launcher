@@ -30,13 +30,15 @@ impl ModrinthClient {
         }
     }
 
-    /// Search projects with optional project-type, game-version and loader filters.
+    /// Search projects with optional project-type, game-version, loader and
+    /// sort filters (`relevance`, `downloads`, `follows`, `newest`, `updated`).
     pub async fn search(
         &self,
         query: &str,
         project_type: Option<&str>,
         game_version: Option<&str>,
         loader: Option<&str>,
+        sort: Option<&str>,
         limit: u32,
         offset: u32,
     ) -> Result<SearchResults> {
@@ -59,6 +61,9 @@ impl ModrinthClient {
         if !facets.is_empty() {
             params.push(("facets", serde_json::to_string(&facets)?));
         }
+        if let Some(sort) = sort {
+            params.push(("sort", sort.to_string()));
+        }
 
         let response = self
             .client
@@ -68,6 +73,33 @@ impl ModrinthClient {
             .await?
             .error_for_status()?;
         Ok(response.json().await?)
+    }
+
+    /// Fetch a raw resource (an image) from the Modrinth CDN, refusing hosts
+    /// outside `modrinth.com` and capping the response size.
+    pub async fn get_bytes(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>> {
+        if !is_modrinth_url(url) {
+            return Err(CoreError::Modrinth(format!(
+                "refusing to fetch non-Modrinth URL: {url}"
+            )));
+        }
+        use futures::StreamExt;
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?;
+        let mut out = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            out.extend(&chunk);
+            if out.len() >= max_bytes {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     /// Fetch a single project by id or slug.
@@ -205,6 +237,18 @@ impl ModrinthClient {
             Ok(None)
         }
     }
+}
+
+/// `true` when `url` is an `https://` resource hosted on `modrinth.com` (or a
+/// subdomain). Used as a belt-and-suspenders guard before fetching remote
+/// bytes, since image URLs originate from the API and must never point
+/// elsewhere.
+fn is_modrinth_url(url: &str) -> bool {
+    let rest = url.strip_prefix("https://").unwrap_or(url);
+    let Some(authority) = rest.split('/').next() else {
+        return false;
+    };
+    authority == "modrinth.com" || authority.ends_with(".modrinth.com")
 }
 
 #[cfg(test)]

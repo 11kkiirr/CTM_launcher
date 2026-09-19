@@ -3,6 +3,8 @@
 mod app;
 mod engine;
 mod forms;
+mod images;
+mod md;
 mod settings;
 mod theme;
 mod views;
@@ -36,6 +38,17 @@ async fn main() -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+
+    // Query the terminal for an image graphics protocol (kitty/sixel/iTerm2)
+    // and its font size. The query briefly toggles raw mode off internally, so
+    // re-enable it afterwards. Fall back to half-blocks when the query fails or
+    // times out, so images still render on plain terminals.
+    app.picker = match ratatui_image::picker::Picker::from_query_stdio() {
+        Ok(picker) => picker,
+        Err(_) => ratatui_image::picker::Picker::halfblocks(),
+    };
+    enable_raw_mode()?;
+
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 

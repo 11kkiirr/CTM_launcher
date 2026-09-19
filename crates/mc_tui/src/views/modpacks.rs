@@ -33,6 +33,7 @@ impl App {
             area.x + area.width,
             &[
                 ("Search", ButtonId::Search),
+                ("Store", ButtonId::BrowseMods),
                 ("Import .mrpack", ButtonId::ImportModpack),
                 ("Install", ButtonId::InstallProject),
             ],

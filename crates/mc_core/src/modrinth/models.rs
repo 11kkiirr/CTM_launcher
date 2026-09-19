@@ -105,6 +105,18 @@ pub struct Project {
     pub updated: String,
     #[serde(default)]
     pub license: Option<License>,
+    #[serde(default)]
+    pub gallery: Vec<GalleryImage>,
+}
+
+/// A screenshot/preview attached to a project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GalleryImage {
+    pub url: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub featured: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

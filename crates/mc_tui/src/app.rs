@@ -1,5 +1,6 @@
 //! Application state, event routing and background-task orchestration.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,7 +16,7 @@ use mc_core::launch::{
 };
 use mc_core::logs::{self, CrashAnalysis, LogBuffer};
 use mc_core::modpack::ModpackInstaller;
-use mc_core::modrinth::{self, InstalledMod, ModrinthClient, Project, SearchHit, Version};
+use mc_core::modrinth::{self, InstalledMod, ModrinthClient, Project, SearchHit, SearchResults, Version};
 use mc_core::skins::{SkinClient, SkinVariant};
 use mc_core::util::{Paths, Progress, ProgressCallback};
 use mc_core::CoreError;
@@ -32,6 +33,7 @@ use crate::forms::{
 };
 use crate::settings::LauncherSettings;
 use crate::theme::Theme;
+use crate::views::browse::{Browse, BrowseFocus, BrowseKind};
 use crate::wizard::BuildKind;
 
 /// The Azure application (client) id used for Microsoft device-code auth.
@@ -47,6 +49,8 @@ const NAV_BUTTON_HEIGHT: u16 = 3;
 pub enum Nav {
     /// Instance picker (home) with the build action toolbar.
     Instances,
+    /// Modrinth browser (mods / modpacks / resourcepacks / shaders).
+    Browse,
     /// Mod manager.
     Mods,
     /// Modpack browser / `.mrpack` import.
@@ -81,8 +85,9 @@ impl Nav {
 
     /// The pages shown in the right-hand navigation menu, in order.
     ///
-    /// `Modpacks` and `Accounts` are intentionally omitted; they are reached
-    /// from the instance toolbar and the header account badge respectively.
+    /// `Browse`, `Modpacks` and `Accounts` are intentionally omitted; they are
+    /// reached from the instance toolbar, the Mods page and the header account
+    /// badge respectively.
     pub fn menu() -> [Nav; 5] {
         [
             Nav::Instances,
@@ -102,6 +107,7 @@ impl Nav {
     pub fn label(&self) -> &'static str {
         match self {
             Nav::Instances => "Instances",
+            Nav::Browse => "Browse",
             Nav::Mods => "Mods",
             Nav::Modpacks => "Modpacks",
             Nav::Versions => "Versions",
@@ -124,6 +130,7 @@ impl Nav {
     pub fn icon(&self) -> &'static str {
         match self {
             Nav::Instances => "⌂",
+            Nav::Browse => "▦",
             Nav::Mods => "✦",
             Nav::Modpacks => "⛁",
             Nav::Versions => "❖",
@@ -164,6 +171,14 @@ pub enum HitAction {
     AccountRow(usize),
     SettingsRow(usize),
     Button(ButtonId),
+    /// Modrinth browser: switch the active content type.
+    BrowseKindTab(BrowseKind),
+    /// Modrinth browser: open a search result.
+    BrowseResult(usize),
+    /// Modrinth browser: select a version in the detail view.
+    BrowseVersion(usize),
+    /// Modrinth browser: install the selected version.
+    BrowseInstall,
     /// A click inside a modal overlay.
     Overlay(OverlayAction),
 }
@@ -329,6 +344,18 @@ pub struct App {
     pub log_visible: usize,
     pub log_search: String,
 
+    /// Modrinth browser state.
+    pub browse: Browse,
+    /// Decoded images keyed by URL (icons, gallery previews).
+    pub browse_images: HashMap<String, mc_core::img::RgbaImage>,
+    /// The page to return to when leaving the browser (not in the sidebar).
+    pub browse_return: Nav,
+    /// Terminal image protocol + font-size picker, negotiated at startup.
+    pub picker: ratatui_image::picker::Picker,
+    /// Per-URL render state for the negotiated protocol (kitty/sixel/iterm2/
+    /// halfblocks). Each entry caches the encoded image data.
+    pub browse_protocols: HashMap<String, ratatui_image::protocol::StatefulProtocol>,
+
     pub crash_analysis: Option<CrashAnalysis>,
 
     pub running: Option<RunningProcess>,
@@ -393,6 +420,11 @@ impl App {
             log_follow: true,
             log_visible: 0,
             log_search: String::new(),
+            browse: Browse::default(),
+            browse_images: HashMap::new(),
+            browse_return: Nav::Mods,
+            picker: ratatui_image::picker::Picker::halfblocks(),
+            browse_protocols: HashMap::new(),
             crash_analysis: None,
             running: None,
             last_command: None,
@@ -640,6 +672,42 @@ impl App {
                         Some(0)
                     });
             }
+            EngineEvent::BrowseResults(results) => {
+                self.browse.offset = results.offset + results.hits.len() as u32;
+                self.browse.total = results.total_hits;
+                if results.offset == 0 {
+                    self.browse.results = results.hits;
+                } else {
+                    for hit in results.hits {
+                        self.browse.results.push(hit);
+                    }
+                }
+                self.browse.loading = false;
+                if self.browse.selected >= self.browse.results.len() {
+                    self.browse.selected = self.browse.results.len().saturating_sub(1);
+                }
+            }
+            EngineEvent::BrowseProject { project, versions } => {
+                self.browse.detail = Some(*project);
+                self.browse.versions = versions;
+                self.browse.version_selected = 0;
+                self.browse.focus = BrowseFocus::Body;
+                self.browse.body = Vec::new();
+                self.browse.body_for = String::new();
+                self.browse.body_scroll = 0;
+                // Fresh render state per project: the terminal drops the image
+                // data once its unicode placeholders are gone, so a cached
+                // kitty protocol would not re-transmit on a later open.
+                self.browse_protocols.clear();
+                self.browse_fetch_images();
+            }
+            EngineEvent::BrowseImage { url, data } => {
+                if let Some(data) = data {
+                    if let Ok(img) = mc_core::img::decode_image(&data) {
+                        self.browse_images.insert(url, img);
+                    }
+                }
+            }
             EngineEvent::VersionList { target, versions } => {
                 self.show_version_picker(target, versions);
             }
@@ -752,10 +820,15 @@ impl App {
 
     /// Switch the active navigation page.
     pub(crate) fn open_nav(&mut self, nav: Nav) {
+        // Remember where the browser was entered from; it has no sidebar entry.
+        if nav == Nav::Browse {
+            self.browse_return = self.nav;
+        }
         self.nav = nav;
         self.focus = Focus::Content;
         match nav {
             Nav::Instances => self.reload_instances(),
+            Nav::Browse => self.open_browse(),
             Nav::Mods => self.reload_mods(),
             Nav::Accounts => self.reload_accounts(),
             Nav::Logs if self.running.is_none() && self.log_buffer.is_empty() => {
@@ -772,11 +845,22 @@ impl App {
         }
         // Esc returns to the instance picker (Modpacks handles its own Esc).
         if key.code == KeyCode::Esc && self.nav != Nav::Modpacks {
+            // In the browser, Esc first closes the project detail page, then
+            // returns to the page it was entered from.
+            if self.nav == Nav::Browse {
+                if self.browse.in_detail() {
+                    self.browse_close_detail();
+                } else {
+                    self.open_nav(self.browse_return);
+                }
+                return;
+            }
             self.open_nav(Nav::Instances);
             return;
         }
         match self.nav {
             Nav::Instances => self.key_instance_grid(key),
+            Nav::Browse => self.key_browse(key),
             Nav::Mods => self.key_mods(key),
             Nav::Modpacks => self.key_modpacks(key),
             Nav::Versions => self.key_versions(key),
@@ -897,6 +981,10 @@ impl App {
                 self.focus = Focus::Content;
             }
             HitAction::Button(button) => self.dispatch_button(button),
+            HitAction::BrowseKindTab(kind) => self.browse_switch_kind(kind),
+            HitAction::BrowseResult(idx) => self.browse_select_result(idx),
+            HitAction::BrowseVersion(idx) => self.browse_select_version(idx),
+            HitAction::BrowseInstall => self.browse_install(),
             HitAction::Overlay(action) => self.dispatch_overlay_action(action),
         }
     }
@@ -927,7 +1015,7 @@ impl App {
             ButtonId::DeleteMod => self.confirm_delete_mod(),
             ButtonId::ModSearch => self.open_mod_search_prompt(),
             ButtonId::UpdateMods => self.check_mod_updates(),
-            ButtonId::BrowseMods => self.run_mod_search(String::new()),
+            ButtonId::BrowseMods => self.open_nav(Nav::Browse),
             ButtonId::OfflineLogin => self.open_offline_login(),
             ButtonId::MicrosoftLogin => self.start_microsoft_login(),
             ButtonId::SetActiveAccount => self.set_active_account(),
@@ -949,6 +1037,7 @@ impl App {
         }
         match self.nav {
             Nav::Instances => self.scroll_tiles(delta),
+            Nav::Browse => self.browse_scroll(delta),
             Nav::Versions => {}
             Nav::Modpacks => {
                 let step = delta * 4;
@@ -1228,6 +1317,7 @@ impl App {
         match action {
             TextAction::SearchModrinth => self.run_search(text),
             TextAction::SearchMods => self.run_mod_search(text),
+            TextAction::BrowseSearch => self.run_browse_search(text),
             TextAction::SearchLogs => {
                 self.log_search = text.clone();
                 self.log_buffer.filter.search = (!text.is_empty()).then_some(text);
@@ -1831,7 +1921,7 @@ impl App {
         self.progress = Some((None, format!("Searching '{query}'...")));
         tokio::spawn(async move {
             let result = modrinth
-                .search(&query, Some("modpack"), None, None, 30, 0)
+                .search(&query, Some("modpack"), None, None, None, 30, 0)
                 .await;
             let _ = tx.send(EngineEvent::ProgressDone);
             match result {
@@ -2108,6 +2198,7 @@ impl App {
                     Some("mod"),
                     Some(&game_version),
                     Some(&loader),
+                    None,
                     30,
                     0,
                 )
@@ -2119,6 +2210,263 @@ impl App {
                 }
                 Err(err) => {
                     let _ = tx.send(EngineEvent::Error(format!("Search failed: {err}")));
+                }
+            }
+        });
+    }
+
+    // ---------------------------------------------------------------------
+    // Actions: Modrinth browser
+    // ---------------------------------------------------------------------
+
+    /// Navigate to the browser, loading the first page of popular projects for
+    /// the active content type when nothing is loaded yet.
+    pub(crate) fn open_browse(&mut self) {
+        if self.browse.results.is_empty() && !self.browse.loading {
+            self.browse_load_first_page();
+        }
+    }
+
+    pub(crate) fn open_browse_search(&mut self) {
+        self.overlay = Some(Overlay::text(
+            format!("Search {}", self.browse.kind.label()),
+            "Query (empty = popular): ",
+            TextAction::BrowseSearch,
+        ));
+    }
+
+    pub(crate) fn run_browse_search(&mut self, query: String) {
+        self.browse.query = query.trim().to_string();
+        self.browse_close_detail();
+        self.browse_load_first_page();
+    }
+
+    pub(crate) fn browse_query_reset(&mut self) {
+        self.browse.query = String::new();
+    }
+
+    pub(crate) fn browse_load_first_page(&mut self) {
+        self.browse.results.clear();
+        self.browse.selected = 0;
+        self.browse.offset = 0;
+        self.browse.total = 0;
+        self.browse_do_search(0);
+    }
+
+    pub(crate) fn browse_load_more(&mut self) {
+        if self.browse.loading {
+            return;
+        }
+        if self.browse.offset as usize >= self.browse.total as usize && self.browse.total > 0 {
+            return;
+        }
+        self.browse_do_search(self.browse.offset);
+    }
+
+    fn browse_do_search(&mut self, offset: u32) {
+        let kind = self.browse.kind;
+        let query = self.browse.query.clone();
+        let modrinth = self.modrinth.clone();
+        let tx = self.engine_tx.clone();
+        self.browse.loading = true;
+        let label = if query.is_empty() {
+            format!("Loading popular {}...", kind.label())
+        } else {
+            format!("Searching '{}'...", query)
+        };
+        self.progress = Some((None, label));
+        tokio::spawn(async move {
+            let result = modrinth
+                .search(&query, Some(kind.project_type()), None, None, Some(kind.sort()), 30, offset)
+                .await;
+            let _ = tx.send(EngineEvent::ProgressDone);
+            match result {
+                Ok(results) => {
+                    let _ = tx.send(EngineEvent::BrowseResults(results));
+                }
+                Err(err) => {
+                    let _ = tx.send(EngineEvent::BrowseResults(SearchResults {
+                        hits: Vec::new(),
+                        offset,
+                        limit: 30,
+                        total_hits: 0,
+                    }));
+                    let _ = tx.send(EngineEvent::Error(format!("Search failed: {err}")));
+                }
+            }
+        });
+    }
+
+    pub(crate) fn browse_open_selected(&mut self) {
+        let Some(hit) = self.browse.results.get(self.browse.selected).cloned() else {
+            return;
+        };
+        self.browse_open_project(&hit.project_id);
+    }
+
+    fn browse_open_project(&mut self, id: &str) {
+        let id = id.to_string();
+        let modrinth = self.modrinth.clone();
+        let tx = self.engine_tx.clone();
+        self.progress = Some((None, "Loading project...".into()));
+        tokio::spawn(async move {
+            let result = async {
+                let project = modrinth.project(&id).await?;
+                let versions = modrinth.versions_filtered(&project.id, None, None).await?;
+                Ok::<_, CoreError>((project, versions))
+            }
+            .await;
+            let _ = tx.send(EngineEvent::ProgressDone);
+            match result {
+                Ok((project, versions)) => {
+                    let _ = tx.send(EngineEvent::BrowseProject {
+                        project: Box::new(project),
+                        versions,
+                    });
+                }
+                Err(err) => {
+                    let _ = tx.send(EngineEvent::Error(format!("Load failed: {err}")));
+                }
+            }
+        });
+    }
+
+    pub(crate) fn browse_close_detail(&mut self) {
+        self.browse.detail = None;
+        self.browse.versions.clear();
+        self.browse.version_selected = 0;
+        self.browse.focus = BrowseFocus::List;
+        self.browse.body.clear();
+        self.browse.body_for = String::new();
+        self.browse.body_scroll = 0;
+    }
+
+    /// Kick off fetches for the project icon and a couple of gallery images.
+    fn browse_fetch_images(&mut self) {
+        let Some(project) = self.browse.detail.clone() else {
+            return;
+        };
+        let mut urls: Vec<String> = Vec::new();
+        if let Some(url) = project.icon_url {
+            urls.push(url);
+        }
+        for image in project.gallery.iter().take(2) {
+            urls.push(image.url.clone());
+        }
+        for url in urls {
+            self.browse_fetch_image(url.as_str());
+        }
+    }
+
+    pub(crate) fn browse_fetch_image(&mut self, url: &str) {
+        let key = url.to_string();
+        if self.browse_images.contains_key(&key) {
+            return;
+        }
+        if !self.browse.image_requested.insert(key.clone()) {
+            return;
+        }
+        let modrinth = self.modrinth.clone();
+        let tx = self.engine_tx.clone();
+        tokio::spawn(async move {
+            let data = match modrinth.get_bytes(&key, 6 * 1024 * 1024).await {
+                Ok(bytes) => Some(bytes),
+                Err(_) => None,
+            };
+            let _ = tx.send(EngineEvent::BrowseImage {
+                url: key,
+                data,
+            });
+        });
+    }
+
+    /// Install the selected version: modpacks import a new build, everything
+    /// else installs a file into the selected instance's folder.
+    pub(crate) fn browse_install(&mut self) {
+        let Some(project) = self.browse.detail.clone() else {
+            self.set_toast("Open a project first", true);
+            return;
+        };
+        let Some(version) = self
+            .browse
+            .versions
+            .get(self.browse.version_selected)
+            .cloned()
+        else {
+            self.set_toast("No version selected", true);
+            return;
+        };
+        let title = project.title.clone();
+        let is_modpack = self.browse.kind == BrowseKind::Modpacks;
+
+        if is_modpack {
+            self.browse_close_detail();
+            self.install_modrinth_modpack(title, version);
+            return;
+        }
+
+        let Some(instance) = self.selected_instance().cloned() else {
+            self.set_toast("Select an instance in the Instances tab first", true);
+            return;
+        };
+        let dest_dir = match self.browse.kind {
+            BrowseKind::Mods => instance.mods_dir(),
+            BrowseKind::Resourcepacks => instance.resourcepacks_dir(),
+            _ => instance.shaders_dir(),
+        };
+        let game_version = instance.metadata.game_version.clone();
+        let loader = instance.metadata.loader.as_str().to_string();
+        let resolve_deps = self.browse.kind == BrowseKind::Mods;
+
+        let client = self.client.clone();
+        let modrinth = self.modrinth.clone();
+        let tx = self.engine_tx.clone();
+        let title = project.title.clone();
+        self.progress = Some((None, format!("Installing {}", version.name)));
+        tokio::spawn(async move {
+            let result: Result<Vec<String>, CoreError> = async {
+                let Some(file) = version.primary_file() else {
+                    return Err(CoreError::Modrinth(
+                        "version has no downloadable file".into(),
+                    ));
+                };
+                modrinth::install_version_file(&client, file, &dest_dir, None).await?;
+                let mut installed = vec![file.filename.clone()];
+                if resolve_deps {
+                    let deps = modrinth::resolve_dependencies(
+                        &modrinth,
+                        &version,
+                        Some(&game_version),
+                        Some(&loader),
+                        3,
+                    )
+                    .await?;
+                    for dep in deps {
+                        if let Some(dep_file) = dep.primary_file() {
+                            if modrinth::install_version_file(&client, dep_file, &dest_dir, None)
+                                .await
+                                .is_ok()
+                            {
+                                installed.push(dep_file.filename.clone());
+                            }
+                        }
+                    }
+                }
+                Ok(installed)
+            }
+            .await;
+            let _ = tx.send(EngineEvent::ProgressDone);
+            match result {
+                Ok(files) => {
+                    let _ = tx.send(EngineEvent::ModsChanged);
+                    let _ = tx.send(EngineEvent::Toast(format!(
+                        "Installed {} file(s) from {}",
+                        files.len(),
+                        title
+                    )));
+                }
+                Err(err) => {
+                    let _ = tx.send(EngineEvent::Error(format!("Install failed: {err}")));
                 }
             }
         });
@@ -2702,6 +3050,7 @@ impl App {
             Nav::Instances => self.render_instance_grid(frame, content),
             Nav::Accounts => self.render_accounts(frame, content),
             Nav::Launcher => self.render_settings(frame, content),
+            Nav::Browse => self.render_browse(frame, content),
             _ if self.selected_instance().is_none() => self.render_empty_state(frame, content),
             Nav::Mods => self.render_mods(frame, content),
             Nav::Modpacks => self.render_modpacks(frame, content),
@@ -2874,6 +3223,7 @@ impl App {
 
         let subtitle = match self.nav {
             Nav::Instances => "Instances".to_string(),
+            Nav::Browse => "Modrinth Browser".to_string(),
             Nav::Accounts => "Accounts".to_string(),
             Nav::Launcher => "Launcher Settings".to_string(),
             _ => self
@@ -3364,6 +3714,14 @@ fn footer_hints(nav: Nav) -> &'static [(&'static str, &'static str)] {
             ("r", "rename"),
             ("d", "delete"),
         ],
+        Nav::Browse => &[
+            ("1-4", "type"),
+            ("s", "search"),
+            ("Enter", "open"),
+            ("n", "next page"),
+            ("v", "versions"),
+            ("i", "install"),
+        ],
         Nav::Mods => &[
             ("t", "pane"),
             ("Space", "toggle"),
@@ -3639,6 +3997,231 @@ mod tests {
         // output contains neither.
         let text = buffer_text(&terminal);
         assert!(!text.contains('\x1b'), "escape bytes leaked into the log view");
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn browse_renders_list_and_detail() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        app.nav = Nav::Browse;
+
+        // Populate search results directly (no network round trip).
+        app.browse.results.push(SearchHit {
+            project_id: "abc123".into(),
+            project_type: "mod".into(),
+            slug: "demo-mod".into(),
+            author: "Someone".into(),
+            title: "Demo Mod".into(),
+            description: "A great demo mod".into(),
+            categories: vec!["utility".into()],
+            display_categories: vec!["utility".into()],
+            versions: vec!["1.0.0".into()],
+            downloads: 12345,
+            follows: 678,
+            icon_url: Some("https://img.modrinth.com/demo.png".into()),
+            date_created: String::new(),
+            date_modified: String::new(),
+            latest_version: Some("1.0.0".into()),
+            client_side: "".into(),
+            server_side: "".into(),
+            color: Some(0x00FF00),
+        });
+        app.browse.total = 1;
+        // A cached icon (even without truecolor the row must still render).
+        app.browse_images.insert(
+            "https://img.modrinth.com/demo.png".into(),
+            mc_core::img::RgbaImage {
+                width: 2,
+                height: 2,
+                pixels: vec![
+                    255, 0, 0, 255, 0, 255, 0, 255, //
+                    0, 0, 255, 255, 255, 255, 255, 255,
+                ],
+            },
+        );
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(buffer_text(&terminal).contains("Demo Mod"), "list title missing");
+
+        // Open the detail page with a markdown body, a version and an icon so the
+        // widget-based image rendering path is exercised.
+        app.browse.detail = Some(Project {
+            id: "abc123".into(),
+            slug: "demo-mod".into(),
+            title: "Demo Mod".into(),
+            description: "A great demo mod".into(),
+            body: "# Heading\n\nSome **bold** text.".into(),
+            project_type: "mod".into(),
+            categories: vec!["utility".into()],
+            additional_categories: vec!["Someone".into()],
+            client_side: "".into(),
+            server_side: "".into(),
+            downloads: 12345,
+            followers: 678,
+            icon_url: Some("https://img.modrinth.com/demo.png".into()),
+            color: Some(0x00FF00),
+            issues_url: None,
+            source_url: None,
+            wiki_url: None,
+            discord_url: None,
+            game_versions: vec!["1.21.1".into()],
+            loaders: vec!["fabric".into()],
+            versions: vec!["v1".into()],
+            published: String::new(),
+            updated: String::new(),
+            license: None,
+            gallery: Vec::new(),
+        });
+        app.browse.versions.push(Version {
+            id: "ver1".into(),
+            project_id: "abc123".into(),
+            name: "Demo Mod 1.0.0".into(),
+            version_number: "1.0.0".into(),
+            changelog: None,
+            date_published: String::new(),
+            downloads: 42,
+            version_type: "release".into(),
+            status: "listed".into(),
+            files: Vec::new(),
+            dependencies: Vec::new(),
+            game_versions: vec!["1.21.1".into()],
+            loaders: vec!["fabric".into()],
+        });
+        app.browse.focus = BrowseFocus::Body;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Demo Mod"), "detail title missing");
+        assert!(text.contains("Heading"), "markdown body missing");
+        assert!(text.contains("1.0.0"), "version list missing");
+        assert!(
+            app.browse_protocols.get("https://img.modrinth.com/demo.png").is_some(),
+            "icon render state was not created"
+        );
+        assert!(
+            text.contains('▀') || text.contains('▄'),
+            "half-block icon did not render"
+        );
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn browse_detail_with_realistic_data_small_terminal() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+
+        let mut terminal = Terminal::new(TestBackend::new(72, 22)).unwrap();
+        app.nav = Nav::Browse;
+
+        // A realistic markdown body: headings, tables, HTML, lists, emoji.
+        let mut body = String::new();
+        body.push_str("# A Very Long Mod Title That Keeps Going\n\n");
+        body.push_str("Some **bold** and `code` with a [link](https://example.com).\n\n");
+        body.push_str("| Col A | Col B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\n");
+        body.push_str("- item one\n- item two\n\n");
+        body.push_str("```\nfn main() {}\n```\n\n");
+        body.push_str("> quoted text here\n\n");
+        for i in 0..40 {
+            body.push_str(&format!("Paragraph {i} with some longer content that wraps around. 日志日志日志\n\n"));
+        }
+        body.push_str("<br>html line<br/>");
+        app.browse.detail = Some(Project {
+            id: "p1".into(),
+            slug: "big-mod".into(),
+            title: "Big Mod".into(),
+            description: "desc".into(),
+            body,
+            project_type: "mod".into(),
+            categories: Vec::new(),
+            additional_categories: vec!["Someone".into()],
+            client_side: "".into(),
+            server_side: "".into(),
+            downloads: 1000000,
+            followers: 50000,
+            icon_url: None,
+            color: None,
+            issues_url: None,
+            source_url: None,
+            wiki_url: None,
+            discord_url: None,
+            game_versions: vec!["1.21.1".into()],
+            loaders: vec!["fabric".into()],
+            versions: Vec::new(),
+            published: String::new(),
+            updated: "2026-01-01T00:00:00Z".into(),
+            license: None,
+            gallery: Vec::new(),
+        });
+        for i in 0..30 {
+            app.browse.versions.push(Version {
+                id: format!("v{i}"),
+                project_id: "p1".into(),
+                name: format!("Big Mod {i}"),
+                version_number: format!("1.0.{i}"),
+                changelog: None,
+                date_published: String::new(),
+                downloads: i as u64,
+                version_type: "release".into(),
+                status: "listed".into(),
+                files: Vec::new(),
+                dependencies: Vec::new(),
+                game_versions: vec!["1.21.1".into()],
+                loaders: vec!["fabric".into()],
+            });
+        }
+        app.browse.focus = BrowseFocus::Body;
+        for _ in 0..10 {
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            app.browse_scroll(1);
+            app.key_browse(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+            app.browse_version_move(3);
+        }
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn browse_is_reached_from_mods_and_esc_returns() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+
+        // The browser has no sidebar entry.
+        assert!(
+            !Nav::menu().iter().any(|n| *n == Nav::Browse),
+            "Browse must not appear in the sidebar menu"
+        );
+
+        // Opening it from the Mods page records Mods as the return page.
+        app.open_nav(Nav::Mods);
+        app.open_nav(Nav::Browse);
+        assert_eq!(app.browse_return, Nav::Mods);
+
+        // Esc returns to the origin page (list mode).
+        app.handle_view_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.nav, Nav::Mods);
 
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);
     }

@@ -429,7 +429,7 @@ impl App {
         self.progress = Some((None, format!("Searching '{query}'...")));
         tokio::spawn(async move {
             let result = modrinth
-                .search(&query, Some("modpack"), None, None, 30, 0)
+                .search(&query, Some("modpack"), None, None, None, 30, 0)
                 .await;
             let _ = tx.send(crate::engine::EngineEvent::ProgressDone);
             match result {

@@ -38,6 +38,19 @@ pub enum EngineEvent {
     SearchResults(SearchResults),
     /// Modrinth mod-search results (Mod Manager pane).
     ModSearchResults(SearchResults),
+    /// Modrinth browser page results (popular listing or search).
+    BrowseResults(SearchResults),
+    /// A project opened in the browser, with its available versions.
+    BrowseProject {
+        project: Box<Project>,
+        versions: Vec<Version>,
+    },
+    /// A fetched browser image (icon / gallery preview). The raw bytes are
+    /// kept so terminals with image support can display the original file.
+    BrowseImage {
+        url: String,
+        data: Option<Vec<u8>>,
+    },
     /// Version list for the version picker overlay.
     VersionList {
         target: crate::forms::PickerTarget,

@@ -199,6 +199,7 @@ impl Form {
 pub enum TextAction {
     SearchModrinth,
     SearchMods,
+    BrowseSearch,
     SearchLogs,
     ImportPath,
     JavaPath,

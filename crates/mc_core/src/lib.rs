@@ -7,6 +7,7 @@
 
 pub mod auth;
 pub mod error;
+pub mod img;
 pub mod install;
 pub mod instance;
 pub mod launch;

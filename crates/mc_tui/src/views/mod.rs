@@ -1,6 +1,7 @@
 //! Isolated UI screens.
 
 pub mod accounts;
+pub mod browse;
 pub mod instances;
 pub mod logs;
 pub mod modpacks;
