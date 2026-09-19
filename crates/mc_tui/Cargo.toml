@@ -19,3 +19,4 @@ ratatui.workspace = true
 crossterm.workspace = true
 reqwest.workspace = true
 serde.workspace = true
+unicode-width = "0.2"

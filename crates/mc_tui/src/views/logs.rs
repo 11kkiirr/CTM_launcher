@@ -9,8 +9,10 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Clear};
 use ratatui::Frame;
+use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, ButtonId, Focus};
 use crate::views::tab_row;
@@ -88,12 +90,16 @@ impl App {
         let wrap_w = (viewport.width as usize).saturating_sub(2).max(1);
 
         // Flatten the filtered log into wrapped display rows so every message
-        // stays inside the panel no matter how long it is.
+        // stays inside the panel no matter how long it is. Every fragment is
+        // width-aware (wide CJK chars count as two columns) and leaves room
+        // for the `time level [thread] ` prefix, so no line ever exceeds the
+        // viewport and wide characters never misalign the terminal buffer.
         let entries: Vec<&LogEntry> = self.log_buffer.visible().collect();
-        let total_height: usize = entries
-            .iter()
-            .map(|entry| wrapped_height(&entry.message, wrap_w))
-            .sum();
+        let mut total_height: usize = 0;
+        for entry in &entries {
+            let (_, _, _, _, height) = entry_layout(entry, wrap_w);
+            total_height += height;
+        }
         let max_scroll = total_height.saturating_sub(visible);
         if self.log_follow {
             self.log_scroll = max_scroll;
@@ -127,6 +133,7 @@ impl App {
         );
 
         if total == 0 {
+            frame.render_widget(Clear, viewport);
             frame.render_widget(
                 Paragraph::new(Span::styled(
                     "No log output yet. Launch a build or open a saved latest.log.",
@@ -142,14 +149,10 @@ impl App {
         let mut lines: Vec<Line> = Vec::new();
         let mut cursor = 0usize;
         for entry in entries {
-            let height = wrapped_height(&entry.message, wrap_w);
+            let (time, level, thread, prefix_w, height) = entry_layout(entry, wrap_w);
             if cursor + height > start {
+                let frags = display_chunks(&entry.message, wrap_w.saturating_sub(prefix_w).max(1));
                 let color = self.theme.log_level_color(entry.level);
-                let time = entry.timestamp.clone().unwrap_or_default();
-                let thread = entry.thread.clone().unwrap_or_default();
-                let prefix = format!("{time:>8} {:>5} [{thread}] ", entry.level.label());
-                let prefix_w = prefix.chars().count();
-                let frags = char_chunks(&entry.message, wrap_w);
                 for (fi, frag) in frags.iter().enumerate() {
                     let line_no = cursor + fi;
                     if line_no >= end {
@@ -160,7 +163,7 @@ impl App {
                             Line::from(vec![
                                 Span::styled(format!("{time:>8} "), self.theme.card_comment()),
                                 Span::styled(
-                                    format!("{:>5} ", entry.level.label()),
+                                    format!("{:>5} ", level),
                                     Style::default().fg(color).bg(self.theme.panel),
                                 ),
                                 Span::styled(format!("[{thread}] "), self.theme.card_dim()),
@@ -182,6 +185,10 @@ impl App {
                 break;
             }
         }
+        // Reset the viewport first: Paragraph only overwrites the cells its
+        // text touches, so short lines would otherwise leave leftovers from
+        // longer lines (or previous pages) behind.
+        frame.render_widget(Clear, viewport);
         frame.render_widget(Paragraph::new(lines).style(self.theme.card()), viewport);
     }
 
@@ -266,28 +273,91 @@ impl App {
     }
 }
 
-/// Number of display rows a message occupies when wrapped at `width` chars.
-fn wrapped_height(text: &str, width: usize) -> usize {
-    if width == 0 {
-        return 1;
+/// Display columns occupied by a single character. Tabs are normalised to one
+/// space so they never shift the cursor unpredictably.
+fn char_cols(c: char) -> usize {
+    if c == '\t' {
+        1
+    } else {
+        c.width().unwrap_or(1)
     }
-    text.chars().count().div_ceil(width).max(1)
 }
 
-/// Split `text` into fragments no wider than `width` chars (at least one).
-fn char_chunks(text: &str, width: usize) -> Vec<String> {
-    let chars: Vec<char> = text.chars().collect();
+/// Truncate `text` to at most `max` display columns.
+fn truncate_cols(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    let mut cols = 0;
+    for c in text.chars() {
+        let w = char_cols(c);
+        if cols + w > max {
+            break;
+        }
+        out.push(c);
+        cols += w;
+    }
+    out
+}
+
+/// Layout of a log entry: the `time level [thread] ` prefix (with the thread
+/// clamped so it never crowds out the message) and the number of wrapped rows
+/// the entry occupies.
+///
+/// Returns `(time, level, thread, prefix_cols, wrapped_rows)`.
+fn entry_layout(entry: &LogEntry, wrap_w: usize) -> (String, &'static str, String, usize, usize) {
+    let time = truncate_cols(entry.timestamp.clone().unwrap_or_default().as_str(), 8);
+    let level = entry.level.label();
+    let mut thread = entry.thread.clone().unwrap_or_default();
+    // 8 (time) + 1 + 5 (level) + 1 + `[` + `] ` = 18 columns of fixed prefix.
+    let max_thread = wrap_w.saturating_sub(18).max(1);
+    if thread.as_str().width() > max_thread {
+        thread = truncate_cols(thread.as_str(), max_thread.saturating_sub(1).max(1));
+        thread.push('…');
+    }
+    let prefix = format!("{time:>8} {level:>5} [{thread}] ");
+    let prefix_w = prefix.as_str().width();
+    let width = wrap_w.saturating_sub(prefix_w).max(1);
+    (time, level, thread, prefix_w, chunk_count(&entry.message, width))
+}
+
+/// Number of display rows `text` occupies when wrapped at `width` columns.
+fn chunk_count(text: &str, width: usize) -> usize {
+    if text.is_empty() {
+        return 1;
+    }
+    let width = width.max(1);
+    let mut count = 1;
+    let mut cols = 0;
+    for c in text.chars() {
+        let w = char_cols(c);
+        if cols > 0 && cols + w > width {
+            count += 1;
+            cols = 0;
+        }
+        cols += w;
+    }
+    count
+}
+
+/// Split `text` into fragments no wider than `width` display columns, counting
+/// wide characters at their real width and replacing tabs with spaces, so the
+/// fragments always match what the terminal renders.
+fn display_chunks(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        let end = (i + width).min(chars.len());
-        let mut frag = String::new();
-        for c in chars.iter().skip(i).take(end - i) {
-            frag.push(*c);
+    let mut cols = 0;
+    let mut frag = String::new();
+    for c in text.chars() {
+        let w = char_cols(c);
+        if cols > 0 && cols + w > width {
+            out.push(frag);
+            frag = String::new();
+            cols = 0;
         }
+        frag.push(if c == '\t' { ' ' } else { c });
+        cols += w;
+    }
+    if !frag.is_empty() {
         out.push(frag);
-        i = end;
     }
     if out.is_empty() {
         out.push(String::new());

@@ -3571,6 +3571,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn log_lines_stay_inside_viewport() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+
+        let mut long_x = String::new();
+        for _ in 0..300 {
+            long_x.push('x');
+        }
+        let wide_chunk = "你好世界这是一个测试日志消息 Привет мир! 日本語のログ ".to_string();
+        let wide_msg = vec![
+            wide_chunk.clone(),
+            wide_chunk.clone(),
+            wide_chunk.clone(),
+            wide_chunk.clone(),
+        ]
+        .join("");
+
+        app.log_buffer.push_line("[04:05:06] [main/INFO]: tab\tseparated\tvalues");
+        app.log_buffer.push_line(&format!(
+            "[01:02:03] [A very long thread name that just keeps going on and on]/ERROR]: {long_x}"
+        ));
+        for i in 0..6 {
+            app.log_buffer.push_line(&format!(
+                "[00:00:{i:02}] [Render thread/WARN]: {wide_msg}"
+            ));
+        }
+        app.log_buffer.push_line("\x1b[31m\x1b[1m[12:34:56] [main/INFO]: \x1b[0mstarting up");
+
+        let width: u16 = 100;
+        let height: u16 = 30;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        app.nav = Nav::Logs;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        // The 1-column gutter between the content column and the sidebar
+        // (`[Min(20), Length(1), Length(30)]`) is never painted by any widget;
+        // log text must never spill into it, no matter how long or how wide
+        // (CJK) the lines are.
+        let buffer = terminal.backend().buffer();
+        let gutter_x = width as usize - 31;
+        let mut leaked: Vec<(usize, String)> = Vec::new();
+        for (idx, cell) in buffer.content().iter().enumerate() {
+            let x = idx % (width as usize);
+            let y = idx / (width as usize);
+            if y >= 2
+                && y < (height as usize) - 1
+                && x == gutter_x
+                && cell.symbol() != " "
+            {
+                leaked.push((y, cell.symbol().to_string()));
+            }
+        }
+        assert!(
+            leaked.is_empty(),
+            "log text leaked into the gutter column: {leaked:?}"
+        );
+
+        // ANSI escapes are stripped and tabs normalised, so the visible log
+        // output contains neither.
+        let text = buffer_text(&terminal);
+        assert!(!text.contains('\x1b'), "escape bytes leaked into the log view");
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
     async fn mods_scan_and_toggle() {
         let paths = temp_paths();
         let client = reqwest::Client::new();
