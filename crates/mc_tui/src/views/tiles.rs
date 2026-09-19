@@ -2,20 +2,43 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 use mc_core::instance::Instance;
-use ratatui::layout::{Alignment, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, HitAction};
+use crate::app::{App, ButtonId, HitAction};
+use crate::views::buttons_row;
 
 const TILE_W: u16 = 24;
 const TILE_H: u16 = 7;
 const GAP: u16 = 1;
 
 impl App {
-    /// Render the grid of instance tiles plus a "New Build" tile.
+    /// Render the build action toolbar plus the grid of instance tiles.
     pub(crate) fn render_instance_grid(&mut self, frame: &mut Frame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(3)])
+            .split(area);
+
+        buttons_row(
+            self,
+            frame,
+            chunks[0].x + 1,
+            chunks[0].y,
+            area.x + area.width,
+            &[
+                ("Launch", ButtonId::Launch),
+                ("Install / Repair", ButtonId::InstallInstance),
+                ("New", ButtonId::NewInstance),
+                ("Edit", ButtonId::EditInstance),
+                ("Change Version", ButtonId::ChangeVersion),
+                ("Delete", ButtonId::DeleteInstance),
+            ],
+        );
+
+        let area = chunks[1];
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(ratatui::widgets::BorderType::Rounded)
@@ -196,7 +219,22 @@ impl App {
             }
             KeyCode::Char('g') => select(self, 0),
             KeyCode::Char('G') => select(self, len - 1),
-            KeyCode::Enter => self.select_instance(current),
+            KeyCode::Enter => {
+                self.select_instance(current);
+                self.launch_selected();
+            }
+            KeyCode::Char('i') => {
+                self.select_instance(current);
+                self.install_selected_instance();
+            }
+            KeyCode::Char('e') => {
+                self.select_instance(current);
+                self.open_edit_instance_form();
+            }
+            KeyCode::Char('d') => {
+                self.select_instance(current);
+                self.confirm_delete_instance();
+            }
             KeyCode::Char('n') => self.open_create_instance_form(),
             _ => {}
         }

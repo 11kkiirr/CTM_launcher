@@ -1,13 +1,18 @@
-//! Console / Logs screen: real-time game output, filtering and crash analysis.
+//! Console / Logs screen: real-time game output, filtering, scrolling and
+//! crash analysis.
+//!
+//! The console uses a simple viewport model instead of a selectable list: the
+//! whole text scrolls by several lines at a time, and "follow" mode keeps the
+//! view pinned to the newest output.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, ButtonId, HitAction};
-use crate::views::{buttons_row, hovered_index, jump, move_sel, register_rows, row_style};
+use crate::app::{App, ButtonId};
+use crate::views::buttons_row;
 use mc_core::logs::LogLevel;
 
 impl App {
@@ -26,6 +31,11 @@ impl App {
         } else {
             "Pause"
         };
+        let follow_label = if self.log_follow {
+            "Unfollow"
+        } else {
+            "Follow"
+        };
         buttons_row(
             self,
             frame,
@@ -34,6 +44,7 @@ impl App {
             area.x + area.width,
             &[
                 (pause_label, ButtonId::PauseLogs),
+                (follow_label, ButtonId::FollowLogs),
                 ("Clear", ButtonId::ClearLogs),
                 ("Analyze Crash", ButtonId::AnalyzeCrash),
             ],
@@ -55,28 +66,67 @@ impl App {
         } else {
             ""
         };
-        let title = format!(
-            " Console {running}{paused} — {total} lines · min {} ",
-            self.log_buffer.filter.min_level.label()
-        );
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(self.theme.block_border())
-            .title(Line::from(title).style(self.theme.header()));
+            .border_style(self.theme.block_border());
         let inner = block.inner(area);
 
-        let selected = self.log_state.selected();
-        let hovered = hovered_index(self, inner, self.log_state.offset(), total);
-        let items: Vec<ListItem> = self
+        let visible = inner.height as usize;
+        self.log_visible = visible;
+        let max_scroll = total.saturating_sub(visible);
+        if self.log_follow {
+            self.log_scroll = max_scroll;
+        } else {
+            self.log_scroll = self.log_scroll.min(max_scroll);
+        }
+        let start = self.log_scroll;
+        let shown = visible.min(total.saturating_sub(start));
+        let end = start + shown;
+        let new_below = total.saturating_sub(end);
+
+        let follow = if self.log_follow {
+            " · FOLLOW".to_string()
+        } else if new_below > 0 {
+            format!(" · ↓{new_below} new")
+        } else {
+            " · PAUSED".to_string()
+        };
+        let title = if total == 0 {
+            format!(" Console {running}{paused}{follow} ")
+        } else {
+            format!(
+                " Console {running}{paused}{follow} — lines {}-{} / {total} · min {} ",
+                start + 1,
+                end,
+                self.log_buffer.filter.min_level.label()
+            )
+        };
+        let block = block.title(Line::from(title).style(self.theme.header()));
+        frame.render_widget(block, area);
+
+        if total == 0 {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "No log output yet. Launch a build or open a saved latest.log.",
+                    self.theme.dim(),
+                ))
+                .style(self.theme.base()),
+                inner,
+            );
+            return;
+        }
+
+        let lines: Vec<Line> = self
             .log_buffer
             .visible()
-            .enumerate()
-            .map(|(idx, entry)| {
+            .skip(start)
+            .take(visible)
+            .map(|entry| {
                 let color = self.theme.log_level_color(entry.level);
                 let time = entry.timestamp.clone().unwrap_or_default();
                 let thread = entry.thread.clone().unwrap_or_default();
-                ListItem::new(Line::from(vec![
+                Line::from(vec![
                     Span::styled(format!("{time:>8} "), self.theme.dim()),
                     Span::styled(
                         format!("{:>5} ", entry.level.label()),
@@ -84,31 +134,13 @@ impl App {
                     ),
                     Span::styled(format!("[{thread}] "), self.theme.dim()),
                     Span::styled(entry.message.clone(), self.theme.base()),
-                ]))
-                .style(row_style(self, idx, selected, hovered))
+                ])
             })
             .collect();
 
-        let list = List::new(items).block(block);
-        frame.render_stateful_widget(list, area, &mut self.log_state);
-        register_rows(
-            &mut self.hitboxes,
-            &self.log_state,
-            inner,
-            total,
-            HitAction::LogRow,
-        );
-
-        if total == 0 {
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    "No log output yet. Launch an instance or open a saved latest.log.",
-                    self.theme.dim(),
-                ))
-                .style(self.theme.base()),
-                inner,
-            );
-        }
+        // No wrapping: each entry occupies exactly one row and long lines are
+        // truncated, so the viewport never overflows the panel.
+        frame.render_widget(Paragraph::new(lines).style(self.theme.base()), inner);
     }
 
     fn render_log_status(&mut self, frame: &mut Frame, area: Rect) {
@@ -137,7 +169,7 @@ impl App {
                 ),
                 Span::styled(format!("   {filter}"), self.theme.dim()),
                 Span::styled(
-                    format!("   total buffered: {}", self.log_buffer.len()),
+                    format!("   buffered: {}", self.log_buffer.len()),
                     self.theme.dim(),
                 ),
             ]),
@@ -147,16 +179,21 @@ impl App {
     }
 
     pub(crate) fn key_logs(&mut self, key: KeyEvent) {
-        let len = self.log_buffer.visible().count();
+        let page = self.log_visible.max(1) as i32;
         match key.code {
-            KeyCode::Down | KeyCode::Char('j') => move_sel(&mut self.log_state, len, 1),
-            KeyCode::Up | KeyCode::Char('k') => move_sel(&mut self.log_state, len, -1),
-            KeyCode::PageDown => move_sel(&mut self.log_state, len, 15),
-            KeyCode::PageUp => move_sel(&mut self.log_state, len, -15),
-            KeyCode::Char('g') => jump(&mut self.log_state, len, false),
-            KeyCode::Char('G') => jump(&mut self.log_state, len, true),
+            KeyCode::Down | KeyCode::Char('j') => self.scroll_logs(1),
+            KeyCode::Up | KeyCode::Char('k') => self.scroll_logs(-1),
+            KeyCode::PageDown => self.scroll_logs(page),
+            KeyCode::PageUp => self.scroll_logs(-page),
+            KeyCode::Home | KeyCode::Char('g') => self.jump_logs(false),
+            KeyCode::End | KeyCode::Char('G') => self.jump_logs(true),
+            KeyCode::Char('f') => self.log_follow = !self.log_follow,
             KeyCode::Char('p') => self.log_buffer.paused = !self.log_buffer.paused,
-            KeyCode::Char('c') => self.log_buffer.clear(),
+            KeyCode::Char('c') => {
+                self.log_buffer.clear();
+                self.log_scroll = 0;
+                self.log_follow = true;
+            }
             KeyCode::Char('/') => {
                 self.overlay = Some(crate::forms::Overlay::text(
                     "Filter Logs",

@@ -40,10 +40,8 @@ pub const CLIENT_ID: &str = mc_core::auth::microsoft::DEFAULT_CLIENT_ID;
 /// The first group is global, the second is scoped to the selected build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Nav {
-    /// Instance picker (home).
+    /// Instance picker (home) with the build action toolbar.
     Instances,
-    /// Selected build's summary and launch action.
-    Overview,
     /// Mod manager.
     Mods,
     /// Modpack browser / `.mrpack` import.
@@ -61,10 +59,9 @@ pub enum Nav {
 }
 
 impl Nav {
-    pub fn all() -> [Nav; 9] {
+    pub fn all() -> [Nav; 8] {
         [
             Nav::Instances,
-            Nav::Overview,
             Nav::Mods,
             Nav::Modpacks,
             Nav::Versions,
@@ -76,21 +73,13 @@ impl Nav {
     }
 
     /// Build-scoped pages, in tab order.
-    pub fn build_pages() -> [Nav; 6] {
-        [
-            Nav::Overview,
-            Nav::Mods,
-            Nav::Modpacks,
-            Nav::Versions,
-            Nav::Jvm,
-            Nav::Logs,
-        ]
+    pub fn build_pages() -> [Nav; 5] {
+        [Nav::Mods, Nav::Modpacks, Nav::Versions, Nav::Jvm, Nav::Logs]
     }
 
     pub fn label(&self) -> &'static str {
         match self {
             Nav::Instances => "Instances",
-            Nav::Overview => "Overview",
             Nav::Mods => "Mods",
             Nav::Modpacks => "Modpacks",
             Nav::Versions => "Versions",
@@ -104,7 +93,6 @@ impl Nav {
     pub fn icon(&self) -> &'static str {
         match self {
             Nav::Instances => "⌂",
-            Nav::Overview => "▤",
             Nav::Mods => "✦",
             Nav::Modpacks => "⛁",
             Nav::Versions => "❖",
@@ -119,7 +107,7 @@ impl Nav {
     pub fn is_build_scoped(&self) -> bool {
         matches!(
             self,
-            Nav::Overview | Nav::Mods | Nav::Modpacks | Nav::Versions | Nav::Jvm | Nav::Logs
+            Nav::Mods | Nav::Modpacks | Nav::Versions | Nav::Jvm | Nav::Logs
         )
     }
 }
@@ -143,7 +131,6 @@ pub enum HitAction {
     ModSearchRow(usize),
     AccountRow(usize),
     SettingsRow(usize),
-    LogRow(usize),
     Button(ButtonId),
 }
 
@@ -170,6 +157,7 @@ pub enum ButtonId {
     ChangeSkin,
     ClearLogs,
     PauseLogs,
+    FollowLogs,
     AnalyzeCrash,
     SaveSettings,
     EditSettings,
@@ -258,7 +246,12 @@ pub struct App {
     pub mods_state: ListState,
 
     pub log_buffer: LogBuffer,
-    pub log_state: ListState,
+    /// Index of the first visible log line.
+    pub log_scroll: usize,
+    /// When true the view sticks to the newest line.
+    pub log_follow: bool,
+    /// Number of visible log rows from the last render.
+    pub log_visible: usize,
     pub log_search: String,
 
     pub crash_analysis: Option<CrashAnalysis>,
@@ -320,7 +313,9 @@ impl App {
             installed_mods: Vec::new(),
             mods_state: ListState::default(),
             log_buffer: LogBuffer::new(5000),
-            log_state: ListState::default(),
+            log_scroll: 0,
+            log_follow: true,
+            log_visible: 0,
             log_search: String::new(),
             crash_analysis: None,
             running: None,
@@ -459,12 +454,6 @@ impl App {
             changed = true;
         }
 
-        if had_lines && self.settings.log_auto_scroll {
-            let len = self.log_buffer.visible().count();
-            if len > 0 {
-                self.log_state.select(Some(len - 1));
-            }
-        }
         changed
     }
 
@@ -702,7 +691,6 @@ impl App {
         }
         match self.nav {
             Nav::Instances => self.key_instance_grid(key),
-            Nav::Overview => self.key_overview(key),
             Nav::Mods => self.key_mods(key),
             Nav::Modpacks => self.key_modpacks(key),
             Nav::Versions => self.key_versions(key),
@@ -807,22 +795,17 @@ impl App {
                 self.settings_field = idx;
                 self.focus = Focus::Content;
             }
-            HitAction::LogRow(idx) => {
-                self.log_state.select(Some(idx));
-                self.focus = Focus::Content;
-            }
             HitAction::Button(button) => self.dispatch_button(button),
         }
     }
 
-    /// Select an instance from the tile grid and open its Overview.
+    /// Select an instance from the tile grid.
     pub(crate) fn select_instance(&mut self, idx: usize) {
         if idx >= self.instances.len() {
             return;
         }
         self.instance_state.select(Some(idx));
         self.focus = Focus::Content;
-        self.nav = Nav::Overview;
         self.reload_mods();
     }
 
@@ -848,6 +831,7 @@ impl App {
             ButtonId::ChangeSkin => self.open_skin_prompt(),
             ButtonId::ClearLogs => self.log_buffer.clear(),
             ButtonId::PauseLogs => self.log_buffer.paused = !self.log_buffer.paused,
+            ButtonId::FollowLogs => self.log_follow = !self.log_follow,
             ButtonId::AnalyzeCrash => self.analyze_crash(),
             ButtonId::SaveSettings => self.save_settings(),
             ButtonId::EditSettings => self.open_settings_form(),
@@ -861,7 +845,7 @@ impl App {
         }
         match self.nav {
             Nav::Instances => self.scroll_tiles(delta),
-            Nav::Overview | Nav::Versions => {}
+            Nav::Versions => {}
             Nav::Modpacks => {
                 if self.selected_project.is_some() {
                     move_selection(&mut self.project_state, self.project_versions.len(), delta);
@@ -880,10 +864,7 @@ impl App {
                     move_selection(&mut self.mods_state, self.installed_mods.len(), delta);
                 }
             }
-            Nav::Logs => {
-                let len = self.log_buffer.visible().count();
-                move_selection(&mut self.log_state, len, delta);
-            }
+            Nav::Logs => self.scroll_logs(delta * 3),
             Nav::Jvm => {
                 let len = settings_field_count();
                 let next = (self.settings_field as i32 + delta).clamp(0, len as i32 - 1) as usize;
@@ -906,6 +887,31 @@ impl App {
         let rows = self.tile_rows();
         let next = (self.tile_scroll as i32 + delta).clamp(0, rows.saturating_sub(1) as i32);
         self.tile_scroll = next as usize;
+    }
+
+    /// Scroll the log viewport by `delta` lines (positive = towards newest).
+    pub(crate) fn scroll_logs(&mut self, delta: i32) {
+        let total = self.log_buffer.visible().count();
+        let visible = self.log_visible.max(1);
+        let max_scroll = total.saturating_sub(visible);
+        let base = if self.log_follow {
+            max_scroll
+        } else {
+            self.log_scroll
+        };
+        let next = (base as i32 + delta).clamp(0, max_scroll as i32) as usize;
+        self.log_scroll = next;
+        self.log_follow = next >= max_scroll;
+    }
+
+    /// Jump the log viewport to the very top or bottom.
+    pub(crate) fn jump_logs(&mut self, to_end: bool) {
+        if to_end {
+            self.log_follow = true;
+        } else {
+            self.log_scroll = 0;
+            self.log_follow = false;
+        }
     }
 
     /// Total number of tile rows for the current instance count.
@@ -2336,27 +2342,28 @@ impl App {
         let lines = vec![
             "Navigation (right panel)".to_string(),
             "  ↑↓ / jk      move through the navigation panel".to_string(),
-            "  1-6          build pages: Overview/Mods/Modpacks/Versions/JVM/Logs".to_string(),
+            "  1-5          build pages: Mods/Modpacks/Versions/JVM/Logs".to_string(),
             "  F2 / F3      Accounts / Launcher Settings".to_string(),
             "  Esc          back to the Instances page".to_string(),
             "  Tab          toggle panel/content focus".to_string(),
             "  Enter        primary action".to_string(),
             "  q / Ctrl-C   quit".to_string(),
             String::new(),
-            "Instances (main area)".to_string(),
-            "  arrows/hjkl  move between build tiles · Enter open".to_string(),
-            "  n            New Build wizard (Clean / .mrpack / Modrinth)".to_string(),
+            "Instances (main area + toolbar)".to_string(),
+            "  arrows/hjkl  move between build tiles".to_string(),
+            "  Enter        launch the selected build".to_string(),
+            "  n new · i install · e edit · d delete · toolbar has Change Version".to_string(),
             String::new(),
-            "Overview".to_string(),
-            "  Enter/l launch · i install · e edit · d delete".to_string(),
-            String::new(),
-            "Mods / Logs / Versions".to_string(),
+            "Mods / Modpacks / Versions / JVM".to_string(),
             "  Mods: t pane · Space toggle · s search · u updates · d delete".to_string(),
-            "  Logs: p pause · c clear · / filter · a analyze crash".to_string(),
+            "  Modpacks: / search · Enter open · i install · m import .mrpack".to_string(),
             "  Versions: c change version · r reinstall".to_string(),
             String::new(),
-            "Mouse: hover highlights; click tiles, nav items, lists and buttons;".to_string(),
-            "       scroll to move through lists and tiles.".to_string(),
+            "Logs".to_string(),
+            "  j/k or wheel scroll · PgUp/PgDn page · g/G top/bottom".to_string(),
+            "  f follow · p pause · c clear · / filter · a analyze crash · l level".to_string(),
+            String::new(),
+            "Mouse: hover highlights; click tiles, nav items, lists and buttons.".to_string(),
         ];
         self.overlay = Some(Overlay::message("Help", lines));
     }
@@ -2428,7 +2435,6 @@ impl App {
             Nav::Accounts => self.render_accounts(frame, content),
             Nav::Launcher => self.render_settings(frame, content),
             _ if self.selected_instance().is_none() => self.render_empty_state(frame, content),
-            Nav::Overview => self.render_overview(frame, content),
             Nav::Mods => self.render_mods(frame, content),
             Nav::Modpacks => self.render_modpacks(frame, content),
             Nav::Versions => self.render_versions(frame, content),
@@ -2602,13 +2608,12 @@ impl App {
             .split(area);
 
         let hint = match self.nav {
-            Nav::Instances => "Enter select · n new build · arrows navigate · Tab panel",
-            Nav::Overview => "Enter/l launch · i install · e edit · d delete · n new",
+            Nav::Instances => "Enter launch · n new · i install · e edit · d delete · arrows move",
             Nav::Mods => "t pane · Space toggle · s search · u updates · d delete",
             Nav::Modpacks => "/ search · Enter open · i install · m import .mrpack",
             Nav::Versions => "c change version · r reinstall",
             Nav::Jvm => "Enter edit · j/k move · s save · J detect Java",
-            Nav::Logs => "p pause · c clear · / filter · a crash · g/G top/bottom",
+            Nav::Logs => "j/k scroll · PgUp/PgDn page · g/G top/bottom · f follow · / filter",
             Nav::Accounts => "n offline · m Microsoft · Enter set active · c skin · d remove",
             Nav::Launcher => "Enter edit · j/k move · s save · J detect Java",
         };
@@ -2939,14 +2944,14 @@ mod tests {
         }
 
         // Build info panel shows the selected build.
-        app.nav = Nav::Overview;
+        app.nav = Nav::Versions;
         terminal.draw(|frame| app.render(frame)).unwrap();
         assert!(buffer_text(&terminal).contains("Demo"));
 
         // Empty-state rendering when no instance is selected.
         app.instances.clear();
         app.instance_state.select(None);
-        app.nav = Nav::Overview;
+        app.nav = Nav::Versions;
         terminal.draw(|frame| app.render(frame)).unwrap();
         assert!(buffer_text(&terminal).contains("No build selected"));
 
@@ -2998,6 +3003,50 @@ mod tests {
             "picker title missing"
         );
         assert!(content.contains("1.21.1"), "picker item missing");
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn instances_toolbar_and_log_scroll() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.instance_state.select(Some(0));
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+
+        // Instances page shows the build action toolbar.
+        app.nav = Nav::Instances;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let content = buffer_text(&terminal);
+        assert!(content.contains("Launch"), "launch button missing");
+        assert!(
+            content.contains("Install / Repair"),
+            "install button missing"
+        );
+
+        // Logs: follow pins to the bottom, scrolling up detaches and moves.
+        for i in 0..200 {
+            app.log_buffer.push_line(&format!("line {i}"));
+        }
+        app.nav = Nav::Logs;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(app.log_follow, "should follow by default");
+        assert!(app.log_visible > 0);
+
+        let bottom = app.log_scroll;
+        app.scroll_logs(-5);
+        assert!(!app.log_follow, "scrolling up should stop following");
+        assert_eq!(app.log_scroll, bottom.saturating_sub(5));
+        assert!(bottom > 0);
+
+        app.jump_logs(true);
+        assert!(app.log_follow, "jump to bottom re-enables follow");
 
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);
     }
