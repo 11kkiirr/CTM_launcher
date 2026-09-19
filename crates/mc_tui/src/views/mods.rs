@@ -56,6 +56,7 @@ impl App {
         };
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(border)
             .title(Line::from(title).style(self.theme.header()));
         let inner = block.inner(area);
@@ -118,6 +119,7 @@ impl App {
         };
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(border)
             .title(Line::from(title).style(self.theme.header()));
         let inner = block.inner(area);

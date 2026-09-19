@@ -7,6 +7,7 @@ mod settings;
 mod theme;
 mod views;
 mod widgets;
+mod wizard;
 
 use std::io;
 

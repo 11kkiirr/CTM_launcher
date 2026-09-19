@@ -67,6 +67,7 @@ impl App {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(self.theme.block_border())
             .title(Line::from(" Launcher Settings ").style(self.theme.header()));
         let inner = block.inner(area);
@@ -117,6 +118,7 @@ impl App {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(self.theme.block_border())
             .title(
                 Line::from(format!(

@@ -55,6 +55,7 @@ impl App {
         };
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(self.theme.block_border())
             .title(Line::from(title).style(self.theme.header()));
         let inner = block.inner(area);
@@ -102,6 +103,7 @@ impl App {
             .unwrap_or_else(|| " Versions ".to_string());
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(self.theme.block_border())
             .title(Line::from(title).style(self.theme.header()));
         let inner = block.inner(area);
@@ -143,6 +145,7 @@ impl App {
     fn render_search_info(&mut self, frame: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(self.theme.block_border())
             .title(Line::from(" Details ").style(self.theme.header()));
         let inner = block.inner(area);
@@ -189,6 +192,7 @@ impl App {
     fn render_project_info(&mut self, frame: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(self.theme.block_border())
             .title(Line::from(" Project ").style(self.theme.header()));
         let inner = block.inner(area);

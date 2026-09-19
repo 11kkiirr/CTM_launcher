@@ -40,6 +40,7 @@ pub fn render_popup(
     frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(theme.green))
         .title(Line::from(format!(" {title} ")).style(theme.header()))
         .style(Style::default().bg(theme.bg_alt));

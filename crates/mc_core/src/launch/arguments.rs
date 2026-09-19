@@ -213,7 +213,7 @@ pub fn classpath(paths: &Paths, details: &VersionDetails, rule_ctx: &RuleContext
             // Legacy libraries without explicit downloads still have a Maven path.
             if library.url.is_some() {
                 if let Ok(rel) = library.relative_path() {
-                    entries.push(paths.libraries_dir().join(rel));
+                    push_unique(&mut entries, paths.libraries_dir().join(rel));
                 }
             }
             continue;
@@ -223,11 +223,18 @@ pub fn classpath(paths: &Paths, details: &VersionDetails, rule_ctx: &RuleContext
             .clone()
             .unwrap_or_else(|| library.relative_path().unwrap_or_default());
         if !rel.is_empty() {
-            entries.push(paths.libraries_dir().join(rel));
+            push_unique(&mut entries, paths.libraries_dir().join(rel));
         }
     }
 
     entries
+}
+
+/// Push a path only if it is not already present (classpath must be unique).
+fn push_unique(entries: &mut Vec<PathBuf>, path: PathBuf) {
+    if !entries.contains(&path) {
+        entries.push(path);
+    }
 }
 
 /// Resolve the vanilla client jar location from the merged version document.

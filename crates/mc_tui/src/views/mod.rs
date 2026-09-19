@@ -7,6 +7,7 @@ pub mod modpacks;
 pub mod mods;
 pub mod settings;
 pub mod tiles;
+pub mod versions;
 
 use ratatui::layout::Rect;
 use ratatui::style::Style;

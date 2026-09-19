@@ -363,6 +363,20 @@ impl Library {
         Ok(format!("{group_path}/{artifact}/{version}/{file}"))
     }
 
+    /// Identity of the library ignoring its version: `group:artifact[:classifier]`.
+    ///
+    /// Used to deduplicate libraries when merging inherited version documents,
+    /// where a child (e.g. NeoForge) may override a vanilla dependency.
+    pub fn coordinate_key(&self) -> String {
+        match self.coordinate() {
+            Ok((group, artifact, _version, classifier)) => match classifier {
+                Some(c) => format!("{group}:{artifact}:{c}"),
+                None => format!("{group}:{artifact}"),
+            },
+            Err(_) => self.name.clone(),
+        }
+    }
+
     /// Resolve the native classifier for the current OS, if any.
     pub fn native_classifier(&self, ctx: &RuleContext) -> Option<String> {
         let natives = self.natives.as_ref()?;

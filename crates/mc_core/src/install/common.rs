@@ -61,7 +61,12 @@ pub async fn download_libraries(
     let lib_root = paths.libraries_dir();
     let mut futures = Vec::new();
 
-    for library in libraries {
+    // Deduplicate by coordinate so the same artifact is never fetched (and
+    // written) twice concurrently.
+    let mut libraries = libraries.to_vec();
+    dedup_libraries(&mut libraries);
+
+    for library in &libraries {
         if !library.applies(rule_ctx) {
             continue;
         }
@@ -194,6 +199,24 @@ pub async fn resolve_version(paths: &Paths, id: &str) -> Result<VersionDetails> 
     Ok(merged)
 }
 
+/// Remove duplicate libraries by coordinate (ignoring version), keeping the
+/// last occurrence so loader-provided overrides win.
+pub fn dedup_libraries(libraries: &mut Vec<Library>) {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut deduped: Vec<Library> = Vec::with_capacity(libraries.len());
+    for library in libraries.drain(..) {
+        let key = library.coordinate_key();
+        match seen.get(&key) {
+            Some(&idx) => deduped[idx] = library,
+            None => {
+                seen.insert(key, deduped.len());
+                deduped.push(library);
+            }
+        }
+    }
+    *libraries = deduped;
+}
+
 /// Merge `child` on top of `parent` (parent already in `base`).
 fn merge_versions(base: &mut VersionDetails, child: VersionDetails) {
     if !child.main_class.is_empty() {
@@ -217,8 +240,11 @@ fn merge_versions(base: &mut VersionDetails, child: VersionDetails) {
     base.id = child.id;
     base.inherits_from = None;
 
-    // Libraries from the parent first, then the child.
+    // Libraries from the parent first, then the child. Duplicates are removed
+    // with the child (later) entry winning, so loader overrides take effect and
+    // the classpath contains each artifact exactly once.
     base.libraries.extend(child.libraries);
+    dedup_libraries(&mut base.libraries);
 
     match (base.arguments.as_mut(), child.arguments) {
         (Some(base_args), Some(child_args)) => {
@@ -272,5 +298,45 @@ pub fn require_exists(path: &Path, what: &str) -> Result<()> {
         Ok(())
     } else {
         Err(CoreError::NotFound(format!("{what} at {}", path.display())))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lib(name: &str) -> Library {
+        Library {
+            name: name.to_string(),
+            downloads: Default::default(),
+            rules: Vec::new(),
+            natives: None,
+            extract: None,
+            url: None,
+        }
+    }
+
+    #[test]
+    fn dedup_keeps_child_override() {
+        let mut libraries = vec![
+            lib("com.google.code.gson:gson:2.10.1"),
+            lib("org.ow2.asm:asm:9.6"),
+            lib("com.google.code.gson:gson:2.11.0"),
+        ];
+        dedup_libraries(&mut libraries);
+        assert_eq!(libraries.len(), 2);
+        // The later (child) version wins and keeps the original position.
+        assert_eq!(libraries[0].name, "com.google.code.gson:gson:2.11.0");
+        assert_eq!(libraries[1].name, "org.ow2.asm:asm:9.6");
+    }
+
+    #[test]
+    fn dedup_treats_classifiers_as_distinct() {
+        let mut libraries = vec![
+            lib("org.lwjgl:lwjgl:3.3.3"),
+            lib("org.lwjgl:lwjgl:3.3.3:natives-linux"),
+        ];
+        dedup_libraries(&mut libraries);
+        assert_eq!(libraries.len(), 2);
     }
 }

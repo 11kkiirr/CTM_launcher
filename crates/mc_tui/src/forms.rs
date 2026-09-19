@@ -219,8 +219,73 @@ pub enum ConfirmAction {
     None,
 }
 
+/// What a version picker's chosen value applies to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickerTarget {
+    /// Create wizard: the Minecraft game version.
+    WizardGame,
+    /// Create wizard: the modloader version.
+    WizardLoader,
+    /// Versions page: change the selected build's game version.
+    ChangeGameVersion,
+}
+
+/// A searchable, keyboard-driven list of versions.
+#[derive(Debug, Clone)]
+pub struct VersionPicker {
+    pub title: String,
+    pub query: String,
+    pub items: Vec<String>,
+    pub filtered: Vec<usize>,
+    pub selected: usize,
+    pub target: PickerTarget,
+}
+
+impl VersionPicker {
+    pub fn new(title: impl Into<String>, items: Vec<String>, target: PickerTarget) -> Self {
+        let filtered = (0..items.len()).collect();
+        Self {
+            title: title.into(),
+            query: String::new(),
+            items,
+            filtered,
+            selected: 0,
+            target,
+        }
+    }
+
+    /// Recompute the filtered indices from the current query.
+    pub fn refilter(&mut self) {
+        let query = self.query.to_ascii_lowercase();
+        self.filtered = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| query.is_empty() || item.to_ascii_lowercase().contains(&query))
+            .map(|(idx, _)| idx)
+            .collect();
+        self.selected = 0;
+    }
+
+    pub fn selected_value(&self) -> Option<&str> {
+        self.filtered
+            .get(self.selected)
+            .and_then(|idx| self.items.get(*idx))
+            .map(String::as_str)
+    }
+
+    pub fn move_selection(&mut self, delta: i32) {
+        if self.filtered.is_empty() {
+            return;
+        }
+        let current = self.selected as i32 + delta;
+        self.selected = current.clamp(0, self.filtered.len() as i32 - 1) as usize;
+    }
+}
+
 /// A modal overlay currently capturing input.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Overlay {
     Text {
         title: String,
@@ -239,6 +304,8 @@ pub enum Overlay {
         lines: Vec<String>,
     },
     DeviceCode(Box<DeviceCodePrompt>),
+    Picker(VersionPicker),
+    Wizard(crate::wizard::CreateWizard),
 }
 
 impl Overlay {
@@ -272,6 +339,7 @@ impl Overlay {
 }
 
 /// Loader options exposed in the create-instance form.
+#[allow(dead_code)]
 pub fn loader_options() -> Vec<String> {
     LoaderType::all()
         .iter()
@@ -288,6 +356,7 @@ pub fn gc_options() -> Vec<String> {
 }
 
 /// Parse a loader label back into a [`LoaderType`].
+#[allow(dead_code)]
 pub fn parse_loader(label: &str) -> LoaderType {
     LoaderType::all()
         .iter()

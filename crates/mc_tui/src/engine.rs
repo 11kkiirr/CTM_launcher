@@ -36,6 +36,18 @@ pub enum EngineEvent {
     SearchResults(SearchResults),
     /// Modrinth mod-search results (Mod Manager pane).
     ModSearchResults(SearchResults),
+    /// Version list for the version picker overlay.
+    VersionList {
+        target: crate::forms::PickerTarget,
+        versions: Vec<String>,
+    },
+    /// Create-wizard Modrinth search results.
+    WizardSearch(SearchResults),
+    /// Create-wizard project with its versions.
+    WizardProject {
+        project: Box<Project>,
+        versions: Vec<Version>,
+    },
     /// A project with its available versions.
     Project {
         project: Box<Project>,

@@ -8,7 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use mc_core::auth::microsoft::MicrosoftAuth;
 use mc_core::auth::{Account, AccountKind, AccountStore};
 use mc_core::install::Installer;
-use mc_core::instance::{Instance, InstanceManager, JvmConfig};
+use mc_core::instance::{Instance, InstanceManager, JvmConfig, LoaderType};
 use mc_core::launch::{
     java, resolve_instance_version, select_java, JavaInstallation, Launcher, LogReceiver,
     ProcessHandle,
@@ -27,8 +27,7 @@ use tokio::sync::mpsc;
 
 use crate::engine::{progress_event, EngineEvent, EngineReceiver, EngineSender};
 use crate::forms::{
-    gc_options, loader_options, parse_gc, parse_loader, ConfirmAction, Form, FormAction, Overlay,
-    TextAction,
+    gc_options, parse_gc, ConfirmAction, Form, FormAction, Overlay, PickerTarget, TextAction,
 };
 use crate::settings::LauncherSettings;
 use crate::theme::Theme;
@@ -36,59 +35,92 @@ use crate::theme::Theme;
 /// The Azure application (client) id used for Microsoft device-code auth.
 pub const CLIENT_ID: &str = mc_core::auth::microsoft::DEFAULT_CLIENT_ID;
 
-/// Top-level pages.
+/// Navigation entries shown in the right-hand panel.
 ///
-/// The layout mirrors Prism Launcher: an instance-centric sidebar plus a few
-/// global pages (accounts and launcher settings).
+/// The first group is global, the second is scoped to the selected build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Page {
-    /// A page scoped to the selected instance.
-    Instance,
-    /// Account switcher and skin tools.
+pub enum Nav {
+    /// Instance picker (home).
+    Instances,
+    /// Selected build's summary and launch action.
+    Overview,
+    /// Mod manager.
+    Mods,
+    /// Modpack browser / `.mrpack` import.
+    Modpacks,
+    /// Build version, loader and reinstall tools.
+    Versions,
+    /// JVM, memory and Java configuration.
+    Jvm,
+    /// Console / logs.
+    Logs,
+    /// Account switcher and skins.
     Accounts,
     /// Global launcher settings.
     Launcher,
 }
 
-/// Sub-pages shown for the selected instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstancePage {
-    Overview,
-    Mods,
-    Modpacks,
-    Logs,
-    Settings,
-}
-
-impl InstancePage {
-    pub fn all() -> [InstancePage; 5] {
+impl Nav {
+    pub fn all() -> [Nav; 9] {
         [
-            InstancePage::Overview,
-            InstancePage::Mods,
-            InstancePage::Modpacks,
-            InstancePage::Logs,
-            InstancePage::Settings,
+            Nav::Instances,
+            Nav::Overview,
+            Nav::Mods,
+            Nav::Modpacks,
+            Nav::Versions,
+            Nav::Jvm,
+            Nav::Logs,
+            Nav::Accounts,
+            Nav::Launcher,
         ]
     }
 
-    pub fn title(&self) -> &'static str {
+    /// Build-scoped pages, in tab order.
+    pub fn build_pages() -> [Nav; 6] {
+        [
+            Nav::Overview,
+            Nav::Mods,
+            Nav::Modpacks,
+            Nav::Versions,
+            Nav::Jvm,
+            Nav::Logs,
+        ]
+    }
+
+    pub fn label(&self) -> &'static str {
         match self {
-            InstancePage::Overview => "Overview",
-            InstancePage::Mods => "Mods",
-            InstancePage::Modpacks => "Modpacks",
-            InstancePage::Logs => "Logs",
-            InstancePage::Settings => "Settings",
+            Nav::Instances => "Instances",
+            Nav::Overview => "Overview",
+            Nav::Mods => "Mods",
+            Nav::Modpacks => "Modpacks",
+            Nav::Versions => "Versions",
+            Nav::Jvm => "JVM Settings",
+            Nav::Logs => "Logs",
+            Nav::Accounts => "Accounts",
+            Nav::Launcher => "Launcher Settings",
         }
     }
 
     pub fn icon(&self) -> &'static str {
         match self {
-            InstancePage::Overview => "▤",
-            InstancePage::Mods => "✦",
-            InstancePage::Modpacks => "⛁",
-            InstancePage::Logs => "≣",
-            InstancePage::Settings => "⚙",
+            Nav::Instances => "⌂",
+            Nav::Overview => "▤",
+            Nav::Mods => "✦",
+            Nav::Modpacks => "⛁",
+            Nav::Versions => "❖",
+            Nav::Jvm => "⚙",
+            Nav::Logs => "≣",
+            Nav::Accounts => "☺",
+            Nav::Launcher => "⚒",
         }
+    }
+
+    /// Whether this page requires a selected build.
+    pub fn is_build_scoped(&self) -> bool {
+        matches!(
+            self,
+            Nav::Overview | Nav::Mods | Nav::Modpacks | Nav::Versions | Nav::Jvm | Nav::Logs
+        )
     }
 }
 
@@ -102,11 +134,9 @@ pub enum Focus {
 /// A clickable region registered during rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HitAction {
+    NavItem(Nav),
     InstanceTile(usize),
     AddInstance,
-    InstanceTab(InstancePage),
-    HeaderAccounts,
-    HeaderSettings,
     SearchRow(usize),
     ProjectVersionRow(usize),
     ModRow(usize),
@@ -125,6 +155,7 @@ pub enum ButtonId {
     EditInstance,
     DeleteInstance,
     InstallInstance,
+    ChangeVersion,
     Search,
     ImportModpack,
     InstallProject,
@@ -160,6 +191,13 @@ pub struct Toast {
     pub at: Instant,
 }
 
+/// Deferred action decoded from a version-picker key press.
+enum PickerKey {
+    None,
+    Cancel,
+    Select(PickerTarget, String),
+}
+
 /// A running game process and its log pipe.
 pub struct RunningProcess {
     pub handle: ProcessHandle,
@@ -175,8 +213,7 @@ pub struct App {
     pub theme: Theme,
     pub settings: LauncherSettings,
 
-    pub page: Page,
-    pub instance_page: InstancePage,
+    pub nav: Nav,
     pub focus: Focus,
     pub should_quit: bool,
 
@@ -193,6 +230,8 @@ pub struct App {
     pub toast: Option<Toast>,
     pub progress: Option<(Option<f64>, String)>,
     pub overlay: Option<Overlay>,
+    /// A create wizard stashed while a nested version picker is open.
+    pub pending_wizard: Option<crate::wizard::CreateWizard>,
     pub hitboxes: Vec<Hitbox>,
 
     pub instance_manager: InstanceManager,
@@ -250,8 +289,7 @@ impl App {
             paths,
             theme: Theme::default(),
             settings,
-            page: Page::Instance,
-            instance_page: InstancePage::Overview,
+            nav: Nav::Instances,
             focus: Focus::Content,
             should_quit: false,
             mouse_pos: None,
@@ -262,6 +300,7 @@ impl App {
             toast: None,
             progress: None,
             overlay: None,
+            pending_wizard: None,
             hitboxes: Vec::new(),
             instance_manager,
             instances,
@@ -454,8 +493,7 @@ impl App {
                     started: Instant::now(),
                 });
                 self.set_toast(format!("Launched {version}"), false);
-                self.page = Page::Instance;
-                self.instance_page = InstancePage::Logs;
+                self.nav = Nav::Logs;
             }
             EngineEvent::InstancesChanged => {
                 self.reload_instances();
@@ -497,6 +535,26 @@ impl App {
                     } else {
                         Some(0)
                     });
+            }
+            EngineEvent::VersionList { target, versions } => {
+                self.show_version_picker(target, versions);
+            }
+            EngineEvent::WizardSearch(results) => {
+                if let Some(mut wizard) = self.pending_wizard.take() {
+                    wizard.results = results.hits;
+                    wizard.selected = 0;
+                    wizard.step = crate::wizard::WizardStep::ModrinthSearch;
+                    self.overlay = Some(Overlay::Wizard(wizard));
+                }
+            }
+            EngineEvent::WizardProject { project, versions } => {
+                if let Some(mut wizard) = self.pending_wizard.take() {
+                    wizard.project = Some(*project);
+                    wizard.project_versions = versions;
+                    wizard.selected = 0;
+                    wizard.step = crate::wizard::WizardStep::ModrinthProject;
+                    self.overlay = Some(Overlay::Wizard(wizard));
+                }
             }
             EngineEvent::Project { project, versions } => {
                 self.selected_project = Some(project);
@@ -567,14 +625,13 @@ impl App {
             KeyCode::Char('?') => self.show_help(),
             KeyCode::Tab => self.toggle_focus(),
             KeyCode::BackTab => self.toggle_focus(),
-            KeyCode::F(2) => self.open_page(Page::Accounts),
-            KeyCode::F(3) => self.open_page(Page::Launcher),
-            KeyCode::Esc if self.page != Page::Instance => self.open_page(Page::Instance),
-            KeyCode::Char(c @ '1'..='5') if self.page == Page::Instance => {
+            KeyCode::F(2) => self.open_nav(Nav::Accounts),
+            KeyCode::F(3) => self.open_nav(Nav::Launcher),
+            KeyCode::Char(c @ '1'..='6') if self.nav.is_build_scoped() => {
                 let idx = (c as u8 - b'1') as usize;
-                self.open_instance_page(InstancePage::all()[idx]);
+                self.open_nav(Nav::build_pages()[idx]);
             }
-            KeyCode::Char('n') if self.page == Page::Instance => self.open_create_instance_form(),
+            KeyCode::Char('n') if self.nav == Nav::Instances => self.open_create_instance_form(),
             _ => self.handle_view_key(key),
         }
     }
@@ -586,29 +643,15 @@ impl App {
         };
     }
 
-    /// Switch to a global page.
-    pub(crate) fn open_page(&mut self, page: Page) {
-        self.page = page;
+    /// Switch the active navigation page.
+    pub(crate) fn open_nav(&mut self, nav: Nav) {
+        self.nav = nav;
         self.focus = Focus::Content;
-        match page {
-            Page::Accounts => self.reload_accounts(),
-            Page::Instance => self.on_instance_page(self.instance_page),
-            Page::Launcher => {}
-        }
-    }
-
-    /// Switch to an instance sub-page.
-    pub(crate) fn open_instance_page(&mut self, page: InstancePage) {
-        self.page = Page::Instance;
-        self.instance_page = page;
-        self.focus = Focus::Content;
-        self.on_instance_page(page);
-    }
-
-    fn on_instance_page(&mut self, page: InstancePage) {
-        match page {
-            InstancePage::Mods => self.reload_mods(),
-            InstancePage::Logs if self.running.is_none() && self.log_buffer.is_empty() => {
+        match nav {
+            Nav::Instances => self.reload_instances(),
+            Nav::Mods => self.reload_mods(),
+            Nav::Accounts => self.reload_accounts(),
+            Nav::Logs if self.running.is_none() && self.log_buffer.is_empty() => {
                 self.load_latest_log();
             }
             _ => {}
@@ -620,61 +663,37 @@ impl App {
             self.handle_sidebar_key(key);
             return;
         }
-        match self.page {
-            Page::Instance => match self.instance_page {
-                InstancePage::Overview => self.key_overview(key),
-                InstancePage::Mods => self.key_mods(key),
-                InstancePage::Modpacks => self.key_modpacks(key),
-                InstancePage::Logs => self.key_logs(key),
-                InstancePage::Settings => self.key_instance_settings(key),
-            },
-            Page::Accounts => self.key_accounts(key),
-            Page::Launcher => self.key_settings(key),
+        // Esc returns to the instance picker (Modpacks handles its own Esc).
+        if key.code == KeyCode::Esc && self.nav != Nav::Modpacks {
+            self.open_nav(Nav::Instances);
+            return;
+        }
+        match self.nav {
+            Nav::Instances => self.key_instance_grid(key),
+            Nav::Overview => self.key_overview(key),
+            Nav::Mods => self.key_mods(key),
+            Nav::Modpacks => self.key_modpacks(key),
+            Nav::Versions => self.key_versions(key),
+            Nav::Jvm => self.key_instance_settings(key),
+            Nav::Logs => self.key_logs(key),
+            Nav::Accounts => self.key_accounts(key),
+            Nav::Launcher => self.key_settings(key),
         }
     }
 
     pub(crate) fn handle_sidebar_key(&mut self, key: KeyEvent) {
-        let cols = self.tile_columns.max(1);
-        let len = self.instances.len();
-        if len == 0 {
-            if key.code == KeyCode::Enter {
-                self.open_create_instance_form();
-            }
-            return;
-        }
-        let current = self.instance_state.selected().unwrap_or(0);
-        let select = |app: &mut Self, idx: usize| {
-            app.instance_state.select(Some(idx.min(len - 1)));
-            app.focus = Focus::Sidebar;
-            app.reload_mods();
-        };
+        let all = Nav::all();
+        let idx = all.iter().position(|n| *n == self.nav).unwrap_or(0);
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => {
-                if current + cols < len {
-                    select(self, current + cols);
-                }
+                let next = (idx + 1).min(all.len() - 1);
+                self.open_nav(all[next]);
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                if current >= cols {
-                    select(self, current - cols);
-                }
+                let prev = idx.saturating_sub(1);
+                self.open_nav(all[prev]);
             }
-            KeyCode::Right | KeyCode::Char('l') => {
-                if current % cols != cols - 1 && current + 1 < len {
-                    select(self, current + 1);
-                }
-            }
-            KeyCode::Left | KeyCode::Char('h') => {
-                if current % cols != 0 {
-                    select(self, current - 1);
-                }
-            }
-            KeyCode::Char('g') => select(self, 0),
-            KeyCode::Char('G') => select(self, len - 1),
-            KeyCode::Enter => {
-                self.focus = Focus::Content;
-                self.open_instance_page(InstancePage::Overview);
-            }
+            KeyCode::Enter => self.focus = Focus::Content,
             _ => {}
         }
     }
@@ -707,11 +726,9 @@ impl App {
 
     pub(crate) fn dispatch_hit(&mut self, action: HitAction) {
         match action {
+            HitAction::NavItem(nav) => self.open_nav(nav),
             HitAction::InstanceTile(idx) => self.select_instance(idx),
             HitAction::AddInstance => self.open_create_instance_form(),
-            HitAction::InstanceTab(page) => self.open_instance_page(page),
-            HitAction::HeaderAccounts => self.open_page(Page::Accounts),
-            HitAction::HeaderSettings => self.open_page(Page::Launcher),
             HitAction::SearchRow(idx) => {
                 self.search_state.select(Some(idx));
                 self.focus = Focus::Content;
@@ -744,16 +761,14 @@ impl App {
         }
     }
 
-    /// Select an instance from the tile grid.
+    /// Select an instance from the tile grid and open its Overview.
     pub(crate) fn select_instance(&mut self, idx: usize) {
         if idx >= self.instances.len() {
             return;
         }
         self.instance_state.select(Some(idx));
         self.focus = Focus::Content;
-        if self.page != Page::Instance {
-            self.page = Page::Instance;
-        }
+        self.nav = Nav::Overview;
         self.reload_mods();
     }
 
@@ -764,6 +779,7 @@ impl App {
             ButtonId::EditInstance => self.open_edit_instance_form(),
             ButtonId::DeleteInstance => self.confirm_delete_instance(),
             ButtonId::InstallInstance => self.install_selected_instance(),
+            ButtonId::ChangeVersion => self.open_change_version_picker(),
             ButtonId::Search => self.open_search_prompt(),
             ButtonId::ImportModpack => self.open_import_prompt(),
             ButtonId::InstallProject => self.install_selected_project(),
@@ -789,51 +805,42 @@ impl App {
         if self.overlay.is_some() {
             return;
         }
-        // Wheel over the sidebar scrolls the tile grid.
-        if let Some(pos) = self.mouse_pos {
-            if rect_contains(self.sidebar_area, pos) {
-                self.scroll_tiles(delta);
-                return;
+        match self.nav {
+            Nav::Instances => self.scroll_tiles(delta),
+            Nav::Overview | Nav::Versions => {}
+            Nav::Modpacks => {
+                if self.selected_project.is_some() {
+                    move_selection(&mut self.project_state, self.project_versions.len(), delta);
+                } else {
+                    move_selection(&mut self.search_state, self.search_results.len(), delta);
+                }
             }
-        }
-        match self.page {
-            Page::Instance => match self.instance_page {
-                InstancePage::Modpacks => {
-                    if self.selected_project.is_some() {
-                        move_selection(&mut self.project_state, self.project_versions.len(), delta);
-                    } else {
-                        move_selection(&mut self.search_state, self.search_results.len(), delta);
-                    }
+            Nav::Mods => {
+                if self.mods_focus_search {
+                    move_selection(
+                        &mut self.mod_search_state,
+                        self.mod_search_results.len(),
+                        delta,
+                    );
+                } else {
+                    move_selection(&mut self.mods_state, self.installed_mods.len(), delta);
                 }
-                InstancePage::Mods => {
-                    if self.mods_focus_search {
-                        move_selection(
-                            &mut self.mod_search_state,
-                            self.mod_search_results.len(),
-                            delta,
-                        );
-                    } else {
-                        move_selection(&mut self.mods_state, self.installed_mods.len(), delta);
-                    }
-                }
-                InstancePage::Logs => {
-                    let len = self.log_buffer.visible().count();
-                    move_selection(&mut self.log_state, len, delta);
-                }
-                InstancePage::Settings => {
-                    let len = settings_field_count();
-                    let next =
-                        (self.settings_field as i32 + delta).clamp(0, len as i32 - 1) as usize;
-                    self.settings_field = next;
-                }
-                InstancePage::Overview => {}
-            },
-            Page::Accounts => move_selection(
+            }
+            Nav::Logs => {
+                let len = self.log_buffer.visible().count();
+                move_selection(&mut self.log_state, len, delta);
+            }
+            Nav::Jvm => {
+                let len = settings_field_count();
+                let next = (self.settings_field as i32 + delta).clamp(0, len as i32 - 1) as usize;
+                self.settings_field = next;
+            }
+            Nav::Accounts => move_selection(
                 &mut self.account_state,
                 self.accounts.accounts().len(),
                 delta,
             ),
-            Page::Launcher => {
+            Nav::Launcher => {
                 let len = settings_field_count();
                 let next = (self.settings_field as i32 + delta).clamp(0, len as i32 - 1) as usize;
                 self.settings_field = next;
@@ -929,6 +936,50 @@ impl App {
                     self.overlay = None;
                 }
             }
+            Overlay::Picker(_) => self.handle_picker_key(key),
+            Overlay::Wizard(_) => self.handle_wizard_key(key),
+        }
+    }
+
+    pub(crate) fn handle_picker_key(&mut self, key: KeyEvent) {
+        let action = {
+            let Some(Overlay::Picker(picker)) = self.overlay.as_mut() else {
+                return;
+            };
+            match key.code {
+                KeyCode::Esc => PickerKey::Cancel,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    picker.move_selection(1);
+                    PickerKey::None
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    picker.move_selection(-1);
+                    PickerKey::None
+                }
+                KeyCode::Backspace => {
+                    picker.query.pop();
+                    picker.refilter();
+                    PickerKey::None
+                }
+                KeyCode::Char(c) => {
+                    picker.query.push(c);
+                    picker.refilter();
+                    PickerKey::None
+                }
+                KeyCode::Enter => match picker.selected_value().map(str::to_string) {
+                    Some(value) => PickerKey::Select(picker.target.clone(), value),
+                    None => PickerKey::None,
+                },
+                _ => PickerKey::None,
+            }
+        };
+        match action {
+            PickerKey::None => {}
+            PickerKey::Cancel => self.cancel_picker(),
+            PickerKey::Select(target, value) => {
+                self.overlay = None;
+                self.apply_picker_value(target, value);
+            }
         }
     }
 
@@ -982,7 +1033,7 @@ impl App {
 
     pub(crate) fn submit_form(&mut self, form: Form) {
         match form.action {
-            FormAction::CreateInstance => self.create_instance_from_form(&form),
+            FormAction::CreateInstance => self.open_create_wizard(),
             FormAction::EditInstanceSettings => self.save_instance_settings_from_form(&form),
             FormAction::ImportModpack => {
                 if let Some(path) = form.text_value("Archive") {
@@ -1026,43 +1077,17 @@ impl App {
     }
 
     pub(crate) fn open_create_instance_form(&mut self) {
-        let form = Form::new("Create Instance", FormAction::CreateInstance)
-            .push_text("Name", "New Instance")
-            .push_text("Minecraft Version", "1.20.1")
-            .push_choice("Loader", loader_options(), 0)
-            .push_text("Loader Version", "")
-            .with_hint("blank = latest")
-            .push_number("Min RAM (MB)", self.settings.default_min_memory_mb)
-            .push_number("Max RAM (MB)", self.settings.default_max_memory_mb)
-            .push_choice(
-                "Garbage Collector",
-                gc_options(),
-                gc_index(self.settings.default_gc),
-            );
-        self.overlay = Some(Overlay::Form(form));
+        self.open_create_wizard();
     }
 
-    pub(crate) fn create_instance_from_form(&mut self, form: &Form) {
-        let name = form.text_value("Name").unwrap_or("").trim().to_string();
-        if name.is_empty() {
-            self.set_toast("Instance name cannot be empty", true);
-            return;
-        }
-        let game_version = form
-            .text_value("Minecraft Version")
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let loader = parse_loader(form.choice_value("Loader").unwrap_or("Vanilla"));
-        let loader_version = form
-            .text_value("Loader Version")
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let min = form.number_value("Min RAM (MB)").unwrap_or(512);
-        let max = form.number_value("Max RAM (MB)").unwrap_or(4096);
-        let gc = parse_gc(form.choice_value("Garbage Collector").unwrap_or("G1GC"));
-
+    /// Create an instance and install its loader in the background.
+    pub(crate) fn create_instance_async(
+        &mut self,
+        name: String,
+        game_version: String,
+        loader: LoaderType,
+        loader_version: Option<String>,
+    ) {
         let manager = self.instance_manager.clone();
         let installer = Installer::new(
             self.client.clone(),
@@ -1070,19 +1095,16 @@ impl App {
             self.progress_callback(),
         );
         let tx = self.engine_tx.clone();
+        let min = self.settings.default_min_memory_mb;
+        let max = self.settings.default_max_memory_mb;
+        let gc = self.settings.default_gc;
         self.progress = Some((None, format!("Creating {name}")));
 
         tokio::spawn(async move {
             let result: Result<Instance, CoreError> = async {
-                let instance = manager
-                    .create(
-                        &name,
-                        &game_version,
-                        loader,
-                        Some(loader_version.clone()).filter(|v| !v.is_empty()),
-                    )
+                let mut instance = manager
+                    .create(&name, &game_version, loader, loader_version.clone())
                     .await?;
-                let mut instance = instance;
                 instance.metadata.jvm.min_memory_mb = min;
                 instance.metadata.jvm.max_memory_mb = max;
                 instance.metadata.jvm.gc = gc;
@@ -1093,11 +1115,7 @@ impl App {
                     instance.metadata.descriptor()
                 )));
                 installer
-                    .install_loader(
-                        &game_version,
-                        loader,
-                        Some(loader_version.as_str()).filter(|v| !v.is_empty()),
-                    )
+                    .install_loader(&game_version, loader, loader_version.as_deref())
                     .await?;
                 Ok(instance)
             }
@@ -1112,6 +1130,165 @@ impl App {
                 Err(err) => {
                     let _ = tx.send(EngineEvent::ProgressDone);
                     let _ = tx.send(EngineEvent::Error(format!("Create failed: {err}")));
+                }
+            }
+        });
+    }
+
+    /// Fetch the Mojang version list for a picker.
+    pub(crate) fn request_game_versions(&mut self) {
+        self.fetch_game_versions(PickerTarget::WizardGame);
+    }
+
+    /// Open the version picker to change the selected build's game version.
+    pub(crate) fn open_change_version_picker(&mut self) {
+        self.fetch_game_versions(PickerTarget::ChangeGameVersion);
+    }
+
+    fn fetch_game_versions(&mut self, target: PickerTarget) {
+        let client = self.client.clone();
+        let tx = self.engine_tx.clone();
+        self.progress = Some((None, "Loading Minecraft versions...".into()));
+        tokio::spawn(async move {
+            let result = mc_core::install::common::fetch_manifest(&client).await;
+            let _ = tx.send(EngineEvent::ProgressDone);
+            match result {
+                Ok(manifest) => {
+                    let versions = manifest.versions.into_iter().map(|v| v.id).collect();
+                    let _ = tx.send(EngineEvent::VersionList { target, versions });
+                }
+                Err(err) => {
+                    let _ = tx.send(EngineEvent::Error(format!("Version list failed: {err}")));
+                }
+            }
+        });
+    }
+
+    /// Fetch loader versions for the wizard's current loader/game version.
+    pub(crate) fn request_loader_versions(&mut self) {
+        let Some(wizard) = self.pending_wizard.as_ref() else {
+            return;
+        };
+        let loader = wizard.loader();
+        let game = wizard.game_version.clone();
+        let installer = Installer::new(
+            self.client.clone(),
+            self.paths.clone(),
+            self.progress_callback(),
+        );
+        let tx = self.engine_tx.clone();
+        self.progress = Some((None, "Loading loader versions...".into()));
+        tokio::spawn(async move {
+            let result: Result<Vec<String>, CoreError> = match loader {
+                LoaderType::Fabric => {
+                    mc_core::install::fabric::available_loaders(&installer, &game).await
+                }
+                LoaderType::Quilt => {
+                    mc_core::install::quilt::available_loaders(&installer, &game).await
+                }
+                LoaderType::Forge => {
+                    mc_core::install::forge::available_loaders(&installer, &game).await
+                }
+                LoaderType::NeoForge => {
+                    mc_core::install::neoforge::available_loaders(&installer, &game).await
+                }
+                _ => Ok(Vec::new()),
+            };
+            let _ = tx.send(EngineEvent::ProgressDone);
+            match result {
+                Ok(versions) => {
+                    let _ = tx.send(EngineEvent::VersionList {
+                        target: PickerTarget::WizardLoader,
+                        versions,
+                    });
+                }
+                Err(err) => {
+                    let _ = tx.send(EngineEvent::Error(format!("Loader list failed: {err}")));
+                }
+            }
+        });
+    }
+
+    /// Change the selected build's game version and reinstall it.
+    pub(crate) fn change_instance_version(&mut self, game_version: String) {
+        let Some(instance) = self.selected_instance().cloned() else {
+            return;
+        };
+        let Ok(mut inst) = self.instance_manager.get(instance.id()) else {
+            return;
+        };
+        inst.metadata.game_version = game_version.clone();
+        // The previous loader build may not exist for the new version.
+        inst.metadata.loader_version = None;
+        let loader = inst.metadata.loader;
+        let installer = Installer::new(
+            self.client.clone(),
+            self.paths.clone(),
+            self.progress_callback(),
+        );
+        let tx = self.engine_tx.clone();
+        self.progress = Some((None, format!("Reinstalling {} ...", inst.name())));
+        tokio::spawn(async move {
+            let result: Result<(), CoreError> = async {
+                inst.save().await?;
+                installer
+                    .install_loader(&game_version, loader, None)
+                    .await?;
+                Ok(())
+            }
+            .await;
+            let _ = tx.send(EngineEvent::ProgressDone);
+            match result {
+                Ok(()) => {
+                    let _ = tx.send(EngineEvent::InstancesChanged);
+                    let _ = tx.send(EngineEvent::Toast("Version changed".into()));
+                }
+                Err(err) => {
+                    let _ = tx.send(EngineEvent::Error(format!("Change failed: {err}")));
+                }
+            }
+        });
+    }
+
+    /// Install a Modrinth modpack project version by downloading its `.mrpack`.
+    pub(crate) fn install_modrinth_modpack(
+        &mut self,
+        name: String,
+        version: mc_core::modrinth::Version,
+    ) {
+        let Some(file) = version.primary_file().cloned() else {
+            self.set_toast("This modpack version has no downloadable file", true);
+            return;
+        };
+        let installer = Installer::new(
+            self.client.clone(),
+            self.paths.clone(),
+            self.progress_callback(),
+        );
+        let instances = self.instance_manager.clone();
+        let paths = self.paths.clone();
+        let progress = self.progress_callback();
+        let client = self.client.clone();
+        let tx = self.engine_tx.clone();
+        self.progress = Some((None, format!("Downloading {name}...")));
+
+        tokio::spawn(async move {
+            let result: Result<Instance, CoreError> = async {
+                let archive = paths.downloads_dir().join(&file.filename);
+                mc_core::util::download_file(&client, &file.url, &archive, file.sha1(), None)
+                    .await?;
+                let importer = ModpackInstaller::new(installer, instances, paths, progress);
+                importer.import(&archive, Some(&name)).await
+            }
+            .await;
+            let _ = tx.send(EngineEvent::ProgressDone);
+            match result {
+                Ok(instance) => {
+                    let _ = tx.send(EngineEvent::InstancesChanged);
+                    let _ = tx.send(EngineEvent::Toast(format!("Imported {}", instance.name())));
+                }
+                Err(err) => {
+                    let _ = tx.send(EngineEvent::Error(format!("Import failed: {err}")));
                 }
             }
         });
@@ -2097,28 +2274,29 @@ impl App {
 
     pub(crate) fn show_help(&mut self) {
         let lines = vec![
-            "Navigation".to_string(),
-            "  1-5          instance pages (Overview/Mods/Modpacks/Logs/Settings)".to_string(),
-            "  F2           Accounts & Skins".to_string(),
-            "  F3           Launcher settings".to_string(),
-            "  Esc          back to the instance view".to_string(),
-            "  Tab          toggle sidebar/content focus".to_string(),
-            "  ↑↓←→ / hjkl  move between tiles and lists".to_string(),
-            "  g/G          jump to top/bottom".to_string(),
+            "Navigation (right panel)".to_string(),
+            "  ↑↓ / jk      move through the navigation panel".to_string(),
+            "  1-6          build pages: Overview/Mods/Modpacks/Versions/JVM/Logs".to_string(),
+            "  F2 / F3      Accounts / Launcher Settings".to_string(),
+            "  Esc          back to the Instances page".to_string(),
+            "  Tab          toggle panel/content focus".to_string(),
             "  Enter        primary action".to_string(),
             "  q / Ctrl-C   quit".to_string(),
             String::new(),
-            "Instances (sidebar tiles)".to_string(),
-            "  Enter select · n new · i install · e edit · d delete · l launch".to_string(),
+            "Instances (main area)".to_string(),
+            "  arrows/hjkl  move between build tiles · Enter open".to_string(),
+            "  n            New Build wizard (Clean / .mrpack / Modrinth)".to_string(),
             String::new(),
-            "Mods".to_string(),
-            "  t switch pane · Space toggle · s search · u updates · d delete".to_string(),
+            "Overview".to_string(),
+            "  Enter/l launch · i install · e edit · d delete".to_string(),
             String::new(),
-            "Logs".to_string(),
-            "  p pause · c clear · / filter · a analyze crash".to_string(),
+            "Mods / Logs / Versions".to_string(),
+            "  Mods: t pane · Space toggle · s search · u updates · d delete".to_string(),
+            "  Logs: p pause · c clear · / filter · a analyze crash".to_string(),
+            "  Versions: c change version · r reinstall".to_string(),
             String::new(),
-            "Mouse: hover highlights; click tiles, tabs, lists and buttons;".to_string(),
-            "       scroll the sidebar to move through instance tiles.".to_string(),
+            "Mouse: hover highlights; click tiles, nav items, lists and buttons;".to_string(),
+            "       scroll to move through lists and tiles.".to_string(),
         ];
         self.overlay = Some(Overlay::message("Help", lines));
     }
@@ -2175,76 +2353,121 @@ impl App {
 
         self.render_header(frame, chunks[0]);
 
+        // Large main content on the left, navigation + build info on the right.
         let body = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(30), Constraint::Min(10)])
+            .constraints([Constraint::Min(20), Constraint::Length(34)])
             .split(chunks[1]);
 
-        self.sidebar_area = body[0];
-        self.render_sidebar(frame, body[0]);
+        let content = body[0];
+        self.sidebar_area = body[1];
+        self.render_nav_panel(frame, body[1]);
 
-        match self.page {
-            Page::Instance => {
-                if self.selected_instance().is_some() {
-                    let sub = Layout::default()
-                        .direction(Direction::Vertical)
-                        .constraints([Constraint::Length(1), Constraint::Min(3)])
-                        .split(body[1]);
-                    self.render_instance_tabbar(frame, sub[0], body[1].width);
-                    match self.instance_page {
-                        InstancePage::Overview => self.render_overview(frame, sub[1]),
-                        InstancePage::Mods => self.render_mods(frame, sub[1]),
-                        InstancePage::Modpacks => self.render_modpacks(frame, sub[1]),
-                        InstancePage::Logs => self.render_logs(frame, sub[1]),
-                        InstancePage::Settings => self.render_instance_settings(frame, sub[1]),
-                    }
-                } else {
-                    self.render_empty_state(frame, body[1]);
-                }
-            }
-            Page::Accounts => self.render_accounts(frame, body[1]),
-            Page::Launcher => self.render_settings(frame, body[1]),
+        match self.nav {
+            Nav::Instances => self.render_instance_grid(frame, content),
+            Nav::Accounts => self.render_accounts(frame, content),
+            Nav::Launcher => self.render_settings(frame, content),
+            _ if self.selected_instance().is_none() => self.render_empty_state(frame, content),
+            Nav::Overview => self.render_overview(frame, content),
+            Nav::Mods => self.render_mods(frame, content),
+            Nav::Modpacks => self.render_modpacks(frame, content),
+            Nav::Versions => self.render_versions(frame, content),
+            Nav::Jvm => self.render_instance_settings(frame, content),
+            Nav::Logs => self.render_logs(frame, content),
         }
 
         self.render_footer(frame, chunks[2]);
         self.render_overlay(frame, area);
     }
 
-    /// The per-instance tab strip.
-    pub(crate) fn render_instance_tabbar(&mut self, frame: &mut Frame, area: Rect, max_width: u16) {
-        let mut x = area.x;
-        for page in InstancePage::all() {
-            let label = format!(" {} {} ", page.icon(), page.title());
-            let width = label.chars().count() as u16;
-            if x + width > area.x + max_width {
-                break;
-            }
-            let rect = Rect {
-                x,
-                y: area.y,
-                width,
+    /// The right-hand navigation panel with build info at the bottom.
+    pub(crate) fn render_nav_panel(&mut self, frame: &mut Frame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(12), Constraint::Length(9)])
+            .split(area);
+
+        let block = Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(self.theme.block_border())
+            .title(Line::from(" Navigation ").style(self.theme.header()));
+        let inner = block.inner(chunks[0]);
+        frame.render_widget(block, chunks[0]);
+
+        for (idx, nav) in Nav::all().iter().enumerate() {
+            let row = Rect {
+                x: inner.x,
+                y: inner.y + idx as u16,
+                width: inner.width,
                 height: 1,
             };
-            let selected = page == self.instance_page;
+            if row.y >= inner.y + inner.height {
+                break;
+            }
+            let selected = *nav == self.nav;
             let style = if selected {
                 self.theme.selection()
-            } else if self.is_hovered(rect) {
+            } else if self.is_hovered(row) {
                 self.theme.hover()
             } else {
-                self.theme.dim()
+                self.theme.base()
             };
-            frame.render_widget(
-                Paragraph::new(Span::styled(label, style)).style(self.theme.base()),
-                rect,
-            );
-            self.push_hitbox(rect, HitAction::InstanceTab(page));
-            x += width;
+            let marker = if selected { "▸" } else { " " };
+            let line = Line::from(vec![
+                Span::styled(format!(" {marker} "), style),
+                Span::styled(format!("{} ", nav.icon()), style),
+                Span::styled(nav.label().to_string(), style),
+            ]);
+            frame.render_widget(Paragraph::new(line).style(style), row);
+            self.push_hitbox(row, HitAction::NavItem(*nav));
         }
+
+        self.render_build_info(frame, chunks[1]);
+    }
+
+    fn render_build_info(&mut self, frame: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(self.theme.block_border())
+            .title(Line::from(" Build ").style(self.theme.header()));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let Some(instance) = self.selected_instance().cloned() else {
+            frame.render_widget(
+                Paragraph::new(Span::styled("No build selected.", self.theme.dim()))
+                    .style(self.theme.base()),
+                inner,
+            );
+            return;
+        };
+
+        let jvm = &instance.metadata.jvm;
+        let width = inner.width as usize;
+        let lines = vec![
+            Line::from(Span::styled(
+                truncate_str(instance.name(), width),
+                self.theme.header(),
+            )),
+            info_line("Version", &instance.metadata.game_version, &self.theme),
+            info_line("Loader", instance.metadata.loader.label(), &self.theme),
+            info_line(
+                "Memory",
+                &format!("{}–{} MB", jvm.min_memory_mb, jvm.max_memory_mb),
+                &self.theme,
+            ),
+            info_line("GC", jvm.gc.label(), &self.theme),
+            info_line("Mods", &self.installed_mods.len().to_string(), &self.theme),
+        ];
+        frame.render_widget(Paragraph::new(lines).style(self.theme.base()), inner);
     }
 
     pub(crate) fn render_empty_state(&mut self, frame: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(ratatui::widgets::Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(self.theme.block_border())
             .style(self.theme.base());
         let inner = block.inner(area);
@@ -2252,14 +2475,14 @@ impl App {
 
         let lines = vec![
             Line::from(""),
-            Line::from(Span::styled("  No instance selected", self.theme.header())),
+            Line::from(Span::styled("  No build selected", self.theme.header())),
             Line::from(Span::styled(
-                "  Create an instance to get started.",
+                "  Pick a build from the Instances page, or create a new one.",
                 self.theme.dim(),
             )),
             Line::from(""),
             Line::from(Span::styled(
-                "  Press 'n' or click [+ Add Instance] in the sidebar.",
+                "  Press 'n' or click [+ New Build].",
                 self.theme.accent(),
             )),
         ];
@@ -2273,47 +2496,31 @@ impl App {
             .map(|a| a.username.clone())
             .unwrap_or_else(|| "no account".to_string());
 
-        let subtitle = match self.page {
-            Page::Instance => self
+        let subtitle = match self.nav {
+            Nav::Instances => "Instances".to_string(),
+            Nav::Accounts => "Accounts".to_string(),
+            Nav::Launcher => "Launcher Settings".to_string(),
+            _ => self
                 .selected_instance()
                 .map(|i| i.name().to_string())
-                .unwrap_or_else(|| "no instance".to_string()),
-            Page::Accounts => "Accounts & Skins".to_string(),
-            Page::Launcher => "Settings".to_string(),
+                .unwrap_or_else(|| "no build".to_string()),
         };
         let left = Line::from(vec![
             Span::styled(" CTMLauncher ", self.theme.header()),
-            Span::styled(format!("· {subtitle} "), self.theme.dim()),
+            Span::styled(format!("› {subtitle}"), self.theme.dim()),
         ]);
         frame.render_widget(Paragraph::new(left).style(self.theme.base()), area);
 
-        let buttons: Vec<(String, HitAction, bool)> = vec![
-            (
-                format!("☺ {active}"),
-                HitAction::HeaderAccounts,
-                self.page == Page::Accounts,
-            ),
-            (
-                "⚙".to_string(),
-                HitAction::HeaderSettings,
-                self.page == Page::Launcher,
-            ),
-        ];
-        let mut x = area.x + area.width;
-        for (label, action, selected) in buttons {
-            let text = format!(" {label} ");
-            let width = text.chars().count() as u16;
-            if width > x {
-                break;
-            }
-            x -= width;
+        let text = format!("☺ {active} ");
+        let width = text.chars().count() as u16;
+        if width < area.width {
             let rect = Rect {
-                x,
+                x: area.x + area.width - width,
                 y: area.y,
                 width,
                 height: 1,
             };
-            let style = if selected {
+            let style = if self.nav == Nav::Accounts {
                 self.theme.selection()
             } else if self.is_hovered(rect) {
                 self.theme.hover()
@@ -2324,12 +2531,8 @@ impl App {
                 Paragraph::new(Span::styled(text, style)).style(self.theme.base()),
                 rect,
             );
-            self.push_hitbox(rect, action);
+            self.push_hitbox(rect, HitAction::NavItem(Nav::Accounts));
         }
-    }
-
-    pub(crate) fn render_sidebar(&mut self, frame: &mut Frame, area: Rect) {
-        self.render_instance_tiles(frame, area);
     }
 
     pub(crate) fn render_footer(&mut self, frame: &mut Frame, area: Rect) {
@@ -2338,18 +2541,16 @@ impl App {
             .constraints([Constraint::Length(1), Constraint::Length(1)])
             .split(area);
 
-        let hint = match self.page {
-            Page::Instance => match self.instance_page {
-                InstancePage::Overview => "Enter/l launch · i install · e edit · d delete · n new",
-                InstancePage::Mods => "Space toggle · s search · u updates · d delete · r refresh",
-                InstancePage::Modpacks => {
-                    "/ search · Enter open · i install · m import .mrpack · Esc back"
-                }
-                InstancePage::Logs => "p pause · c clear · / filter · a crash · g/G top/bottom",
-                InstancePage::Settings => "Enter edit · j/k move · s save · J detect Java",
-            },
-            Page::Accounts => "n offline · m Microsoft · Enter set active · c skin · d remove",
-            Page::Launcher => "Enter edit · j/k move · s save · J detect Java",
+        let hint = match self.nav {
+            Nav::Instances => "Enter select · n new build · arrows navigate · Tab panel",
+            Nav::Overview => "Enter/l launch · i install · e edit · d delete · n new",
+            Nav::Mods => "t pane · Space toggle · s search · u updates · d delete",
+            Nav::Modpacks => "/ search · Enter open · i install · m import .mrpack",
+            Nav::Versions => "c change version · r reinstall",
+            Nav::Jvm => "Enter edit · j/k move · s save · J detect Java",
+            Nav::Logs => "p pause · c clear · / filter · a crash · g/G top/bottom",
+            Nav::Accounts => "n offline · m Microsoft · Enter set active · c skin · d remove",
+            Nav::Launcher => "Enter edit · j/k move · s save · J detect Java",
         };
 
         let status_style = if let Some(toast) = &self.toast {
@@ -2514,6 +2715,55 @@ impl App {
                 ];
                 crate::widgets::render_popup(frame, popup, "Microsoft Sign-in", lines, &self.theme);
             }
+            Overlay::Wizard(_) => self.render_wizard(frame, area),
+            Overlay::Picker(picker) => {
+                use ratatui::widgets::{Borders, Clear, List, ListItem};
+                let popup = crate::widgets::centered_rect(60, 72, area);
+                frame.render_widget(Clear, popup);
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(ratatui::widgets::BorderType::Rounded)
+                    .border_style(self.theme.block_border_focused())
+                    .title(Line::from(format!(" {} ", picker.title)).style(self.theme.header()))
+                    .style(self.theme.base());
+                let inner = block.inner(popup);
+                frame.render_widget(block, popup);
+
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(2), Constraint::Min(3)])
+                    .split(inner);
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled("  Filter: ", self.theme.dim()),
+                        Span::styled(format!("{}█", picker.query), self.theme.accent()),
+                    ]))
+                    .style(self.theme.base()),
+                    chunks[0],
+                );
+
+                let visible = chunks[1].height as usize;
+                let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                let end = (start + visible).min(picker.filtered.len());
+                let items: Vec<ListItem> = (start..end)
+                    .map(|row| {
+                        let label = picker
+                            .filtered
+                            .get(row)
+                            .and_then(|idx| picker.items.get(*idx))
+                            .cloned()
+                            .unwrap_or_default();
+                        let style = if row == picker.selected {
+                            self.theme.selection()
+                        } else {
+                            self.theme.base()
+                        };
+                        ListItem::new(Line::from(Span::styled(format!("  {label}"), style)))
+                            .style(style)
+                    })
+                    .collect();
+                frame.render_widget(List::new(items).style(self.theme.base()), chunks[1]);
+            }
         }
     }
 }
@@ -2554,6 +2804,28 @@ fn settings_field_count() -> usize {
     7
 }
 
+/// Truncate a string to `max` display columns, appending `…` when clipped.
+fn truncate_str(input: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    let chars: Vec<char> = input.chars().collect();
+    if chars.len() <= max {
+        return input.to_string();
+    }
+    let mut out: String = chars.into_iter().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// A `label: value` line for the build-info panel.
+fn info_line(label: &str, value: &str, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{label:<8}"), theme.dim()),
+        Span::styled(value.to_string(), theme.base()),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2585,7 +2857,7 @@ mod tests {
         let client = reqwest::Client::new();
         let mut app = App::new(paths, client).await.unwrap();
 
-        // Create a local instance (no network) so instance pages have content.
+        // Create a local instance (no network) so build pages have content.
         app.instance_manager
             .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
             .await
@@ -2595,33 +2867,28 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(160, 44)).unwrap();
 
-        for page in [Page::Instance, Page::Accounts, Page::Launcher] {
-            app.page = page;
-            if page == Page::Instance {
-                for sub in InstancePage::all() {
-                    app.instance_page = sub;
-                    terminal.draw(|frame| app.render(frame)).unwrap();
-                    let content = buffer_text(&terminal);
-                    assert!(content.contains("CTMLauncher"), "header missing on {sub:?}");
-                    assert!(content.contains(sub.title()), "title missing on {sub:?}");
-                    assert!(content.contains("Demo"), "instance name missing on {sub:?}");
-                }
-            } else {
-                terminal.draw(|frame| app.render(frame)).unwrap();
-                let content = buffer_text(&terminal);
-                assert!(
-                    content.contains("CTMLauncher"),
-                    "header missing on {page:?}"
-                );
-            }
+        for nav in Nav::all() {
+            app.nav = nav;
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let content = buffer_text(&terminal);
+            assert!(content.contains("CTMLauncher"), "header missing on {nav:?}");
+            assert!(
+                content.contains(nav.label()),
+                "nav label missing on {nav:?}"
+            );
         }
+
+        // Build info panel shows the selected build.
+        app.nav = Nav::Overview;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(buffer_text(&terminal).contains("Demo"));
 
         // Empty-state rendering when no instance is selected.
         app.instances.clear();
         app.instance_state.select(None);
-        app.page = Page::Instance;
+        app.nav = Nav::Overview;
         terminal.draw(|frame| app.render(frame)).unwrap();
-        assert!(buffer_text(&terminal).contains("No instance selected"));
+        assert!(buffer_text(&terminal).contains("No build selected"));
 
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);
     }
@@ -2636,6 +2903,42 @@ mod tests {
         assert!(matches!(app.overlay, Some(Overlay::Message { .. })));
         app.handle_overlay_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.overlay.is_none());
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn create_wizard_and_picker_render() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+
+        app.open_create_wizard();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let content = buffer_text(&terminal);
+        assert!(content.contains("New Build"), "wizard title missing");
+        assert!(content.contains("Clean Build"), "kind option missing");
+
+        // Advance to the configure step.
+        app.handle_wizard_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let content = buffer_text(&terminal);
+        assert!(content.contains("Minecraft"), "game version field missing");
+        assert!(content.contains("Loader"), "loader field missing");
+
+        // The version picker renders its own list.
+        app.show_version_picker(
+            PickerTarget::WizardGame,
+            vec!["1.21.1".into(), "1.20.1".into()],
+        );
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let content = buffer_text(&terminal);
+        assert!(
+            content.contains("Minecraft Version"),
+            "picker title missing"
+        );
+        assert!(content.contains("1.21.1"), "picker item missing");
+
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);
     }
 }

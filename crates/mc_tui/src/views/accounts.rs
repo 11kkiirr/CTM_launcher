@@ -35,7 +35,10 @@ impl App {
             ],
         );
 
-        let inner = Block::default().borders(Borders::ALL).inner(chunks[1]);
+        let inner = Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .inner(chunks[1]);
         let active_id = self.accounts.active_id().map(str::to_string);
         let account_count = self.accounts.accounts().len();
         let selected = self.account_state.selected();
@@ -63,6 +66,7 @@ impl App {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(self.theme.block_border())
             .title(
                 Line::from(format!(" Accounts ({}) ", self.accounts.accounts().len()))
@@ -84,6 +88,7 @@ impl App {
     fn render_account_details(&mut self, frame: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(self.theme.block_border())
             .title(Line::from(" Account / Skin ").style(self.theme.header()));
         let inner = block.inner(area);
