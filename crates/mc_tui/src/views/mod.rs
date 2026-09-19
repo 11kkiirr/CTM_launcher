@@ -11,11 +11,12 @@ pub mod versions;
 
 use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::text::Span;
-use ratatui::widgets::{ListState, Paragraph};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, ButtonId, HitAction};
+use crate::theme::Theme;
 
 /// Whether `rect` contains the mouse position.
 pub(crate) fn rect_contains(rect: Rect, (x, y): (u16, u16)) -> bool {
@@ -23,6 +24,45 @@ pub(crate) fn rect_contains(rect: Rect, (x, y): (u16, u16)) -> bool {
         && x < rect.x.saturating_add(rect.width)
         && y >= rect.y
         && y < rect.y.saturating_add(rect.height)
+}
+
+/// The padded content rectangle of a card (1 column and 1 row of breathing room).
+pub(crate) fn inner(area: Rect) -> Rect {
+    Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    }
+}
+
+/// Draw a flat card: a filled dark surface with no borders.
+///
+/// Focused cards additionally get a green `▎` accent bar down the left edge.
+/// Returns the padded inner rectangle for content.
+pub(crate) fn card(app: &App, frame: &mut Frame, area: Rect, focused: bool) -> Rect {
+    frame.render_widget(Block::default().style(app.theme.card()), area);
+    if focused {
+        accent_bar(frame, area, &app.theme);
+    }
+    inner(area)
+}
+
+/// Draw the vertical `▎` accent bar along the left edge of `area`.
+pub(crate) fn accent_bar(frame: &mut Frame, area: Rect, theme: &Theme) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let bar = Rect {
+        x: area.x,
+        y: area.y,
+        width: 1,
+        height: area.height,
+    };
+    let lines: Vec<Line> = (0..area.height)
+        .map(|_| Line::from(Span::styled("▎", theme.accent())))
+        .collect();
+    frame.render_widget(Paragraph::new(lines), bar);
 }
 
 /// Index of the list row currently under the mouse, if any.
@@ -43,11 +83,11 @@ pub(crate) fn row_style(
     hovered: Option<usize>,
 ) -> Style {
     if selected == Some(idx) {
-        app.theme.selection()
+        app.theme.row_selected()
     } else if hovered == Some(idx) {
-        app.theme.hover()
+        app.theme.row_hover()
     } else {
-        app.theme.base()
+        app.theme.row()
     }
 }
 
@@ -71,7 +111,8 @@ pub(crate) fn jump(state: &mut ListState, len: usize, to_end: bool) {
     }
 }
 
-/// Render a horizontal row of clickable buttons and register their hitboxes.
+/// Render a horizontal row of clickable action buttons and register their
+/// hitboxes. Buttons are borderless `[ Label ]` chips in the accent colour.
 pub(crate) fn buttons_row(
     app: &mut App,
     frame: &mut Frame,
@@ -104,6 +145,66 @@ pub(crate) fn buttons_row(
         });
         x += width + 1;
     }
+}
+
+/// Render a row of tabs. The active tab is bright green, the rest muted.
+pub(crate) fn tab_row(
+    app: &mut App,
+    frame: &mut Frame,
+    mut x: u16,
+    y: u16,
+    max_width: u16,
+    tabs: &[(&str, ButtonId, bool)],
+) {
+    for (label, id, active) in tabs {
+        let text = format!("[ {label} ]");
+        let width = text.chars().count() as u16;
+        if x + width > max_width {
+            break;
+        }
+        let rect = Rect {
+            x,
+            y,
+            width,
+            height: 1,
+        };
+        let style = if *active {
+            app.theme.accent_bright()
+        } else if app.is_hovered(rect) {
+            app.theme.hover()
+        } else {
+            app.theme.dim()
+        };
+        frame.render_widget(Paragraph::new(Span::styled(text, style)), rect);
+        app.hitboxes.push(crate::app::Hitbox {
+            rect,
+            action: HitAction::Button(*id),
+        });
+        x += width + 1;
+    }
+}
+
+/// A card section title: a green label with an optional muted suffix.
+pub(crate) fn section_title(label: &str, suffix: &str, theme: &Theme) -> Line<'static> {
+    let mut spans = vec![Span::styled(label.to_string(), theme.header())];
+    if !suffix.is_empty() {
+        spans.push(Span::styled(format!("  {suffix}"), theme.card_dim()));
+    }
+    Line::from(spans)
+}
+
+/// Truncate a string to `max` display columns, appending `…` when clipped.
+pub(crate) fn truncate(input: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    let chars: Vec<char> = input.chars().collect();
+    if chars.len() <= max {
+        return input.to_string();
+    }
+    let mut out: String = chars.into_iter().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 /// Register hitboxes for the visible rows of a list block.

@@ -90,6 +90,7 @@ impl Nav {
         }
     }
 
+    #[allow(dead_code)]
     pub fn icon(&self) -> &'static str {
         match self {
             Nav::Instances => "⌂",
@@ -2409,26 +2410,48 @@ impl App {
         let area = frame.area();
         frame.render_widget(Block::default().style(self.theme.base()), area);
 
+        let progress_active = self.settings.show_progress && self.progress.is_some();
+        let mut rows = vec![
+            Constraint::Length(1), // header bar
+            Constraint::Min(3),    // body
+            Constraint::Length(1), // status bar
+        ];
+        if progress_active {
+            rows.push(Constraint::Length(1));
+        }
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Min(3),
-                Constraint::Length(2),
-            ])
+            .constraints(rows)
             .split(area);
 
         self.render_header(frame, chunks[0]);
 
-        // Large main content on the left, navigation + build info on the right.
-        let body = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(20), Constraint::Length(34)])
+        // The body is inset by one row on top so the cards float below the
+        // header. Content sits on the left, the sidebar on the right, with a
+        // single column of background between them.
+        let body_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(3)])
             .split(chunks[1]);
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(20),
+                Constraint::Length(1),
+                Constraint::Length(30),
+            ])
+            .split(body_rows[1]);
 
-        let content = body[0];
-        self.sidebar_area = body[1];
-        self.render_nav_panel(frame, body[1]);
+        let content = columns[0];
+        self.sidebar_area = columns[2];
+        // Align the sidebar card with the content card (which sits below its
+        // toolbar + gap).
+        let sidebar = Rect {
+            y: columns[2].y + 2,
+            height: columns[2].height.saturating_sub(2),
+            ..columns[2]
+        };
+        self.render_nav_panel(frame, sidebar);
 
         match self.nav {
             Nav::Instances => self.render_instance_grid(frame, content),
@@ -2443,75 +2466,92 @@ impl App {
         }
 
         self.render_footer(frame, chunks[2]);
+        if progress_active {
+            self.render_progress(frame, chunks[3]);
+        }
         self.render_overlay(frame, area);
     }
 
-    /// The right-hand navigation panel with build info at the bottom.
+    /// The right-hand navigation + build info sidebar, a single flat card.
     pub(crate) fn render_nav_panel(&mut self, frame: &mut Frame, area: Rect) {
+        let focused = self.focus == Focus::Sidebar;
+        let inner = crate::views::card(self, frame, area, focused);
+
+        let nav_len = Nav::all().len() as u16;
+        let build_len = if self.selected_instance().is_some() {
+            7
+        } else {
+            2
+        };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(12), Constraint::Length(9)])
-            .split(area);
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(nav_len),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(build_len),
+            ])
+            .split(inner);
 
-        let block = Block::default()
-            .borders(ratatui::widgets::Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(self.theme.block_border())
-            .title(Line::from(" Navigation ").style(self.theme.header()));
-        let inner = block.inner(chunks[0]);
-        frame.render_widget(block, chunks[0]);
+        frame.render_widget(
+            Paragraph::new(Span::styled("Navigation", self.theme.card_comment()))
+                .style(self.theme.card()),
+            chunks[0],
+        );
 
         for (idx, nav) in Nav::all().iter().enumerate() {
             let row = Rect {
-                x: inner.x,
-                y: inner.y + idx as u16,
-                width: inner.width,
+                x: chunks[1].x,
+                y: chunks[1].y + idx as u16,
+                width: chunks[1].width,
                 height: 1,
             };
-            if row.y >= inner.y + inner.height {
+            if row.y >= chunks[1].y + chunks[1].height {
                 break;
             }
             let selected = *nav == self.nav;
             let style = if selected {
-                self.theme.selection()
+                self.theme.row_selected()
             } else if self.is_hovered(row) {
-                self.theme.hover()
+                self.theme.row_hover()
             } else {
-                self.theme.base()
+                self.theme.row()
             };
-            let marker = if selected { "▸" } else { " " };
+            let prefix = if selected { "▸ " } else { "  • " };
+            let label_style = if selected {
+                self.theme.accent()
+            } else {
+                self.theme.row()
+            };
             let line = Line::from(vec![
-                Span::styled(format!(" {marker} "), style),
-                Span::styled(format!("{} ", nav.icon()), style),
-                Span::styled(nav.label().to_string(), style),
+                Span::styled(prefix.to_string(), style),
+                Span::styled(nav.label().to_string(), label_style),
             ]);
             frame.render_widget(Paragraph::new(line).style(style), row);
             self.push_hitbox(row, HitAction::NavItem(*nav));
         }
 
-        self.render_build_info(frame, chunks[1]);
+        frame.render_widget(
+            Paragraph::new(Span::styled("Build", self.theme.card_comment()))
+                .style(self.theme.card()),
+            chunks[3],
+        );
+        self.render_build_info(frame, chunks[4]);
     }
 
     fn render_build_info(&mut self, frame: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .borders(ratatui::widgets::Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(self.theme.block_border())
-            .title(Line::from(" Build ").style(self.theme.header()));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
         let Some(instance) = self.selected_instance().cloned() else {
             frame.render_widget(
-                Paragraph::new(Span::styled("No build selected.", self.theme.dim()))
-                    .style(self.theme.base()),
-                inner,
+                Paragraph::new(Span::styled("No build selected.", self.theme.card_dim()))
+                    .style(self.theme.card()),
+                area,
             );
             return;
         };
 
         let jvm = &instance.metadata.jvm;
-        let width = inner.width as usize;
+        let width = area.width as usize;
         let lines = vec![
             Line::from(Span::styled(
                 truncate_str(instance.name(), width),
@@ -2519,43 +2559,35 @@ impl App {
             )),
             info_line("Version", &instance.metadata.game_version, &self.theme),
             info_line("Loader", instance.metadata.loader.label(), &self.theme),
-            info_line(
-                "Memory",
-                &format!("{}–{} MB", jvm.min_memory_mb, jvm.max_memory_mb),
-                &self.theme,
-            ),
+            info_line("Memory", &format!("{} MB", jvm.max_memory_mb), &self.theme),
             info_line("GC", jvm.gc.label(), &self.theme),
             info_line("Mods", &self.installed_mods.len().to_string(), &self.theme),
         ];
-        frame.render_widget(Paragraph::new(lines).style(self.theme.base()), inner);
+        frame.render_widget(Paragraph::new(lines).style(self.theme.card()), area);
     }
 
     pub(crate) fn render_empty_state(&mut self, frame: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .borders(ratatui::widgets::Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(self.theme.block_border())
-            .style(self.theme.base());
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        let inner = crate::views::card(self, frame, area, true);
 
         let lines = vec![
             Line::from(""),
-            Line::from(Span::styled("  No build selected", self.theme.header())),
+            Line::from(Span::styled("No build selected", self.theme.header())),
             Line::from(Span::styled(
-                "  Pick a build from the Instances page, or create a new one.",
-                self.theme.dim(),
+                "Pick a build from the Instances page, or create a new one.",
+                self.theme.card_dim(),
             )),
             Line::from(""),
             Line::from(Span::styled(
-                "  Press 'n' or click [+ New Build].",
+                "Press 'n' or click [+ New Build].",
                 self.theme.accent(),
             )),
         ];
-        frame.render_widget(Paragraph::new(lines).style(self.theme.base()), inner);
+        frame.render_widget(Paragraph::new(lines).style(self.theme.card()), inner);
     }
 
     pub(crate) fn render_header(&mut self, frame: &mut Frame, area: Rect) {
+        frame.render_widget(Block::default().style(self.theme.bar()), area);
+
         let active = self
             .accounts
             .active()
@@ -2572,10 +2604,11 @@ impl App {
                 .unwrap_or_else(|| "no build".to_string()),
         };
         let left = Line::from(vec![
-            Span::styled(" CTMLauncher ", self.theme.header()),
-            Span::styled(format!("› {subtitle}"), self.theme.dim()),
+            Span::styled(" CTMLauncher", self.theme.accent_bright()),
+            Span::styled("  ›  ", self.theme.comment_style()),
+            Span::styled(subtitle, self.theme.dim()),
         ]);
-        frame.render_widget(Paragraph::new(left).style(self.theme.base()), area);
+        frame.render_widget(Paragraph::new(left).style(self.theme.bar()), area);
 
         let text = format!("☺ {active} ");
         let width = text.chars().count() as u16;
@@ -2594,77 +2627,76 @@ impl App {
                 self.theme.accent()
             };
             frame.render_widget(
-                Paragraph::new(Span::styled(text, style)).style(self.theme.base()),
+                Paragraph::new(Span::styled(text, style)).style(self.theme.bar()),
                 rect,
             );
             self.push_hitbox(rect, HitAction::NavItem(Nav::Accounts));
         }
     }
 
+    /// A one-line status bar: status message on the left, green-hotkey hints on
+    /// the right.
     pub(crate) fn render_footer(&mut self, frame: &mut Frame, area: Rect) {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(1)])
-            .split(area);
+        frame.render_widget(Block::default().style(self.theme.bar()), area);
 
-        let hint = match self.nav {
-            Nav::Instances => "Enter launch · n new · i install · e edit · d delete · arrows move",
-            Nav::Mods => "t pane · Space toggle · s search · u updates · d delete",
-            Nav::Modpacks => "/ search · Enter open · i install · m import .mrpack",
-            Nav::Versions => "c change version · r reinstall",
-            Nav::Jvm => "Enter edit · j/k move · s save · J detect Java",
-            Nav::Logs => "j/k scroll · PgUp/PgDn page · g/G top/bottom · f follow · / filter",
-            Nav::Accounts => "n offline · m Microsoft · Enter set active · c skin · d remove",
-            Nav::Launcher => "Enter edit · j/k move · s save · J detect Java",
-        };
-
-        let status_style = if let Some(toast) = &self.toast {
-            if toast.error {
-                self.theme.error_style()
-            } else {
-                self.theme.accent()
+        let hints = footer_hints(self.nav);
+        let mut spans: Vec<Span> = Vec::new();
+        for (idx, (key, label)) in hints.iter().enumerate() {
+            if idx > 0 {
+                spans.push(Span::styled("  ", self.theme.comment_style()));
             }
-        } else {
-            self.theme.dim()
+            spans.push(Span::styled(key.to_string(), self.theme.accent()));
+            spans.push(Span::styled(format!(" {label}"), self.theme.dim()));
+        }
+        let hint_width: u16 = spans.iter().map(|s| s.width() as u16).sum();
+        let hint_rect = Rect {
+            x: area.x + area.width.saturating_sub(hint_width),
+            y: area.y,
+            width: hint_width.min(area.width),
+            height: 1,
         };
-        let status_text = self
-            .toast
-            .as_ref()
-            .map(|t| t.message.clone())
-            .unwrap_or_else(|| self.status.clone());
-
         frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!(" {status_text}  "), status_style),
-                Span::styled(format!("│  {hint}"), self.theme.dim()),
-            ]))
-            .style(self.theme.base()),
-            rows[0],
+            Paragraph::new(Line::from(spans)).style(self.theme.bar()),
+            hint_rect,
         );
 
-        if self.settings.show_progress {
-            if let Some((ratio, label)) = &self.progress {
-                let gauge =
-                    crate::widgets::ProgressBar::new(ratio.unwrap_or(0.0), label, &self.theme);
-                frame.render_widget(gauge, rows[1]);
+        let status_width = area.width.saturating_sub(hint_width).saturating_sub(2);
+        if status_width > 4 {
+            let (status_style, status_text) = if let Some(toast) = &self.toast {
+                let style = if toast.error {
+                    self.theme.error_style()
+                } else {
+                    self.theme.accent()
+                };
+                (style, toast.message.clone())
             } else {
-                let runtime = self
-                    .running
-                    .as_ref()
-                    .map(|r| {
-                        format!(
-                            "running: {} ({:.0}s)",
-                            r.version,
-                            r.started.elapsed().as_secs()
-                        )
-                    })
-                    .unwrap_or_default();
-                frame.render_widget(
-                    Paragraph::new(Span::styled(format!(" {runtime}"), self.theme.dim()))
-                        .style(self.theme.base()),
-                    rows[1],
-                );
-            }
+                (self.theme.dim(), self.status.clone())
+            };
+            let marker = "● ";
+            let rect = Rect {
+                x: area.x,
+                y: area.y,
+                width: status_width,
+                height: 1,
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(format!(" {marker}"), status_style),
+                    Span::styled(
+                        truncate_str(&status_text, status_width.saturating_sub(3) as usize),
+                        status_style,
+                    ),
+                ]))
+                .style(self.theme.bar()),
+                rect,
+            );
+        }
+    }
+
+    fn render_progress(&mut self, frame: &mut Frame, area: Rect) {
+        if let Some((ratio, label)) = &self.progress {
+            let gauge = crate::widgets::ProgressBar::new(ratio.unwrap_or(0.0), label, &self.theme);
+            frame.render_widget(gauge, area);
         }
     }
 
@@ -2672,6 +2704,10 @@ impl App {
         let Some(overlay) = self.overlay.clone() else {
             return;
         };
+        // A modal scrim: blank the screen behind the dialog so no fragments of
+        // the underlying view show through around the popup.
+        frame.render_widget(ratatui::widgets::Clear, area);
+        frame.render_widget(Block::default().style(self.theme.base()), area);
         match overlay {
             Overlay::Text {
                 title,
@@ -2747,7 +2783,7 @@ impl App {
                 crate::widgets::render_popup(frame, popup, &title, lines, &self.theme);
             }
             Overlay::Message { title, lines } => {
-                let popup = crate::widgets::centered_rect(66, 60, area);
+                let popup = crate::widgets::centered_rect(74, 84, area);
                 let mut rendered: Vec<Line> = lines.into_iter().map(Line::from).collect();
                 rendered.push(Line::from(""));
                 rendered.push(Line::from(Span::styled(
@@ -2782,32 +2818,47 @@ impl App {
             }
             Overlay::Wizard(_) => self.render_wizard(frame, area),
             Overlay::Picker(picker) => {
-                use ratatui::widgets::{Borders, Clear, List, ListItem};
+                use ratatui::widgets::{Clear, List, ListItem};
                 let popup = crate::widgets::centered_rect(60, 72, area);
                 frame.render_widget(Clear, popup);
-                let block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(ratatui::widgets::BorderType::Rounded)
-                    .border_style(self.theme.block_border_focused())
-                    .title(Line::from(format!(" {} ", picker.title)).style(self.theme.header()))
-                    .style(self.theme.base());
-                let inner = block.inner(popup);
-                frame.render_widget(block, popup);
+                frame.render_widget(
+                    Block::default()
+                        .style(ratatui::style::Style::default().bg(self.theme.panel_alt)),
+                    popup,
+                );
+                crate::views::accent_bar(frame, popup, &self.theme);
 
-                let chunks = Layout::default()
+                let content = Rect {
+                    x: popup.x + 2,
+                    y: popup.y + 1,
+                    width: popup.width.saturating_sub(3),
+                    height: popup.height.saturating_sub(2),
+                };
+                let rows = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(2), Constraint::Min(3)])
-                    .split(inner);
+                    .constraints([
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Min(1),
+                    ])
+                    .split(content);
+                frame.render_widget(
+                    Paragraph::new(Span::styled(picker.title.clone(), self.theme.header()))
+                        .style(ratatui::style::Style::default().bg(self.theme.panel_alt)),
+                    rows[0],
+                );
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![
-                        Span::styled("  Filter: ", self.theme.dim()),
+                        Span::styled("Filter  ", self.theme.comment_style()),
                         Span::styled(format!("{}█", picker.query), self.theme.accent()),
                     ]))
-                    .style(self.theme.base()),
-                    chunks[0],
+                    .style(ratatui::style::Style::default().bg(self.theme.panel_alt)),
+                    rows[2],
                 );
 
-                let visible = chunks[1].height as usize;
+                let list_area = rows[3];
+                let visible = list_area.height as usize;
                 let start = picker.selected.saturating_sub(visible.saturating_sub(1));
                 let end = (start + visible).min(picker.filtered.len());
                 let items: Vec<ListItem> = (start..end)
@@ -2819,15 +2870,18 @@ impl App {
                             .cloned()
                             .unwrap_or_default();
                         let style = if row == picker.selected {
-                            self.theme.selection()
+                            self.theme.row_selected()
                         } else {
-                            self.theme.base()
+                            self.theme.row()
                         };
-                        ListItem::new(Line::from(Span::styled(format!("  {label}"), style)))
-                            .style(style)
+                        ListItem::new(Line::from(Span::styled(label.clone(), style))).style(style)
                     })
                     .collect();
-                frame.render_widget(List::new(items).style(self.theme.base()), chunks[1]);
+                frame.render_widget(
+                    List::new(items)
+                        .style(ratatui::style::Style::default().bg(self.theme.panel_alt)),
+                    list_area,
+                );
             }
         }
     }
@@ -2886,9 +2940,63 @@ fn truncate_str(input: &str, max: usize) -> String {
 /// A `label: value` line for the build-info panel.
 fn info_line(label: &str, value: &str, theme: &Theme) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{label:<8}"), theme.dim()),
-        Span::styled(value.to_string(), theme.base()),
+        Span::styled(format!("{label:<8}"), theme.card_dim()),
+        Span::styled(value.to_string(), theme.card()),
     ])
+}
+
+/// Keybinding hints for the status bar, as `(key, action)` pairs.
+fn footer_hints(nav: Nav) -> &'static [(&'static str, &'static str)] {
+    match nav {
+        Nav::Instances => &[
+            ("Enter", "launch"),
+            ("n", "new"),
+            ("i", "install"),
+            ("e", "edit"),
+            ("d", "delete"),
+        ],
+        Nav::Mods => &[
+            ("t", "pane"),
+            ("Space", "toggle"),
+            ("s", "search"),
+            ("u", "updates"),
+            ("d", "delete"),
+        ],
+        Nav::Modpacks => &[
+            ("/", "search"),
+            ("Enter", "open"),
+            ("i", "install"),
+            ("m", "import"),
+        ],
+        Nav::Versions => &[("c", "change version"), ("r", "reinstall")],
+        Nav::Jvm => &[
+            ("Enter", "edit"),
+            ("j/k", "move"),
+            ("s", "save"),
+            ("J", "detect Java"),
+        ],
+        Nav::Logs => &[
+            ("j/k", "scroll"),
+            ("f", "follow"),
+            ("p", "pause"),
+            ("c", "clear"),
+            ("/", "filter"),
+            ("a", "crash"),
+        ],
+        Nav::Accounts => &[
+            ("n", "offline"),
+            ("m", "Microsoft"),
+            ("Enter", "active"),
+            ("c", "skin"),
+            ("d", "remove"),
+        ],
+        Nav::Launcher => &[
+            ("Enter", "edit"),
+            ("j/k", "move"),
+            ("s", "save"),
+            ("J", "detect Java"),
+        ],
+    }
 }
 
 #[cfg(test)]

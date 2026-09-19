@@ -1,9 +1,9 @@
-//! Centered popup geometry and rendering helpers.
+//! Centered popup geometry and borderless rendering helpers.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::theme::Theme;
@@ -29,7 +29,8 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(vertical[1])[1]
 }
 
-/// Clear the area and draw a titled bordered popup containing `lines`.
+/// Clear the area and draw a borderless raised panel with a green `▎` accent
+/// bar, a title line and `lines` as the body.
 pub fn render_popup(
     frame: &mut Frame,
     area: Rect,
@@ -37,19 +38,37 @@ pub fn render_popup(
     lines: Vec<Line<'_>>,
     theme: &Theme,
 ) {
+    if area.width < 4 || area.height < 3 {
+        return;
+    }
     frame.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(theme.green))
-        .title(Line::from(format!(" {title} ")).style(theme.header()))
-        .style(Style::default().bg(theme.bg_alt));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let surface = Style::default().bg(theme.panel_alt);
+    frame.render_widget(ratatui::widgets::Block::default().style(surface), area);
+    crate::views::accent_bar(frame, area, theme);
+
+    let content = Rect {
+        x: area.x + 2,
+        y: area.y + 1,
+        width: area.width.saturating_sub(3),
+        height: area.height.saturating_sub(2),
+    };
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(content);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(title.to_string(), theme.header()))).style(surface),
+        rows[0],
+    );
     frame.render_widget(
         Paragraph::new(lines)
-            .style(theme.base())
+            .style(Style::default().fg(theme.fg).bg(theme.panel_alt))
             .wrap(Wrap { trim: false }),
-        inner,
+        rows[2],
     );
 }

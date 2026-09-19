@@ -1,7 +1,8 @@
-//! Minimalist green color palette and shared styles.
+//! Modern, minimal, borderless palette.
 //!
-//! The palette is deliberately small: a dark slate background, soft gray
-//! borders and emerald/forest green highlights.
+//! The UI is built from flat dark cards separated by background contrast rather
+//! than box-drawing borders. A single vibrant green (`#50FA7B`) is used as the
+//! accent for selections, the left `▎` focus bar and keybindings.
 
 use ratatui::style::{Color, Modifier, Style};
 
@@ -9,82 +10,116 @@ use ratatui::style::{Color, Modifier, Style};
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct Theme {
-    /// Primary background.
+    /// Matte near-black terminal background.
     pub bg: Color,
-    /// Slightly darker background used for the sidebar and headers.
+    /// Slightly lifted background used for the header/footer bars.
     pub bg_alt: Color,
-    /// Panel background.
+    /// Card / sidebar background.
     pub panel: Color,
+    /// Raised surface for hover states and overlays.
+    pub panel_alt: Color,
     /// Default foreground text.
     pub fg: Color,
-    /// Dimmed/secondary text.
+    /// Muted grey for labels, paths and versions.
     pub muted: Color,
-    /// Soft gray borders.
-    pub border: Color,
-    /// Brighter border for focused panels.
-    pub border_focused: Color,
-    /// Emerald green accent.
+    /// Cool secondary (comment) tone.
+    pub comment: Color,
+    /// Primary vibrant green accent.
     pub green: Color,
-    /// Forest green for selections.
-    pub forest: Color,
-    /// Background of a selected list row.
+    /// Brighter green used for the strongest emphasis.
+    pub green_bright: Color,
+    /// Deep green used for subtle dividers.
+    pub green_dim: Color,
+    /// Soft dark-green background of a selected row.
     pub selection_bg: Color,
+    /// Background of a hovered row.
+    pub hover_bg: Color,
     pub warning: Color,
     pub error: Color,
     pub info: Color,
     pub debug: Color,
     pub trace: Color,
+    /// Rarely used hairline colour (overlays/dividers).
+    pub border: Color,
+    /// Focused accent colour.
+    pub border_focused: Color,
 }
 
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            bg: Color::Rgb(0x1B, 0x1E, 0x24),
-            bg_alt: Color::Rgb(0x16, 0x18, 0x1D),
-            panel: Color::Rgb(0x20, 0x24, 0x2B),
-            fg: Color::Rgb(0xD8, 0xDE, 0xE9),
-            muted: Color::Rgb(0x7A, 0x81, 0x94),
-            border: Color::Rgb(0x3B, 0x42, 0x52),
-            border_focused: Color::Rgb(0x5F, 0xA9, 0x7A),
-            green: Color::Rgb(0x6F, 0xE3, 0x9A),
-            forest: Color::Rgb(0x3E, 0x9B, 0x5F),
-            selection_bg: Color::Rgb(0x24, 0x35, 0x2B),
-            warning: Color::Rgb(0xE9, 0xC4, 0x6A),
-            error: Color::Rgb(0xE8, 0x8B, 0x9A),
-            info: Color::Rgb(0x8A, 0xB4, 0xF8),
-            debug: Color::Rgb(0x8F, 0xD9, 0xC8),
-            trace: Color::Rgb(0x6C, 0x70, 0x86),
+            bg: Color::Rgb(0x0D, 0x0D, 0x0D),
+            bg_alt: Color::Rgb(0x12, 0x12, 0x12),
+            panel: Color::Rgb(0x18, 0x18, 0x18),
+            panel_alt: Color::Rgb(0x1E, 0x1E, 0x1E),
+            fg: Color::Rgb(0xF8, 0xF8, 0xF2),
+            muted: Color::Rgb(0x75, 0x75, 0x75),
+            comment: Color::Rgb(0x62, 0x72, 0xA4),
+            green: Color::Rgb(0x50, 0xFA, 0x7B),
+            green_bright: Color::Rgb(0x00, 0xFF, 0x87),
+            green_dim: Color::Rgb(0x2A, 0x5A, 0x3A),
+            selection_bg: Color::Rgb(0x14, 0x2B, 0x1E),
+            hover_bg: Color::Rgb(0x1E, 0x1E, 0x1E),
+            warning: Color::Rgb(0xF1, 0xFA, 0x8C),
+            error: Color::Rgb(0xFF, 0x55, 0x55),
+            info: Color::Rgb(0x8B, 0xE9, 0xFD),
+            debug: Color::Rgb(0x62, 0x72, 0xA4),
+            trace: Color::Rgb(0x44, 0x47, 0x5A),
+            border: Color::Rgb(0x2A, 0x2A, 0x2A),
+            border_focused: Color::Rgb(0x50, 0xFA, 0x7B),
         }
     }
 }
 
 impl Theme {
-    /// Base text style on the primary background.
+    /// Base text on the root background.
     pub fn base(&self) -> Style {
         Style::default().fg(self.fg).bg(self.bg)
     }
 
-    /// Style for a normal (unfocused) block border.
-    pub fn block_border(&self) -> Style {
-        Style::default().fg(self.border)
+    /// Text on the header/footer bars.
+    pub fn bar(&self) -> Style {
+        Style::default().fg(self.fg).bg(self.bg_alt)
     }
 
-    /// Style for a focused block border.
-    pub fn block_border_focused(&self) -> Style {
-        Style::default().fg(self.border_focused)
+    /// Text on a card / sidebar surface.
+    pub fn card(&self) -> Style {
+        Style::default().fg(self.fg).bg(self.panel)
     }
 
-    /// Style for emphasized green text.
+    /// Dimmed text on a card.
+    pub fn card_dim(&self) -> Style {
+        Style::default().fg(self.muted).bg(self.panel)
+    }
+
+    /// Cool secondary text on a card.
+    pub fn card_comment(&self) -> Style {
+        Style::default().fg(self.comment).bg(self.panel)
+    }
+
+    /// Emphasized green text (background is inherited).
     pub fn accent(&self) -> Style {
         Style::default().fg(self.green)
     }
 
-    /// Style for secondary/dimmed text.
+    /// Brightest green emphasis.
+    pub fn accent_bright(&self) -> Style {
+        Style::default()
+            .fg(self.green_bright)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    /// Secondary/dimmed text (background inherited).
     pub fn dim(&self) -> Style {
         Style::default().fg(self.muted)
     }
 
-    /// Style applied to a selected list row.
+    /// Cool secondary text (background inherited).
+    pub fn comment_style(&self) -> Style {
+        Style::default().fg(self.comment)
+    }
+
+    /// Selected list row: green on a soft dark-green background.
     pub fn selection(&self) -> Style {
         Style::default()
             .bg(self.selection_bg)
@@ -92,21 +127,30 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
-    /// Style applied to a hovered element.
+    /// Hovered element.
     pub fn hover(&self) -> Style {
-        Style::default().bg(self.selection_bg).fg(self.green)
+        Style::default().bg(self.hover_bg).fg(self.green)
     }
 
-    /// Style for a highlighted button.
-    #[allow(dead_code)]
-    pub fn button(&self) -> Style {
+    /// A non-focused card row.
+    pub fn row(&self) -> Style {
+        Style::default().fg(self.fg).bg(self.panel)
+    }
+
+    /// A selected card row.
+    pub fn row_selected(&self) -> Style {
         Style::default()
-            .fg(self.bg)
-            .bg(self.forest)
+            .bg(self.selection_bg)
+            .fg(self.green)
             .add_modifier(Modifier::BOLD)
     }
 
-    /// Style for a header line.
+    /// A hovered card row.
+    pub fn row_hover(&self) -> Style {
+        Style::default().bg(self.hover_bg).fg(self.green)
+    }
+
+    /// Style for a header line / section title.
     pub fn header(&self) -> Style {
         Style::default().fg(self.green).add_modifier(Modifier::BOLD)
     }
@@ -126,14 +170,14 @@ impl Theme {
         Style::default().fg(self.info)
     }
 
-    /// Color associated with a log level label.
+    /// Colour associated with a log level label.
     pub fn log_level_color(&self, level: mc_core::logs::LogLevel) -> Color {
         use mc_core::logs::LogLevel::*;
         match level {
             Error | Fatal => self.error,
             Warn => self.warning,
-            Info => self.info,
-            Debug => self.debug,
+            Info => self.green,
+            Debug => self.info,
             Trace => self.trace,
             Unknown => self.muted,
         }

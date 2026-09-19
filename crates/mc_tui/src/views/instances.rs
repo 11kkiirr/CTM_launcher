@@ -1,13 +1,13 @@
-//! Instance Overview and instance-scoped Settings pages.
+//! Instance-scoped Settings page (JVM, memory, Java).
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::{App, ButtonId};
-use crate::views::buttons_row;
+use crate::app::{App, ButtonId, Focus};
+use crate::views::{buttons_row, card, section_title};
 
 impl App {
     /// The instance-scoped "Settings" page (JVM, memory, Java).
@@ -19,7 +19,9 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
-                Constraint::Length(10),
+                Constraint::Length(1),
+                Constraint::Length(11),
+                Constraint::Length(1),
                 Constraint::Min(3),
             ])
             .split(area);
@@ -27,7 +29,7 @@ impl App {
         buttons_row(
             self,
             frame,
-            chunks[0].x + 1,
+            chunks[0].x,
             chunks[0].y,
             area.x + area.width,
             &[("Edit Settings", ButtonId::EditInstance)],
@@ -53,37 +55,50 @@ impl App {
             ("Extra Game Args", jvm.extra_game_args.join(" ")),
         ];
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(self.theme.block_border())
-            .title(Line::from(" Instance Settings ").style(self.theme.header()));
-        let inner = block.inner(chunks[1]);
-        frame.render_widget(block, chunks[1]);
+        let focused = self.focus == Focus::Content;
+        let inner = card(self, frame, chunks[2], focused);
+        if inner.height == 0 {
+            return;
+        }
+        frame.render_widget(
+            Paragraph::new(section_title("Instance Settings", "", &self.theme))
+                .style(self.theme.card()),
+            Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: 1,
+            },
+        );
+
         for (idx, (label, value)) in values.iter().enumerate() {
-            if idx as u16 >= inner.height {
+            let y = inner.y + 2 + idx as u16;
+            if y >= inner.y + inner.height {
                 break;
             }
             let row = Rect {
                 x: inner.x,
-                y: inner.y + idx as u16,
+                y,
                 width: inner.width,
                 height: 1,
             };
-            let line = Line::from(vec![
-                Span::styled(format!("  {label:<20}"), self.theme.dim()),
-                Span::styled(value.clone(), self.theme.base()),
-            ]);
-            frame.render_widget(Paragraph::new(line).style(self.theme.base()), row);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(format!("{label:<20}"), self.theme.card_dim()),
+                    Span::styled(value.clone(), self.theme.card()),
+                ]))
+                .style(self.theme.card()),
+                row,
+            );
         }
 
         frame.render_widget(
             Paragraph::new(Span::styled(
-                "  Press Enter or 'e' to edit. Changes apply the next time you launch.",
-                self.theme.dim(),
+                "Press Enter or 'e' to edit. Changes apply the next time you launch.",
+                self.theme.card_dim(),
             ))
-            .style(self.theme.base()),
-            chunks[2],
+            .style(self.theme.card()),
+            chunks[4],
         );
     }
 

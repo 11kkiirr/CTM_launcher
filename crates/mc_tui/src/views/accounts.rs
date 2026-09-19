@@ -3,11 +3,13 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, ButtonId, HitAction};
-use crate::views::{buttons_row, hovered_index, jump, move_sel, register_rows, row_style};
+use crate::app::{App, ButtonId, Focus, HitAction};
+use crate::views::{
+    buttons_row, card, hovered_index, jump, move_sel, register_rows, row_style, section_title,
+};
 
 impl App {
     pub(crate) fn render_accounts(&mut self, frame: &mut Frame, area: Rect) {
@@ -15,7 +17,9 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
+                Constraint::Length(1),
                 Constraint::Min(5),
+                Constraint::Length(1),
                 Constraint::Length(10),
             ])
             .split(area);
@@ -23,7 +27,7 @@ impl App {
         buttons_row(
             self,
             frame,
-            chunks[0].x + 1,
+            chunks[0].x,
             chunks[0].y,
             area.x + area.width,
             &[
@@ -35,14 +39,42 @@ impl App {
             ],
         );
 
-        let inner = Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .inner(chunks[1]);
-        let active_id = self.accounts.active_id().map(str::to_string);
+        self.render_account_list(frame, chunks[2]);
+        self.render_account_details(frame, chunks[4]);
+    }
+
+    fn render_account_list(&mut self, frame: &mut Frame, area: Rect) {
+        let focused = self.focus == Focus::Content;
+        let inner = card(self, frame, area, focused);
+        if inner.height == 0 {
+            return;
+        }
+
         let account_count = self.accounts.accounts().len();
+        frame.render_widget(
+            Paragraph::new(section_title(
+                "Accounts",
+                &account_count.to_string(),
+                &self.theme,
+            ))
+            .style(self.theme.card()),
+            Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: 1,
+            },
+        );
+
+        let list_area = Rect {
+            x: inner.x,
+            y: inner.y + 1,
+            width: inner.width,
+            height: inner.height.saturating_sub(1),
+        };
+        let active_id = self.accounts.active_id().map(str::to_string);
         let selected = self.account_state.selected();
-        let hovered = hovered_index(self, inner, self.account_state.offset(), account_count);
+        let hovered = hovered_index(self, list_area, self.account_state.offset(), account_count);
         let items: Vec<ListItem> = self
             .accounts
             .accounts()
@@ -50,49 +82,49 @@ impl App {
             .enumerate()
             .map(|(idx, account)| {
                 let active = active_id.as_deref() == Some(account.id.as_str());
-                let marker = if active { "● " } else { "  " };
+                let marker = if active { "● " } else { "○ " };
                 let kind = match account.kind {
                     mc_core::auth::AccountKind::Microsoft => "Microsoft",
                     mc_core::auth::AccountKind::Offline => "Offline",
                 };
                 ListItem::new(Line::from(vec![
                     Span::styled(marker, self.theme.accent()),
-                    Span::styled(account.username.clone(), self.theme.base()),
-                    Span::styled(format!("  [{kind}]"), self.theme.dim()),
+                    Span::styled(account.username.clone(), self.theme.card()),
+                    Span::styled(format!("  [{kind}]"), self.theme.card_dim()),
                 ]))
                 .style(row_style(self, idx, selected, hovered))
             })
             .collect();
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(self.theme.block_border())
-            .title(
-                Line::from(format!(" Accounts ({}) ", self.accounts.accounts().len()))
-                    .style(self.theme.header()),
-            );
-        let list = List::new(items).block(block).highlight_symbol("▸ ");
-        frame.render_stateful_widget(list, chunks[1], &mut self.account_state);
+        let list = List::new(items)
+            .highlight_symbol("▸ ")
+            .highlight_style(self.theme.row_selected());
+        frame.render_stateful_widget(list, list_area, &mut self.account_state);
         register_rows(
             &mut self.hitboxes,
             &self.account_state,
-            inner,
-            self.accounts.accounts().len(),
+            list_area,
+            account_count,
             HitAction::AccountRow,
         );
 
-        self.render_account_details(frame, chunks[2]);
+        if account_count == 0 {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "No accounts. Press 'n' for offline or 'm' for Microsoft.",
+                    self.theme.card_dim(),
+                ))
+                .style(self.theme.card()),
+                list_area,
+            );
+        }
     }
 
     fn render_account_details(&mut self, frame: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(self.theme.block_border())
-            .title(Line::from(" Account / Skin ").style(self.theme.header()));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        let inner = card(self, frame, area, false);
+        if inner.height == 0 {
+            return;
+        }
 
         let account = self
             .account_state
@@ -104,9 +136,9 @@ impl App {
             frame.render_widget(
                 Paragraph::new(Span::styled(
                     "Press 'n' for an offline account or 'm' to sign in with Microsoft.",
-                    self.theme.dim(),
+                    self.theme.card_dim(),
                 ))
-                .style(self.theme.base()),
+                .style(self.theme.card()),
                 inner,
             );
             return;
@@ -132,36 +164,35 @@ impl App {
 
         let lines = vec![
             Line::from(vec![
-                Span::styled("  User:  ", self.theme.dim()),
                 Span::styled(account.username.clone(), self.theme.header()),
-                Span::styled(if active { "  (active)" } else { "" }, self.theme.accent()),
+                Span::styled(if active { "   active" } else { "" }, self.theme.accent()),
             ]),
             Line::from(vec![
-                Span::styled("  Type:  ", self.theme.dim()),
-                Span::styled(kind.to_string(), self.theme.base()),
-                Span::styled("   Token: ", self.theme.dim()),
-                Span::styled(token_state, self.theme.base()),
+                Span::styled("Type   ", self.theme.card_dim()),
+                Span::styled(kind.to_string(), self.theme.card()),
+                Span::styled("    Token   ", self.theme.card_dim()),
+                Span::styled(token_state, self.theme.card()),
             ]),
             Line::from(vec![
-                Span::styled("  UUID:  ", self.theme.dim()),
-                Span::styled(account.id.clone(), self.theme.base()),
+                Span::styled("UUID   ", self.theme.card_dim()),
+                Span::styled(account.id.clone(), self.theme.card()),
             ]),
             Line::from(vec![
-                Span::styled("  Head:  ", self.theme.dim()),
+                Span::styled("Head   ", self.theme.card_dim()),
                 Span::styled(head, self.theme.info_style()),
             ]),
             Line::from(vec![
-                Span::styled("  Body:  ", self.theme.dim()),
+                Span::styled("Body   ", self.theme.card_dim()),
                 Span::styled(body, self.theme.info_style()),
             ]),
             Line::from(Span::styled(
-                "  Press 'c' to set a skin from a URL or local .png (Microsoft accounts only).",
-                self.theme.dim(),
+                "Press 'c' to set a skin from a URL or local .png (Microsoft accounts only).",
+                self.theme.card_dim(),
             )),
         ];
         frame.render_widget(
             Paragraph::new(lines)
-                .style(self.theme.base())
+                .style(self.theme.card())
                 .wrap(Wrap { trim: false }),
             inner,
         );

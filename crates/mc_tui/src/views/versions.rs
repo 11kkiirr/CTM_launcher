@@ -4,11 +4,11 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::{App, ButtonId};
-use crate::views::buttons_row;
+use crate::app::{App, ButtonId, Focus};
+use crate::views::{buttons_row, card, section_title};
 
 impl App {
     pub(crate) fn render_versions(&mut self, frame: &mut Frame, area: Rect) {
@@ -20,7 +20,9 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
+                Constraint::Length(1),
                 Constraint::Length(9),
+                Constraint::Length(1),
                 Constraint::Min(3),
             ])
             .split(area);
@@ -28,7 +30,7 @@ impl App {
         buttons_row(
             self,
             frame,
-            chunks[0].x + 1,
+            chunks[0].x,
             chunks[0].y,
             area.x + area.width,
             &[
@@ -37,56 +39,63 @@ impl App {
             ],
         );
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(self.theme.block_border())
-            .title(Line::from(" Installed Version ").style(self.theme.header()));
-        let inner = block.inner(chunks[1]);
-        frame.render_widget(block, chunks[1]);
-
-        let lines = vec![
-            Line::from(vec![
-                Span::styled("  Minecraft      ", self.theme.dim()),
-                Span::styled(instance.metadata.game_version.clone(), self.theme.header()),
-            ]),
-            Line::from(vec![
-                Span::styled("  Modloader      ", self.theme.dim()),
-                Span::styled(
-                    instance.metadata.loader.label().to_string(),
-                    self.theme.accent(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("  Loader version ", self.theme.dim()),
-                Span::styled(
-                    instance
-                        .metadata
-                        .loader_version
-                        .clone()
-                        .unwrap_or_else(|| "latest".to_string()),
-                    self.theme.base(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("  Instance id    ", self.theme.dim()),
-                Span::styled(instance.id().to_string(), self.theme.dim()),
-            ]),
-        ];
+        let focused = self.focus == Focus::Content;
+        let inner = card(self, frame, chunks[2], focused);
+        if inner.height == 0 {
+            return;
+        }
         frame.render_widget(
-            Paragraph::new(lines)
-                .style(self.theme.base())
-                .wrap(Wrap { trim: false }),
-            inner,
+            Paragraph::new(section_title("Installed Version", "", &self.theme))
+                .style(self.theme.card()),
+            Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: 1,
+            },
         );
+
+        let rows = [
+            ("Minecraft", instance.metadata.game_version.clone()),
+            ("Modloader", instance.metadata.loader.label().to_string()),
+            (
+                "Loader version",
+                instance
+                    .metadata
+                    .loader_version
+                    .clone()
+                    .unwrap_or_else(|| "latest".to_string()),
+            ),
+            ("Instance id", instance.id().to_string()),
+        ];
+        for (idx, (label, value)) in rows.iter().enumerate() {
+            let y = inner.y + 2 + idx as u16;
+            if y >= inner.y + inner.height {
+                break;
+            }
+            let row = Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: 1,
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(format!("{label:<16}"), self.theme.card_dim()),
+                    Span::styled(value.clone(), self.theme.card()),
+                ]))
+                .style(self.theme.card()),
+                row,
+            );
+        }
 
         frame.render_widget(
             Paragraph::new(Span::styled(
-                "  Changing the game version resets the loader to the latest build for that version.",
-                self.theme.dim(),
+                "Changing the game version resets the loader to the latest build for that version.",
+                self.theme.card_dim(),
             ))
-            .style(self.theme.base()),
-            chunks[2],
+            .style(self.theme.card()),
+            chunks[4],
         );
     }
 

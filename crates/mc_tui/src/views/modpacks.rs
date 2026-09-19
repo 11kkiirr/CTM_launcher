@@ -4,11 +4,13 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, ButtonId, HitAction};
-use crate::views::{buttons_row, hovered_index, jump, move_sel, register_rows, row_style};
+use crate::app::{App, ButtonId, Focus, HitAction};
+use crate::views::{
+    buttons_row, card, hovered_index, jump, move_sel, register_rows, row_style, section_title,
+};
 
 impl App {
     pub(crate) fn render_modpacks(&mut self, frame: &mut Frame, area: Rect) {
@@ -16,15 +18,17 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
+                Constraint::Length(1),
                 Constraint::Min(5),
-                Constraint::Length(7),
+                Constraint::Length(1),
+                Constraint::Length(8),
             ])
             .split(area);
 
         buttons_row(
             self,
             frame,
-            chunks[0].x + 1,
+            chunks[0].x,
             chunks[0].y,
             area.x + area.width,
             &[
@@ -35,35 +39,51 @@ impl App {
         );
 
         if self.selected_project.is_some() {
-            self.render_project(frame, chunks[1]);
-            self.render_project_info(frame, chunks[2]);
+            self.render_project(frame, chunks[2]);
+            self.render_project_info(frame, chunks[4]);
         } else {
-            self.render_search_results(frame, chunks[1]);
-            self.render_search_info(frame, chunks[2]);
+            self.render_search_results(frame, chunks[2]);
+            self.render_search_info(frame, chunks[4]);
         }
     }
 
     fn render_search_results(&mut self, frame: &mut Frame, area: Rect) {
-        let title = if self.search_query.is_empty() {
-            " Modpack Search ".to_string()
+        let focused = self.focus == Focus::Content;
+        let inner = card(self, frame, area, focused);
+        if inner.height == 0 {
+            return;
+        }
+
+        let suffix = if self.search_query.is_empty() {
+            String::new()
         } else {
             format!(
-                " Search: {} ({} results) ",
+                "{}  ·  {} results",
                 self.search_query,
                 self.search_results.len()
             )
         };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(self.theme.block_border())
-            .title(Line::from(title).style(self.theme.header()));
-        let inner = block.inner(area);
+        frame.render_widget(
+            Paragraph::new(section_title("Modpacks", &suffix, &self.theme))
+                .style(self.theme.card()),
+            Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: 1,
+            },
+        );
 
+        let list_area = Rect {
+            x: inner.x,
+            y: inner.y + 1,
+            width: inner.width,
+            height: inner.height.saturating_sub(1),
+        };
         let selected = self.search_state.selected();
         let hovered = hovered_index(
             self,
-            inner,
+            list_area,
             self.search_state.offset(),
             self.search_results.len(),
         );
@@ -73,8 +93,8 @@ impl App {
             .enumerate()
             .map(|(idx, hit)| {
                 ListItem::new(Line::from(vec![
-                    Span::styled(hit.title.clone(), self.theme.base()),
-                    Span::styled(format!("  by {}", hit.author), self.theme.dim()),
+                    Span::styled(hit.title.clone(), self.theme.card()),
+                    Span::styled(format!("  by {}", hit.author), self.theme.card_dim()),
                     Span::styled(
                         format!("  ⤓ {}", format_count(hit.downloads)),
                         self.theme.accent(),
@@ -84,34 +104,62 @@ impl App {
             })
             .collect();
 
-        let list = List::new(items).block(block).highlight_symbol("▸ ");
-        frame.render_stateful_widget(list, area, &mut self.search_state);
+        let list = List::new(items)
+            .highlight_symbol("▸ ")
+            .highlight_style(self.theme.row_selected());
+        frame.render_stateful_widget(list, list_area, &mut self.search_state);
         register_rows(
             &mut self.hitboxes,
             &self.search_state,
-            inner,
+            list_area,
             self.search_results.len(),
             HitAction::SearchRow,
         );
+
+        if self.search_results.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "Press '/' to search Modrinth modpacks, or 'm' to import a local .mrpack.",
+                    self.theme.card_dim(),
+                ))
+                .style(self.theme.card()),
+                list_area,
+            );
+        }
     }
 
     fn render_project(&mut self, frame: &mut Frame, area: Rect) {
+        let focused = self.focus == Focus::Content;
+        let inner = card(self, frame, area, focused);
+        if inner.height == 0 {
+            return;
+        }
+
         let title = self
             .selected_project
             .as_ref()
-            .map(|p| format!(" {} — versions ", p.title))
-            .unwrap_or_else(|| " Versions ".to_string());
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(self.theme.block_border())
-            .title(Line::from(title).style(self.theme.header()));
-        let inner = block.inner(area);
+            .map(|p| p.title.clone())
+            .unwrap_or_else(|| "Versions".to_string());
+        frame.render_widget(
+            Paragraph::new(section_title("Versions", &title, &self.theme)).style(self.theme.card()),
+            Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: 1,
+            },
+        );
 
+        let list_area = Rect {
+            x: inner.x,
+            y: inner.y + 1,
+            width: inner.width,
+            height: inner.height.saturating_sub(1),
+        };
         let selected = self.project_state.selected();
         let hovered = hovered_index(
             self,
-            inner,
+            list_area,
             self.project_state.offset(),
             self.project_versions.len(),
         );
@@ -123,34 +171,32 @@ impl App {
                 let loaders = version.loaders.join(", ");
                 let game = version.game_versions.first().cloned().unwrap_or_default();
                 ListItem::new(Line::from(vec![
-                    Span::styled(version.version_number.clone(), self.theme.base()),
-                    Span::styled(format!("  {} {}", game, loaders), self.theme.dim()),
+                    Span::styled(version.version_number.clone(), self.theme.card()),
+                    Span::styled(format!("  {game} {loaders}"), self.theme.card_dim()),
                     Span::styled(format!("  [{}]", version.version_type), self.theme.accent()),
                 ]))
                 .style(row_style(self, idx, selected, hovered))
             })
             .collect();
 
-        let list = List::new(items).block(block).highlight_symbol("▸ ");
-        frame.render_stateful_widget(list, area, &mut self.project_state);
+        let list = List::new(items)
+            .highlight_symbol("▸ ")
+            .highlight_style(self.theme.row_selected());
+        frame.render_stateful_widget(list, list_area, &mut self.project_state);
         register_rows(
             &mut self.hitboxes,
             &self.project_state,
-            inner,
+            list_area,
             self.project_versions.len(),
             HitAction::ProjectVersionRow,
         );
     }
 
     fn render_search_info(&mut self, frame: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(self.theme.block_border())
-            .title(Line::from(" Details ").style(self.theme.header()));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
+        let inner = card(self, frame, area, false);
+        if inner.height == 0 {
+            return;
+        }
         let Some(hit) = self
             .search_state
             .selected()
@@ -159,66 +205,62 @@ impl App {
             frame.render_widget(
                 Paragraph::new(Span::styled(
                     "Press '/' to search Modrinth modpacks, or 'm' to import a local .mrpack file.",
-                    self.theme.dim(),
+                    self.theme.card_dim(),
                 ))
-                .style(self.theme.base()),
+                .style(self.theme.card()),
                 inner,
             );
             return;
         };
         let lines = vec![
             Line::from(Span::styled(hit.title.clone(), self.theme.header())),
-            Line::from(Span::styled(hit.description.clone(), self.theme.base())),
+            Line::from(Span::styled(hit.description.clone(), self.theme.card())),
             Line::from(""),
             Line::from(vec![
-                Span::styled("Downloads: ", self.theme.dim()),
+                Span::styled("Downloads  ", self.theme.card_dim()),
                 Span::styled(format_count(hit.downloads), self.theme.accent()),
-                Span::styled("   Followers: ", self.theme.dim()),
+                Span::styled("    Followers  ", self.theme.card_dim()),
                 Span::styled(format_count(hit.follows), self.theme.accent()),
             ]),
             Line::from(vec![
-                Span::styled("Categories: ", self.theme.dim()),
+                Span::styled("Categories  ", self.theme.card_dim()),
                 Span::styled(hit.categories.join(", "), self.theme.info_style()),
             ]),
         ];
         frame.render_widget(
             Paragraph::new(lines)
-                .style(self.theme.base())
+                .style(self.theme.card())
                 .wrap(Wrap { trim: true }),
             inner,
         );
     }
 
     fn render_project_info(&mut self, frame: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(self.theme.block_border())
-            .title(Line::from(" Project ").style(self.theme.header()));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
+        let inner = card(self, frame, area, false);
+        if inner.height == 0 {
+            return;
+        }
         let Some(project) = self.selected_project.as_ref() else {
             return;
         };
         let lines = vec![
             Line::from(Span::styled(project.title.clone(), self.theme.header())),
-            Line::from(Span::styled(project.description.clone(), self.theme.base())),
+            Line::from(Span::styled(project.description.clone(), self.theme.card())),
             Line::from(""),
             Line::from(vec![
-                Span::styled("Downloads: ", self.theme.dim()),
+                Span::styled("Downloads  ", self.theme.card_dim()),
                 Span::styled(format_count(project.downloads), self.theme.accent()),
-                Span::styled("   Versions: ", self.theme.dim()),
+                Span::styled("    Versions  ", self.theme.card_dim()),
                 Span::styled(project.versions.len().to_string(), self.theme.accent()),
             ]),
             Line::from(Span::styled(
                 "Enter/i installs the selected version into the current instance. Esc goes back.",
-                self.theme.dim(),
+                self.theme.card_dim(),
             )),
         ];
         frame.render_widget(
             Paragraph::new(lines)
-                .style(self.theme.base())
+                .style(self.theme.card())
                 .wrap(Wrap { trim: true }),
             inner,
         );

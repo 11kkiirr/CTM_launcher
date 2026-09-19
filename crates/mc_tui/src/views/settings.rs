@@ -3,11 +3,11 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, ButtonId, HitAction};
-use crate::views::buttons_row;
+use crate::app::{App, ButtonId, Focus, HitAction};
+use crate::views::{buttons_row, card, section_title};
 
 const FIELD_COUNT: usize = 7;
 
@@ -17,7 +17,9 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
-                Constraint::Length(FIELD_COUNT as u16 + 2),
+                Constraint::Length(1),
+                Constraint::Length(FIELD_COUNT as u16 + 3),
+                Constraint::Length(1),
                 Constraint::Min(5),
             ])
             .split(area);
@@ -25,7 +27,7 @@ impl App {
         buttons_row(
             self,
             frame,
-            chunks[0].x + 1,
+            chunks[0].x,
             chunks[0].y,
             area.x + area.width,
             &[
@@ -35,11 +37,28 @@ impl App {
             ],
         );
 
-        self.render_settings_fields(frame, chunks[1]);
-        self.render_java_list(frame, chunks[2]);
+        self.render_settings_fields(frame, chunks[2]);
+        self.render_java_list(frame, chunks[4]);
     }
 
     fn render_settings_fields(&mut self, frame: &mut Frame, area: Rect) {
+        let focused = self.focus == Focus::Content;
+        let inner = card(self, frame, area, focused);
+        if inner.height == 0 {
+            return;
+        }
+
+        frame.render_widget(
+            Paragraph::new(section_title("Launcher Settings", "", &self.theme))
+                .style(self.theme.card()),
+            Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: 1,
+            },
+        );
+
         let s = &self.settings;
         let java = s
             .java_path
@@ -65,34 +84,27 @@ impl App {
             ),
         ];
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(self.theme.block_border())
-            .title(Line::from(" Launcher Settings ").style(self.theme.header()));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
         for (idx, (label, value)) in values.iter().enumerate() {
-            if idx as u16 >= inner.height {
+            let y = inner.y + 2 + idx as u16;
+            if y >= inner.y + inner.height {
                 break;
             }
             let row = Rect {
                 x: inner.x,
-                y: inner.y + idx as u16,
+                y,
                 width: inner.width,
                 height: 1,
             };
             let selected = idx == self.settings_field;
             let style = if selected {
-                self.theme.selection()
+                self.theme.row_selected()
             } else {
-                self.theme.base()
+                self.theme.row()
             };
-            let marker = if selected { "▸" } else { " " };
+            let marker = if selected { "▸ " } else { "  " };
             let line = Line::from(vec![
-                Span::styled(format!(" {marker} "), style),
-                Span::styled(format!("{label:<20}"), self.theme.dim()),
+                Span::styled(marker.to_string(), style),
+                Span::styled(format!("{label:<20}"), self.theme.card_dim()),
                 Span::styled(value.clone(), style),
             ]);
             frame.render_widget(Paragraph::new(line).style(style), row);
@@ -104,41 +116,55 @@ impl App {
     }
 
     fn render_java_list(&mut self, frame: &mut Frame, area: Rect) {
+        let inner = card(self, frame, area, false);
+        if inner.height == 0 {
+            return;
+        }
+
+        frame.render_widget(
+            Paragraph::new(section_title(
+                "Java Runtimes",
+                &format!("{}  ·  press 'J' to rescan", self.java_installations.len()),
+                &self.theme,
+            ))
+            .style(self.theme.card()),
+            Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: 1,
+            },
+        );
+
+        let list_area = Rect {
+            x: inner.x,
+            y: inner.y + 1,
+            width: inner.width,
+            height: inner.height.saturating_sub(1),
+        };
         let items: Vec<ListItem> = self
             .java_installations
             .iter()
             .map(|java| {
                 ListItem::new(Line::from(vec![
                     Span::styled(format!("Java {:<3} ", java.major), self.theme.accent()),
-                    Span::styled(java.version.clone(), self.theme.base()),
-                    Span::styled(format!("  {}", java.path.display()), self.theme.dim()),
+                    Span::styled(java.version.clone(), self.theme.card()),
+                    Span::styled(format!("  {}", java.path.display()), self.theme.card_dim()),
                 ]))
+                .style(self.theme.row())
             })
             .collect();
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(self.theme.block_border())
-            .title(
-                Line::from(format!(
-                    " Detected Java Runtimes ({}) — press 'J' to rescan ",
-                    self.java_installations.len()
-                ))
-                .style(self.theme.header()),
-            );
-        let inner = block.inner(area);
-        let list = List::new(items).block(block);
-        frame.render_widget(list, area);
+        frame.render_widget(List::new(items).style(self.theme.card()), list_area);
 
         if self.java_installations.is_empty() {
             frame.render_widget(
                 Paragraph::new(Span::styled(
                     "Scanning for Java runtimes...",
-                    self.theme.dim(),
+                    self.theme.card_dim(),
                 ))
-                .style(self.theme.base()),
-                inner,
+                .style(self.theme.card()),
+                list_area,
             );
         }
     }

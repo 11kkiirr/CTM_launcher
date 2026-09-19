@@ -5,8 +5,9 @@ use crossterm::event::{KeyCode, KeyEvent};
 use mc_core::instance::LoaderType;
 use mc_core::modrinth::{Project, SearchHit, Version};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{List, ListItem, Paragraph};
 use ratatui::Frame;
 
 use crate::app::App;
@@ -454,62 +455,62 @@ impl App {
         };
         let popup = crate::widgets::centered_rect(76, 76, area);
         frame.render_widget(ratatui::widgets::Clear, popup);
+        let surface = Style::default().fg(self.theme.fg).bg(self.theme.panel_alt);
+        frame.render_widget(ratatui::widgets::Block::default().style(surface), popup);
+        crate::views::accent_bar(frame, popup, &self.theme);
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(self.theme.block_border_focused())
-            .title(Line::from(" New Build ").style(self.theme.header()))
-            .style(self.theme.base());
-        let inner = block.inner(popup);
-        frame.render_widget(block, popup);
-
+        let content = Rect {
+            x: popup.x + 2,
+            y: popup.y + 1,
+            width: popup.width.saturating_sub(3),
+            height: popup.height.saturating_sub(2),
+        };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2),
+                Constraint::Length(1),
+                Constraint::Length(1),
                 Constraint::Min(4),
                 Constraint::Length(1),
             ])
-            .split(inner);
+            .split(content);
+
+        frame.render_widget(
+            Paragraph::new(Span::styled("New Build", self.theme.header())).style(surface),
+            chunks[0],
+        );
 
         let mut tabs = Vec::new();
         for kind in BuildKind::all() {
             let selected = kind == wizard.kind;
             let style = if selected {
-                self.theme.selection()
+                self.theme.row_selected()
             } else {
-                self.theme.dim()
+                self.theme.card_dim()
             };
             tabs.push(Span::styled(format!(" {} ", kind.label()), style));
             tabs.push(Span::raw("  "));
         }
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(tabs),
-                Line::from(Span::styled(
-                    format!("  {}", wizard.kind.description()),
-                    self.theme.dim(),
-                )),
-            ])
-            .style(self.theme.base()),
-            chunks[0],
-        );
+        frame.render_widget(Paragraph::new(Line::from(tabs)).style(surface), chunks[1]);
 
         match wizard.step {
-            WizardStep::Kind => self.render_wizard_kinds(frame, chunks[1]),
-            WizardStep::Configure => self.render_wizard_configure(frame, chunks[1]),
-            WizardStep::ModrinthSearch => self.render_wizard_search(frame, chunks[1]),
-            WizardStep::ModrinthProject => self.render_wizard_project(frame, chunks[1]),
+            WizardStep::Kind => self.render_wizard_kinds(frame, chunks[2]),
+            WizardStep::Configure => self.render_wizard_configure(frame, chunks[2]),
+            WizardStep::ModrinthSearch => self.render_wizard_search(frame, chunks[2]),
+            WizardStep::ModrinthProject => self.render_wizard_project(frame, chunks[2]),
         }
 
         frame.render_widget(
-            Paragraph::new(Span::styled(
-                "  Enter continue · Esc back · Tab/↑↓ move · ←→ change",
-                self.theme.dim(),
-            ))
-            .style(self.theme.base()),
-            chunks[2],
+            Paragraph::new(Line::from(vec![
+                Span::styled("Enter", self.theme.accent()),
+                Span::styled(" continue", self.theme.card_dim()),
+                Span::styled("   Esc", self.theme.accent()),
+                Span::styled(" back", self.theme.card_dim()),
+                Span::styled("   Tab/↑↓", self.theme.accent()),
+                Span::styled(" move", self.theme.card_dim()),
+            ]))
+            .style(surface),
+            chunks[3],
         );
     }
 
@@ -517,23 +518,24 @@ impl App {
         let Some(Overlay::Wizard(wizard)) = self.overlay.as_ref() else {
             return;
         };
+        let surface = Style::default().fg(self.theme.fg).bg(self.theme.panel_alt);
         for (idx, kind) in BuildKind::all().iter().enumerate() {
             let row = Rect {
-                x: area.x + 1,
+                x: area.x,
                 y: area.y + idx as u16 * 2,
-                width: area.width.saturating_sub(2),
+                width: area.width,
                 height: 1,
             };
             let selected = *kind == wizard.kind;
             let style = if selected {
-                self.theme.selection()
+                self.theme.row_selected()
             } else {
-                self.theme.base()
+                surface
             };
-            let marker = if selected { "▸" } else { " " };
+            let marker = if selected { "▸ " } else { "  " };
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    format!(" {marker} {} ", kind.label()),
+                    format!("{marker}{}", kind.label()),
                     style,
                 )))
                 .style(style),
@@ -541,10 +543,10 @@ impl App {
             );
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    format!("     {}", kind.description()),
-                    self.theme.dim(),
+                    format!("    {}", kind.description()),
+                    self.theme.card_dim(),
                 ))
-                .style(self.theme.base()),
+                .style(surface),
                 Rect {
                     y: row.y + 1,
                     height: 1,
@@ -594,25 +596,26 @@ impl App {
         rows: &[(&str, String)],
         active: usize,
     ) {
+        let surface = Style::default().fg(self.theme.fg).bg(self.theme.panel_alt);
         for (idx, (label, value)) in rows.iter().enumerate() {
             let row = Rect {
-                x: area.x + 1,
+                x: area.x,
                 y: area.y + idx as u16,
-                width: area.width.saturating_sub(2),
+                width: area.width,
                 height: 1,
             };
             let selected = idx == active;
             let style = if selected {
-                self.theme.selection()
+                self.theme.row_selected()
             } else {
-                self.theme.base()
+                surface
             };
-            let marker = if selected { "▸" } else { " " };
+            let marker = if selected { "▸ " } else { "  " };
             let line = if label.is_empty() {
-                Line::from(Span::styled(format!(" {marker} {value}"), style))
+                Line::from(Span::styled(format!("{marker}{value}"), style))
             } else {
                 Line::from(vec![
-                    Span::styled(format!(" {marker} {label:<16}"), self.theme.dim()),
+                    Span::styled(format!("{marker}{label:<16}"), self.theme.card_dim()),
                     Span::styled(value.clone(), style),
                 ])
             };
@@ -624,6 +627,7 @@ impl App {
         let Some(Overlay::Wizard(wizard)) = self.overlay.clone() else {
             return;
         };
+        let surface = Style::default().fg(self.theme.fg).bg(self.theme.panel_alt);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(2), Constraint::Min(3)])
@@ -631,10 +635,10 @@ impl App {
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("  Search: ", self.theme.dim()),
+                Span::styled("Search  ", self.theme.card_dim()),
                 Span::styled(format!("{}█", wizard.query), self.theme.accent()),
             ]))
-            .style(self.theme.base()),
+            .style(surface),
             chunks[0],
         );
 
@@ -645,20 +649,21 @@ impl App {
             .enumerate()
             .map(|(idx, hit)| {
                 ListItem::new(Line::from(vec![
-                    Span::styled(hit.title.clone(), self.theme.base()),
-                    Span::styled(format!("  by {}", hit.author), self.theme.dim()),
+                    Span::styled(hit.title.clone(), surface),
+                    Span::styled(format!("  by {}", hit.author), self.theme.card_dim()),
                     Span::styled(format!("  ⤓ {}", hit.downloads), self.theme.accent()),
                 ]))
                 .style(row_style(self, idx, selected, None))
             })
             .collect();
-        frame.render_widget(List::new(items).style(self.theme.base()), chunks[1]);
+        frame.render_widget(List::new(items).style(surface), chunks[1]);
     }
 
     fn render_wizard_project(&mut self, frame: &mut Frame, area: Rect) {
         let Some(Overlay::Wizard(wizard)) = self.overlay.clone() else {
             return;
         };
+        let surface = Style::default().fg(self.theme.fg).bg(self.theme.panel_alt);
         let title = wizard
             .project
             .as_ref()
@@ -670,13 +675,13 @@ impl App {
             .split(area);
         frame.render_widget(
             Paragraph::new(vec![
-                Line::from(Span::styled(format!("  {title}"), self.theme.header())),
+                Line::from(Span::styled(title, self.theme.header())),
                 Line::from(Span::styled(
-                    "  Choose a version to install:",
-                    self.theme.dim(),
+                    "Choose a version to install:",
+                    self.theme.card_dim(),
                 )),
             ])
-            .style(self.theme.base()),
+            .style(surface),
             chunks[0],
         );
 
@@ -688,19 +693,17 @@ impl App {
             .map(|(idx, version)| {
                 let game = version.game_versions.first().cloned().unwrap_or_default();
                 ListItem::new(Line::from(vec![
-                    Span::styled(version.version_number.clone(), self.theme.base()),
+                    Span::styled(version.version_number.clone(), surface),
                     Span::styled(
                         format!("  {game} {}", version.loaders.join(", ")),
-                        self.theme.dim(),
+                        self.theme.card_dim(),
                     ),
                 ]))
                 .style(row_style(self, idx, selected, None))
             })
             .collect();
         frame.render_widget(
-            List::new(items)
-                .style(self.theme.base())
-                .highlight_symbol("▸ "),
+            List::new(items).style(surface).highlight_symbol("▸ "),
             chunks[1],
         );
     }

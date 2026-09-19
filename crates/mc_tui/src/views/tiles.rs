@@ -1,32 +1,48 @@
-//! Instance picker rendered as friendly square tiles in the main content area.
+//! Instance picker rendered as flat, borderless cards in the main content area.
 
 use crossterm::event::{KeyCode, KeyEvent};
-use mc_core::instance::Instance;
+use mc_core::instance::{Instance, LoaderType};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, ButtonId, HitAction};
-use crate::views::buttons_row;
+use crate::app::{App, ButtonId, Focus, HitAction};
+use crate::views::{buttons_row, truncate};
 
-const TILE_W: u16 = 24;
+const TILE_W: u16 = 30;
 const TILE_H: u16 = 7;
-const GAP: u16 = 1;
+const GAP_X: u16 = 2;
+const GAP_Y: u16 = 1;
+
+/// A small glyph for a mod loader.
+pub(crate) fn loader_icon(loader: LoaderType) -> &'static str {
+    match loader {
+        LoaderType::NeoForge | LoaderType::Forge => "⚙",
+        LoaderType::Fabric | LoaderType::Quilt => "⚡",
+        LoaderType::Paper => "◇",
+        LoaderType::Vanilla => "▣",
+    }
+}
 
 impl App {
-    /// Render the build action toolbar plus the grid of instance tiles.
+    /// Render the build action toolbar plus the grid of instance cards.
     pub(crate) fn render_instance_grid(&mut self, frame: &mut Frame, area: Rect) {
-        let chunks = Layout::default()
+        let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(3)])
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(3),
+            ])
             .split(area);
 
         buttons_row(
             self,
             frame,
-            chunks[0].x + 1,
-            chunks[0].y,
+            rows[0].x,
+            rows[0].y,
             area.x + area.width,
             &[
                 ("Launch", ButtonId::Launch),
@@ -38,28 +54,44 @@ impl App {
             ],
         );
 
-        let area = chunks[1];
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(self.theme.block_border())
-            .title(
-                Line::from(format!(" Builds ({}) ", self.instances.len()))
-                    .style(self.theme.header()),
-            );
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        let focused = self.focus == Focus::Content;
+        let inner = crate::views::card(self, frame, rows[2], focused);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
 
-        if inner.width < TILE_W || inner.height < TILE_H {
+        let title_area = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(crate::views::section_title(
+                "Builds",
+                &format!("{}", self.instances.len()),
+                &self.theme,
+            ))
+            .style(self.theme.card()),
+            title_area,
+        );
+
+        let grid = Rect {
+            x: inner.x,
+            y: inner.y + 2,
+            width: inner.width,
+            height: inner.height.saturating_sub(2),
+        };
+        if grid.width < TILE_W || grid.height < TILE_H {
             frame.render_widget(
-                Paragraph::new(Span::styled("…", self.theme.dim())).style(self.theme.base()),
-                inner,
+                Paragraph::new(Span::styled("…", self.theme.card_dim())).style(self.theme.card()),
+                grid,
             );
             return;
         }
 
-        let cols = ((inner.width + GAP) / (TILE_W + GAP)).max(1) as usize;
-        let visible_rows = ((inner.height + GAP) / (TILE_H + GAP)).max(1) as usize;
+        let cols = ((grid.width + GAP_X) / (TILE_W + GAP_X)).max(1) as usize;
+        let visible_rows = ((grid.height + GAP_Y) / (TILE_H + GAP_Y)).max(1) as usize;
         self.tile_columns = cols;
         self.ensure_tile_visible(visible_rows);
 
@@ -72,10 +104,11 @@ impl App {
                 if idx >= total {
                     break;
                 }
-                let rect = tile_rect(inner, row, col);
+                let rect = tile_rect(grid, row, col);
                 let hovered = self.is_hovered(rect);
                 let is_selected = selected == Some(idx);
-                self.render_tile(frame, rect, &self.instances[idx], is_selected, hovered);
+                let instance = self.instances[idx].clone();
+                self.render_tile(frame, rect, &instance, is_selected, hovered);
                 self.push_hitbox(rect, HitAction::InstanceTile(idx));
             }
         }
@@ -84,39 +117,9 @@ impl App {
         let add_row = total / cols;
         let add_col = total % cols;
         if add_row >= self.tile_scroll && add_row < self.tile_scroll + visible_rows {
-            let rect = tile_rect(inner, add_row - self.tile_scroll, add_col);
+            let rect = tile_rect(grid, add_row - self.tile_scroll, add_col);
             let hovered = self.is_hovered(rect);
-            let border = if hovered {
-                self.theme.block_border_focused()
-            } else {
-                self.theme.block_border()
-            };
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_type(ratatui::widgets::BorderType::Rounded)
-                .border_style(border)
-                .style(if hovered {
-                    self.theme.hover()
-                } else {
-                    self.theme.base()
-                });
-            let inner_tile = block.inner(rect);
-            frame.render_widget(block, rect);
-            let style = if hovered {
-                self.theme.accent()
-            } else {
-                self.theme.dim()
-            };
-            frame.render_widget(
-                Paragraph::new(vec![
-                    Line::from(""),
-                    Line::from(""),
-                    Line::from(Span::styled("＋  New Build", style)),
-                ])
-                .alignment(Alignment::Center)
-                .style(self.theme.base()),
-                inner_tile,
-            );
+            self.render_add_tile(frame, rect, hovered);
             self.push_hitbox(rect, HitAction::AddInstance);
         }
     }
@@ -129,55 +132,81 @@ impl App {
         selected: bool,
         hovered: bool,
     ) {
-        let border = if selected || hovered {
-            self.theme.border_focused
+        let bg = if selected {
+            self.theme.selection_bg
         } else {
-            self.theme.border
+            self.theme.panel_alt
         };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(ratatui::style::Style::default().fg(border))
-            .style(if selected {
-                self.theme.selection()
-            } else if hovered {
-                self.theme.hover()
-            } else {
-                self.theme.base()
-            });
-        let inner = block.inner(rect);
-        frame.render_widget(block, rect);
+        let surface = Style::default().bg(bg);
+        frame.render_widget(Block::default().style(surface), rect);
+        if selected {
+            crate::views::accent_bar(frame, rect, &self.theme);
+        }
 
+        let inner = Rect {
+            x: rect.x + 2,
+            y: rect.y + 1,
+            width: rect.width.saturating_sub(4),
+            height: rect.height.saturating_sub(2),
+        };
         let width = inner.width as usize;
-        let loader = instance.metadata.loader.label();
-        let subtitle = match &instance.metadata.modpack {
+        let loader = instance.metadata.loader;
+        let title_style = if selected || hovered {
+            self.theme.accent()
+        } else {
+            Style::default().fg(self.theme.fg)
+        };
+        let meta = format!(
+            "{} {}  {}",
+            loader_icon(loader),
+            loader.label(),
+            instance.metadata.game_version
+        );
+        let sub = match &instance.metadata.modpack {
             Some(pack) => format!("⛁ {}", pack.name),
-            None => format!("{} · {loader}", instance.metadata.game_version),
+            None => "● Ready".to_string(),
+        };
+        let sub_style = if instance.metadata.modpack.is_some() {
+            self.theme.info_style()
+        } else {
+            self.theme.accent()
         };
         let lines = vec![
             Line::from(""),
-            Line::from(Span::styled(
-                truncate(instance.name(), width),
-                self.theme.header(),
-            )),
-            Line::from(Span::styled(
-                truncate(
-                    &format!("{} · {loader}", instance.metadata.game_version),
-                    width,
-                ),
-                self.theme.dim(),
-            )),
-            Line::from(Span::styled(
-                truncate(&subtitle, width),
-                self.theme.info_style(),
-            )),
-            Line::from(""),
+            Line::from(Span::styled(truncate(instance.name(), width), title_style)),
+            Line::from(Span::styled(truncate(&meta, width), self.theme.dim())),
+            Line::from(Span::styled(truncate(&sub, width), sub_style)),
         ];
+        frame.render_widget(Paragraph::new(lines).style(surface), inner);
+    }
+
+    fn render_add_tile(&self, frame: &mut Frame, rect: Rect, hovered: bool) {
+        let bg = if hovered {
+            self.theme.selection_bg
+        } else {
+            self.theme.panel_alt
+        };
+        let surface = Style::default().bg(bg);
+        frame.render_widget(Block::default().style(surface), rect);
+        let style = if hovered {
+            self.theme.accent()
+        } else {
+            self.theme.card_dim()
+        };
+        let inner = Rect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        };
         frame.render_widget(
-            Paragraph::new(lines)
-                .alignment(Alignment::Center)
-                .wrap(Wrap { trim: true })
-                .style(self.theme.base()),
+            Paragraph::new(vec![
+                Line::from(""),
+                Line::from(""),
+                Line::from(Span::styled("＋  New Build", style)),
+            ])
+            .alignment(Alignment::Center)
+            .style(surface),
             inner,
         );
     }
@@ -243,23 +272,9 @@ impl App {
 
 fn tile_rect(inner: Rect, row: usize, col: usize) -> Rect {
     Rect {
-        x: inner.x + col as u16 * (TILE_W + GAP),
-        y: inner.y + row as u16 * (TILE_H + GAP),
+        x: inner.x + col as u16 * (TILE_W + GAP_X),
+        y: inner.y + row as u16 * (TILE_H + GAP_Y),
         width: TILE_W,
         height: TILE_H,
     }
-}
-
-/// Truncate a string to `max` display columns, appending `…` when clipped.
-fn truncate(input: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    let chars: Vec<char> = input.chars().collect();
-    if chars.len() <= max {
-        return input.to_string();
-    }
-    let mut out: String = chars.into_iter().take(max.saturating_sub(1)).collect();
-    out.push('…');
-    out
 }
