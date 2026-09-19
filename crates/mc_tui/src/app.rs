@@ -10,8 +10,8 @@ use mc_core::auth::{Account, AccountKind, AccountStore};
 use mc_core::install::Installer;
 use mc_core::instance::{Instance, InstanceManager, JvmConfig};
 use mc_core::launch::{
-    java, resolve_instance_version, select_java, version_id_for, JavaInstallation, Launcher,
-    LogReceiver, ProcessHandle,
+    java, resolve_instance_version, select_java, JavaInstallation, Launcher, LogReceiver,
+    ProcessHandle,
 };
 use mc_core::logs::{self, CrashAnalysis, LogBuffer};
 use mc_core::modpack::ModpackInstaller;
@@ -36,57 +36,63 @@ use crate::theme::Theme;
 /// The Azure application (client) id used for Microsoft device-code auth.
 pub const CLIENT_ID: &str = mc_core::auth::microsoft::DEFAULT_CLIENT_ID;
 
-/// Top-level navigation tabs.
+/// Top-level pages.
+///
+/// The layout mirrors Prism Launcher: an instance-centric sidebar plus a few
+/// global pages (accounts and launcher settings).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tab {
-    Instances,
-    Modpacks,
-    Mods,
+pub enum Page {
+    /// A page scoped to the selected instance.
+    Instance,
+    /// Account switcher and skin tools.
     Accounts,
+    /// Global launcher settings.
+    Launcher,
+}
+
+/// Sub-pages shown for the selected instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstancePage {
+    Overview,
+    Mods,
+    Modpacks,
     Logs,
     Settings,
 }
 
-impl Tab {
-    pub fn all() -> [Tab; 6] {
+impl InstancePage {
+    pub fn all() -> [InstancePage; 5] {
         [
-            Tab::Instances,
-            Tab::Modpacks,
-            Tab::Mods,
-            Tab::Accounts,
-            Tab::Logs,
-            Tab::Settings,
+            InstancePage::Overview,
+            InstancePage::Mods,
+            InstancePage::Modpacks,
+            InstancePage::Logs,
+            InstancePage::Settings,
         ]
     }
 
     pub fn title(&self) -> &'static str {
         match self {
-            Tab::Instances => "Instances",
-            Tab::Modpacks => "Modpacks",
-            Tab::Mods => "Mod Manager",
-            Tab::Accounts => "Accounts & Skins",
-            Tab::Logs => "Console / Logs",
-            Tab::Settings => "Settings",
+            InstancePage::Overview => "Overview",
+            InstancePage::Mods => "Mods",
+            InstancePage::Modpacks => "Modpacks",
+            InstancePage::Logs => "Logs",
+            InstancePage::Settings => "Settings",
         }
     }
 
     pub fn icon(&self) -> &'static str {
         match self {
-            Tab::Instances => "▣",
-            Tab::Modpacks => "▤",
-            Tab::Mods => "✦",
-            Tab::Accounts => "☺",
-            Tab::Logs => "≣",
-            Tab::Settings => "⚙",
+            InstancePage::Overview => "▤",
+            InstancePage::Mods => "✦",
+            InstancePage::Modpacks => "⛁",
+            InstancePage::Logs => "≣",
+            InstancePage::Settings => "⚙",
         }
-    }
-
-    pub fn index(&self) -> usize {
-        Tab::all().iter().position(|t| t == self).unwrap_or(0)
     }
 }
 
-/// Which region currently owns arrow-key navigation.
+/// Which region currently owns keyboard navigation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Sidebar,
@@ -96,8 +102,11 @@ pub enum Focus {
 /// A clickable region registered during rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HitAction {
-    Tab(Tab),
-    InstanceRow(usize),
+    InstanceTile(usize),
+    AddInstance,
+    InstanceTab(InstancePage),
+    HeaderAccounts,
+    HeaderSettings,
     SearchRow(usize),
     ProjectVersionRow(usize),
     ModRow(usize),
@@ -166,9 +175,19 @@ pub struct App {
     pub theme: Theme,
     pub settings: LauncherSettings,
 
-    pub tab: Tab,
+    pub page: Page,
+    pub instance_page: InstancePage,
     pub focus: Focus,
     pub should_quit: bool,
+
+    /// Current mouse position, used for hover highlighting.
+    pub mouse_pos: Option<(u16, u16)>,
+    /// First visible tile row in the instance sidebar.
+    pub tile_scroll: usize,
+    /// Number of tile columns computed during the last render.
+    pub tile_columns: usize,
+    /// Sidebar rectangle from the last render (for wheel routing).
+    pub sidebar_area: Rect,
 
     pub status: String,
     pub toast: Option<Toast>,
@@ -231,9 +250,14 @@ impl App {
             paths,
             theme: Theme::default(),
             settings,
-            tab: Tab::Instances,
+            page: Page::Instance,
+            instance_page: InstancePage::Overview,
             focus: Focus::Content,
             should_quit: false,
+            mouse_pos: None,
+            tile_scroll: 0,
+            tile_columns: 2,
+            sidebar_area: Rect::default(),
             status: "Ready".to_string(),
             toast: None,
             progress: None,
@@ -430,7 +454,8 @@ impl App {
                     started: Instant::now(),
                 });
                 self.set_toast(format!("Launched {version}"), false);
-                self.tab = Tab::Logs;
+                self.page = Page::Instance;
+                self.instance_page = InstancePage::Logs;
             }
             EngineEvent::InstancesChanged => {
                 self.reload_instances();
@@ -542,10 +567,14 @@ impl App {
             KeyCode::Char('?') => self.show_help(),
             KeyCode::Tab => self.toggle_focus(),
             KeyCode::BackTab => self.toggle_focus(),
-            KeyCode::Char(c @ '1'..='6') => {
+            KeyCode::F(2) => self.open_page(Page::Accounts),
+            KeyCode::F(3) => self.open_page(Page::Launcher),
+            KeyCode::Esc if self.page != Page::Instance => self.open_page(Page::Instance),
+            KeyCode::Char(c @ '1'..='5') if self.page == Page::Instance => {
                 let idx = (c as u8 - b'1') as usize;
-                self.select_tab(Tab::all()[idx]);
+                self.open_instance_page(InstancePage::all()[idx]);
             }
+            KeyCode::Char('n') if self.page == Page::Instance => self.open_create_instance_form(),
             _ => self.handle_view_key(key),
         }
     }
@@ -557,17 +586,31 @@ impl App {
         };
     }
 
-    pub(crate) fn select_tab(&mut self, tab: Tab) {
-        self.tab = tab;
+    /// Switch to a global page.
+    pub(crate) fn open_page(&mut self, page: Page) {
+        self.page = page;
         self.focus = Focus::Content;
-        match tab {
-            Tab::Mods => self.reload_mods(),
-            Tab::Logs => {
-                if self.running.is_none() && self.log_buffer.is_empty() {
-                    self.load_latest_log();
-                }
+        match page {
+            Page::Accounts => self.reload_accounts(),
+            Page::Instance => self.on_instance_page(self.instance_page),
+            Page::Launcher => {}
+        }
+    }
+
+    /// Switch to an instance sub-page.
+    pub(crate) fn open_instance_page(&mut self, page: InstancePage) {
+        self.page = Page::Instance;
+        self.instance_page = page;
+        self.focus = Focus::Content;
+        self.on_instance_page(page);
+    }
+
+    fn on_instance_page(&mut self, page: InstancePage) {
+        match page {
+            InstancePage::Mods => self.reload_mods(),
+            InstancePage::Logs if self.running.is_none() && self.log_buffer.is_empty() => {
+                self.load_latest_log();
             }
-            Tab::Accounts => self.reload_accounts(),
             _ => {}
         }
     }
@@ -577,33 +620,67 @@ impl App {
             self.handle_sidebar_key(key);
             return;
         }
-        match self.tab {
-            Tab::Instances => self.key_instances(key),
-            Tab::Modpacks => self.key_modpacks(key),
-            Tab::Mods => self.key_mods(key),
-            Tab::Accounts => self.key_accounts(key),
-            Tab::Logs => self.key_logs(key),
-            Tab::Settings => self.key_settings(key),
+        match self.page {
+            Page::Instance => match self.instance_page {
+                InstancePage::Overview => self.key_overview(key),
+                InstancePage::Mods => self.key_mods(key),
+                InstancePage::Modpacks => self.key_modpacks(key),
+                InstancePage::Logs => self.key_logs(key),
+                InstancePage::Settings => self.key_instance_settings(key),
+            },
+            Page::Accounts => self.key_accounts(key),
+            Page::Launcher => self.key_settings(key),
         }
     }
 
     pub(crate) fn handle_sidebar_key(&mut self, key: KeyEvent) {
-        let tabs = Tab::all();
+        let cols = self.tile_columns.max(1);
+        let len = self.instances.len();
+        if len == 0 {
+            if key.code == KeyCode::Enter {
+                self.open_create_instance_form();
+            }
+            return;
+        }
+        let current = self.instance_state.selected().unwrap_or(0);
+        let select = |app: &mut Self, idx: usize| {
+            app.instance_state.select(Some(idx.min(len - 1)));
+            app.focus = Focus::Sidebar;
+            app.reload_mods();
+        };
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => {
-                let idx = (self.tab.index() + 1).min(tabs.len() - 1);
-                self.select_tab(tabs[idx]);
+                if current + cols < len {
+                    select(self, current + cols);
+                }
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                let idx = self.tab.index().saturating_sub(1);
-                self.select_tab(tabs[idx]);
+                if current >= cols {
+                    select(self, current - cols);
+                }
             }
-            KeyCode::Enter => self.focus = Focus::Content,
+            KeyCode::Right | KeyCode::Char('l') => {
+                if current % cols != cols - 1 && current + 1 < len {
+                    select(self, current + 1);
+                }
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                if current % cols != 0 {
+                    select(self, current - 1);
+                }
+            }
+            KeyCode::Char('g') => select(self, 0),
+            KeyCode::Char('G') => select(self, len - 1),
+            KeyCode::Enter => {
+                self.focus = Focus::Content;
+                self.open_instance_page(InstancePage::Overview);
+            }
             _ => {}
         }
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) {
+        self.mouse_pos = Some((mouse.column, mouse.row));
         if self.overlay.is_some() {
             if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
                 self.handle_overlay_click();
@@ -630,11 +707,11 @@ impl App {
 
     pub(crate) fn dispatch_hit(&mut self, action: HitAction) {
         match action {
-            HitAction::Tab(tab) => self.select_tab(tab),
-            HitAction::InstanceRow(idx) => {
-                self.instance_state.select(Some(idx));
-                self.focus = Focus::Content;
-            }
+            HitAction::InstanceTile(idx) => self.select_instance(idx),
+            HitAction::AddInstance => self.open_create_instance_form(),
+            HitAction::InstanceTab(page) => self.open_instance_page(page),
+            HitAction::HeaderAccounts => self.open_page(Page::Accounts),
+            HitAction::HeaderSettings => self.open_page(Page::Launcher),
             HitAction::SearchRow(idx) => {
                 self.search_state.select(Some(idx));
                 self.focus = Focus::Content;
@@ -665,6 +742,19 @@ impl App {
             }
             HitAction::Button(button) => self.dispatch_button(button),
         }
+    }
+
+    /// Select an instance from the tile grid.
+    pub(crate) fn select_instance(&mut self, idx: usize) {
+        if idx >= self.instances.len() {
+            return;
+        }
+        self.instance_state.select(Some(idx));
+        self.focus = Focus::Content;
+        if self.page != Page::Instance {
+            self.page = Page::Instance;
+        }
+        self.reload_mods();
     }
 
     pub(crate) fn dispatch_button(&mut self, button: ButtonId) {
@@ -699,31 +789,84 @@ impl App {
         if self.overlay.is_some() {
             return;
         }
-        match self.tab {
-            Tab::Instances => move_selection(&mut self.instance_state, self.instances.len(), delta),
-            Tab::Modpacks => {
-                if self.selected_project.is_some() {
-                    move_selection(&mut self.project_state, self.project_versions.len(), delta);
-                } else {
-                    move_selection(&mut self.search_state, self.search_results.len(), delta);
-                }
+        // Wheel over the sidebar scrolls the tile grid.
+        if let Some(pos) = self.mouse_pos {
+            if rect_contains(self.sidebar_area, pos) {
+                self.scroll_tiles(delta);
+                return;
             }
-            Tab::Mods => move_selection(&mut self.mods_state, self.installed_mods.len(), delta),
-            Tab::Accounts => move_selection(
+        }
+        match self.page {
+            Page::Instance => match self.instance_page {
+                InstancePage::Modpacks => {
+                    if self.selected_project.is_some() {
+                        move_selection(&mut self.project_state, self.project_versions.len(), delta);
+                    } else {
+                        move_selection(&mut self.search_state, self.search_results.len(), delta);
+                    }
+                }
+                InstancePage::Mods => {
+                    if self.mods_focus_search {
+                        move_selection(
+                            &mut self.mod_search_state,
+                            self.mod_search_results.len(),
+                            delta,
+                        );
+                    } else {
+                        move_selection(&mut self.mods_state, self.installed_mods.len(), delta);
+                    }
+                }
+                InstancePage::Logs => {
+                    let len = self.log_buffer.visible().count();
+                    move_selection(&mut self.log_state, len, delta);
+                }
+                InstancePage::Settings => {
+                    let len = settings_field_count();
+                    let next =
+                        (self.settings_field as i32 + delta).clamp(0, len as i32 - 1) as usize;
+                    self.settings_field = next;
+                }
+                InstancePage::Overview => {}
+            },
+            Page::Accounts => move_selection(
                 &mut self.account_state,
                 self.accounts.accounts().len(),
                 delta,
             ),
-            Tab::Logs => {
-                let len = self.log_buffer.visible().count();
-                move_selection(&mut self.log_state, len, delta);
-            }
-            Tab::Settings => {
+            Page::Launcher => {
                 let len = settings_field_count();
                 let next = (self.settings_field as i32 + delta).clamp(0, len as i32 - 1) as usize;
                 self.settings_field = next;
             }
         }
+    }
+
+    fn scroll_tiles(&mut self, delta: i32) {
+        let rows = self.tile_rows();
+        let next = (self.tile_scroll as i32 + delta).clamp(0, rows.saturating_sub(1) as i32);
+        self.tile_scroll = next as usize;
+    }
+
+    /// Total number of tile rows for the current instance count.
+    pub(crate) fn tile_rows(&self) -> usize {
+        let cols = self.tile_columns.max(1);
+        self.instances.len().div_ceil(cols)
+    }
+
+    /// Ensure the selected tile is within the visible window.
+    pub(crate) fn ensure_tile_visible(&mut self, visible_rows: usize) {
+        if visible_rows == 0 {
+            return;
+        }
+        let cols = self.tile_columns.max(1);
+        let selected_row = self.instance_state.selected().unwrap_or(0) / cols;
+        if selected_row < self.tile_scroll {
+            self.tile_scroll = selected_row;
+        } else if selected_row >= self.tile_scroll + visible_rows {
+            self.tile_scroll = selected_row + 1 - visible_rows;
+        }
+        let max_scroll = self.tile_rows().saturating_sub(visible_rows);
+        self.tile_scroll = self.tile_scroll.min(max_scroll);
     }
 
     // ---------------------------------------------------------------------
@@ -1133,23 +1276,24 @@ impl App {
                 };
 
                 let installer = Installer::new(client.clone(), paths.clone(), progress.clone());
-                let version_id = version_id_for(&instance);
-                let json = paths
-                    .versions_dir()
-                    .join(&version_id)
-                    .join(format!("{version_id}.json"));
-                if !json.exists() {
-                    let _ = tx.send(EngineEvent::Status(format!("Installing {version_id} ...")));
-                    installer
-                        .install_loader(
-                            &instance.metadata.game_version,
-                            instance.metadata.loader,
-                            instance.metadata.loader_version.as_deref(),
-                        )
-                        .await?;
-                }
-
-                let resolved = resolve_instance_version(&paths, &instance).await?;
+                let resolved = match resolve_instance_version(&paths, &instance).await {
+                    Ok(resolved) => resolved,
+                    Err(_) => {
+                        let _ = tx.send(EngineEvent::Status(format!(
+                            "Installing {} ...",
+                            instance.metadata.descriptor()
+                        )));
+                        installer
+                            .install_loader(
+                                &instance.metadata.game_version,
+                                instance.metadata.loader,
+                                instance.metadata.loader_version.as_deref(),
+                            )
+                            .await?;
+                        resolve_instance_version(&paths, &instance).await?
+                    }
+                };
+                let version_id = resolved.id.clone();
                 let required = resolved.details.required_java_major();
                 let java = match instance.metadata.jvm.java_path.clone() {
                     Some(path) => java::probe(&path).await?,
@@ -1953,25 +2097,28 @@ impl App {
 
     pub(crate) fn show_help(&mut self) {
         let lines = vec![
-            "Global".to_string(),
-            "  1-6          switch tab".to_string(),
+            "Navigation".to_string(),
+            "  1-5          instance pages (Overview/Mods/Modpacks/Logs/Settings)".to_string(),
+            "  F2           Accounts & Skins".to_string(),
+            "  F3           Launcher settings".to_string(),
+            "  Esc          back to the instance view".to_string(),
             "  Tab          toggle sidebar/content focus".to_string(),
-            "  j/k, ↑/↓     move selection".to_string(),
+            "  ↑↓←→ / hjkl  move between tiles and lists".to_string(),
             "  g/G          jump to top/bottom".to_string(),
-            "  /            search (context sensitive)".to_string(),
             "  Enter        primary action".to_string(),
             "  q / Ctrl-C   quit".to_string(),
             String::new(),
-            "Instances".to_string(),
-            "  n new · i install · e edit · d delete · l launch".to_string(),
+            "Instances (sidebar tiles)".to_string(),
+            "  Enter select · n new · i install · e edit · d delete · l launch".to_string(),
             String::new(),
             "Mods".to_string(),
-            "  Space toggle · d delete · s search · u updates · r refresh".to_string(),
+            "  t switch pane · Space toggle · s search · u updates · d delete".to_string(),
             String::new(),
             "Logs".to_string(),
             "  p pause · c clear · / filter · a analyze crash".to_string(),
             String::new(),
-            "Mouse: click tabs/lists/buttons, scroll to navigate.".to_string(),
+            "Mouse: hover highlights; click tiles, tabs, lists and buttons;".to_string(),
+            "       scroll the sidebar to move through instance tiles.".to_string(),
         ];
         self.overlay = Some(Overlay::message("Help", lines));
     }
@@ -2001,6 +2148,13 @@ impl App {
         }
     }
 
+    /// Whether the mouse currently hovers `rect`.
+    pub(crate) fn is_hovered(&self, rect: Rect) -> bool {
+        self.mouse_pos
+            .map(|pos| rect_contains(rect, pos))
+            .unwrap_or(false)
+    }
+
     // ---------------------------------------------------------------------
     // Rendering
     // ---------------------------------------------------------------------
@@ -2023,61 +2177,72 @@ impl App {
 
         let body = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(22), Constraint::Min(10)])
+            .constraints([Constraint::Length(30), Constraint::Min(10)])
             .split(chunks[1]);
 
+        self.sidebar_area = body[0];
         self.render_sidebar(frame, body[0]);
 
-        match self.tab {
-            Tab::Instances => self.render_instances(frame, body[1]),
-            Tab::Modpacks => self.render_modpacks(frame, body[1]),
-            Tab::Mods => self.render_mods(frame, body[1]),
-            Tab::Accounts => self.render_accounts(frame, body[1]),
-            Tab::Logs => self.render_logs(frame, body[1]),
-            Tab::Settings => self.render_settings(frame, body[1]),
+        match self.page {
+            Page::Instance => {
+                if self.selected_instance().is_some() {
+                    let sub = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([Constraint::Length(1), Constraint::Min(3)])
+                        .split(body[1]);
+                    self.render_instance_tabbar(frame, sub[0], body[1].width);
+                    match self.instance_page {
+                        InstancePage::Overview => self.render_overview(frame, sub[1]),
+                        InstancePage::Mods => self.render_mods(frame, sub[1]),
+                        InstancePage::Modpacks => self.render_modpacks(frame, sub[1]),
+                        InstancePage::Logs => self.render_logs(frame, sub[1]),
+                        InstancePage::Settings => self.render_instance_settings(frame, sub[1]),
+                    }
+                } else {
+                    self.render_empty_state(frame, body[1]);
+                }
+            }
+            Page::Accounts => self.render_accounts(frame, body[1]),
+            Page::Launcher => self.render_settings(frame, body[1]),
         }
 
         self.render_footer(frame, chunks[2]);
         self.render_overlay(frame, area);
     }
 
-    pub(crate) fn render_header(&mut self, frame: &mut Frame, area: Rect) {
-        let active = self
-            .accounts
-            .active()
-            .map(|a| {
-                format!(
-                    "{} ({})",
-                    a.username,
-                    match a.kind {
-                        AccountKind::Microsoft => "Microsoft",
-                        AccountKind::Offline => "Offline",
-                    }
-                )
-            })
-            .unwrap_or_else(|| "no account".to_string());
-
-        let left = Line::from(vec![
-            Span::styled(" CTMLauncher ", self.theme.header()),
-            Span::styled(format!("· {} ", self.tab.title()), self.theme.dim()),
-        ]);
-        let right = Span::styled(format!("{active} "), self.theme.accent());
-        let width = area.width as usize;
-        let left_len = 2 + self.tab.title().len();
-        let pad = width.saturating_sub(left_len + active.len() + 3);
-        let line = Line::from(vec![
-            Span::styled(" CTMLauncher ", self.theme.header()),
-            Span::styled(format!("· {} ", self.tab.title()), self.theme.dim()),
-            Span::raw(" ".repeat(pad)),
-            right,
-        ]);
-        frame.render_widget(
-            Paragraph::new(if pad == 0 { left } else { line }).style(self.theme.base()),
-            area,
-        );
+    /// The per-instance tab strip.
+    pub(crate) fn render_instance_tabbar(&mut self, frame: &mut Frame, area: Rect, max_width: u16) {
+        let mut x = area.x;
+        for page in InstancePage::all() {
+            let label = format!(" {} {} ", page.icon(), page.title());
+            let width = label.chars().count() as u16;
+            if x + width > area.x + max_width {
+                break;
+            }
+            let rect = Rect {
+                x,
+                y: area.y,
+                width,
+                height: 1,
+            };
+            let selected = page == self.instance_page;
+            let style = if selected {
+                self.theme.selection()
+            } else if self.is_hovered(rect) {
+                self.theme.hover()
+            } else {
+                self.theme.dim()
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(label, style)).style(self.theme.base()),
+                rect,
+            );
+            self.push_hitbox(rect, HitAction::InstanceTab(page));
+            x += width;
+        }
     }
 
-    pub(crate) fn render_sidebar(&mut self, frame: &mut Frame, area: Rect) {
+    pub(crate) fn render_empty_state(&mut self, frame: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(ratatui::widgets::Borders::ALL)
             .border_style(self.theme.block_border())
@@ -2085,34 +2250,86 @@ impl App {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        for (idx, tab) in Tab::all().iter().enumerate() {
-            let row = Rect {
-                x: inner.x,
-                y: inner.y + idx as u16,
-                width: inner.width,
-                height: 1,
-            };
-            if row.y >= inner.y + inner.height {
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled("  No instance selected", self.theme.header())),
+            Line::from(Span::styled(
+                "  Create an instance to get started.",
+                self.theme.dim(),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  Press 'n' or click [+ Add Instance] in the sidebar.",
+                self.theme.accent(),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(lines).style(self.theme.base()), inner);
+    }
+
+    pub(crate) fn render_header(&mut self, frame: &mut Frame, area: Rect) {
+        let active = self
+            .accounts
+            .active()
+            .map(|a| a.username.clone())
+            .unwrap_or_else(|| "no account".to_string());
+
+        let subtitle = match self.page {
+            Page::Instance => self
+                .selected_instance()
+                .map(|i| i.name().to_string())
+                .unwrap_or_else(|| "no instance".to_string()),
+            Page::Accounts => "Accounts & Skins".to_string(),
+            Page::Launcher => "Settings".to_string(),
+        };
+        let left = Line::from(vec![
+            Span::styled(" CTMLauncher ", self.theme.header()),
+            Span::styled(format!("· {subtitle} "), self.theme.dim()),
+        ]);
+        frame.render_widget(Paragraph::new(left).style(self.theme.base()), area);
+
+        let buttons: Vec<(String, HitAction, bool)> = vec![
+            (
+                format!("☺ {active}"),
+                HitAction::HeaderAccounts,
+                self.page == Page::Accounts,
+            ),
+            (
+                "⚙".to_string(),
+                HitAction::HeaderSettings,
+                self.page == Page::Launcher,
+            ),
+        ];
+        let mut x = area.x + area.width;
+        for (label, action, selected) in buttons {
+            let text = format!(" {label} ");
+            let width = text.chars().count() as u16;
+            if width > x {
                 break;
             }
-            let selected = *tab == self.tab;
-            let focused = selected && self.focus == Focus::Sidebar;
-            let marker = if selected { "▸" } else { " " };
-            let style = if focused {
-                self.theme.selection()
-            } else if selected {
-                self.theme.accent()
-            } else {
-                self.theme.base()
+            x -= width;
+            let rect = Rect {
+                x,
+                y: area.y,
+                width,
+                height: 1,
             };
-            let line = Line::from(vec![
-                Span::styled(format!(" {marker} "), style),
-                Span::styled(format!("{} ", tab.icon()), style),
-                Span::styled(tab.title().to_string(), style),
-            ]);
-            frame.render_widget(Paragraph::new(line).style(style), row);
-            self.push_hitbox(row, HitAction::Tab(*tab));
+            let style = if selected {
+                self.theme.selection()
+            } else if self.is_hovered(rect) {
+                self.theme.hover()
+            } else {
+                self.theme.accent()
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(text, style)).style(self.theme.base()),
+                rect,
+            );
+            self.push_hitbox(rect, action);
         }
+    }
+
+    pub(crate) fn render_sidebar(&mut self, frame: &mut Frame, area: Rect) {
+        self.render_instance_tiles(frame, area);
     }
 
     pub(crate) fn render_footer(&mut self, frame: &mut Frame, area: Rect) {
@@ -2121,13 +2338,18 @@ impl App {
             .constraints([Constraint::Length(1), Constraint::Length(1)])
             .split(area);
 
-        let hint = match self.tab {
-            Tab::Instances => "n new · Enter/l launch · i install · e edit · d delete",
-            Tab::Modpacks => "/ search · Enter open · i install · m import .mrpack · Esc back",
-            Tab::Mods => "Space toggle · s search · u updates · d delete · r refresh",
-            Tab::Accounts => "n offline · m Microsoft · Enter set active · c skin · d remove",
-            Tab::Logs => "p pause · c clear · / filter · a crash · g/G top/bottom",
-            Tab::Settings => "Enter edit · j/k move · s save · J detect Java",
+        let hint = match self.page {
+            Page::Instance => match self.instance_page {
+                InstancePage::Overview => "Enter/l launch · i install · e edit · d delete · n new",
+                InstancePage::Mods => "Space toggle · s search · u updates · d delete · r refresh",
+                InstancePage::Modpacks => {
+                    "/ search · Enter open · i install · m import .mrpack · Esc back"
+                }
+                InstancePage::Logs => "p pause · c clear · / filter · a crash · g/G top/bottom",
+                InstancePage::Settings => "Enter edit · j/k move · s save · J detect Java",
+            },
+            Page::Accounts => "n offline · m Microsoft · Enter set active · c skin · d remove",
+            Page::Launcher => "Enter edit · j/k move · s save · J detect Java",
         };
 
         let status_style = if let Some(toast) = &self.toast {
@@ -2335,6 +2557,7 @@ fn settings_field_count() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mc_core::instance::LoaderType;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -2346,29 +2569,60 @@ mod tests {
         Paths::rooted_at(std::env::temp_dir().join(format!("ctm-tui-{nanos}")))
     }
 
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
     #[tokio::test]
-    async fn renders_every_tab() {
+    async fn renders_all_pages() {
         let paths = temp_paths();
         let client = reqwest::Client::new();
         let mut app = App::new(paths, client).await.unwrap();
 
-        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
-        for tab in Tab::all() {
-            app.tab = tab;
-            terminal.draw(|frame| app.render(frame)).unwrap();
-            let content: String = terminal
-                .backend()
-                .buffer()
-                .content()
-                .iter()
-                .map(|cell| cell.symbol())
-                .collect();
-            assert!(content.contains("CTMLauncher"), "header missing on {tab:?}");
-            assert!(
-                content.contains(tab.title()),
-                "title missing on {tab:?}: {content}"
-            );
+        // Create a local instance (no network) so instance pages have content.
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 44)).unwrap();
+
+        for page in [Page::Instance, Page::Accounts, Page::Launcher] {
+            app.page = page;
+            if page == Page::Instance {
+                for sub in InstancePage::all() {
+                    app.instance_page = sub;
+                    terminal.draw(|frame| app.render(frame)).unwrap();
+                    let content = buffer_text(&terminal);
+                    assert!(content.contains("CTMLauncher"), "header missing on {sub:?}");
+                    assert!(content.contains(sub.title()), "title missing on {sub:?}");
+                    assert!(content.contains("Demo"), "instance name missing on {sub:?}");
+                }
+            } else {
+                terminal.draw(|frame| app.render(frame)).unwrap();
+                let content = buffer_text(&terminal);
+                assert!(
+                    content.contains("CTMLauncher"),
+                    "header missing on {page:?}"
+                );
+            }
         }
+
+        // Empty-state rendering when no instance is selected.
+        app.instances.clear();
+        app.instance_state.select(None);
+        app.page = Page::Instance;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(buffer_text(&terminal).contains("No instance selected"));
+
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);
     }
 

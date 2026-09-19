@@ -92,6 +92,11 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
+    /// Style applied to a hovered element.
+    pub fn hover(&self) -> Style {
+        Style::default().bg(self.selection_bg).fg(self.green)
+    }
+
     /// Style for a highlighted button.
     #[allow(dead_code)]
     pub fn button(&self) -> Style {

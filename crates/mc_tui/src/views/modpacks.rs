@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, ButtonId, HitAction};
-use crate::views::{buttons_row, jump, move_sel, register_rows};
+use crate::views::{buttons_row, hovered_index, jump, move_sel, register_rows, row_style};
 
 impl App {
     pub(crate) fn render_modpacks(&mut self, frame: &mut Frame, area: Rect) {
@@ -44,21 +44,6 @@ impl App {
     }
 
     fn render_search_results(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self
-            .search_results
-            .iter()
-            .map(|hit| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(hit.title.clone(), self.theme.base()),
-                    Span::styled(format!("  by {}", hit.author), self.theme.dim()),
-                    Span::styled(
-                        format!("  ⤓ {}", format_count(hit.downloads)),
-                        self.theme.accent(),
-                    ),
-                ]))
-            })
-            .collect();
-
         let title = if self.search_query.is_empty() {
             " Modpack Search ".to_string()
         } else {
@@ -73,10 +58,32 @@ impl App {
             .border_style(self.theme.block_border())
             .title(Line::from(title).style(self.theme.header()));
         let inner = block.inner(area);
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(self.theme.selection())
-            .highlight_symbol("▸ ");
+
+        let selected = self.search_state.selected();
+        let hovered = hovered_index(
+            self,
+            inner,
+            self.search_state.offset(),
+            self.search_results.len(),
+        );
+        let items: Vec<ListItem> = self
+            .search_results
+            .iter()
+            .enumerate()
+            .map(|(idx, hit)| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(hit.title.clone(), self.theme.base()),
+                    Span::styled(format!("  by {}", hit.author), self.theme.dim()),
+                    Span::styled(
+                        format!("  ⤓ {}", format_count(hit.downloads)),
+                        self.theme.accent(),
+                    ),
+                ]))
+                .style(row_style(self, idx, selected, hovered))
+            })
+            .collect();
+
+        let list = List::new(items).block(block).highlight_symbol("▸ ");
         frame.render_stateful_widget(list, area, &mut self.search_state);
         register_rows(
             &mut self.hitboxes,
@@ -88,20 +95,6 @@ impl App {
     }
 
     fn render_project(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self
-            .project_versions
-            .iter()
-            .map(|version| {
-                let loaders = version.loaders.join(", ");
-                let game = version.game_versions.first().cloned().unwrap_or_default();
-                ListItem::new(Line::from(vec![
-                    Span::styled(version.version_number.clone(), self.theme.base()),
-                    Span::styled(format!("  {} {}", game, loaders), self.theme.dim()),
-                    Span::styled(format!("  [{}]", version.version_type), self.theme.accent()),
-                ]))
-            })
-            .collect();
-
         let title = self
             .selected_project
             .as_ref()
@@ -112,10 +105,31 @@ impl App {
             .border_style(self.theme.block_border())
             .title(Line::from(title).style(self.theme.header()));
         let inner = block.inner(area);
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(self.theme.selection())
-            .highlight_symbol("▸ ");
+
+        let selected = self.project_state.selected();
+        let hovered = hovered_index(
+            self,
+            inner,
+            self.project_state.offset(),
+            self.project_versions.len(),
+        );
+        let items: Vec<ListItem> = self
+            .project_versions
+            .iter()
+            .enumerate()
+            .map(|(idx, version)| {
+                let loaders = version.loaders.join(", ");
+                let game = version.game_versions.first().cloned().unwrap_or_default();
+                ListItem::new(Line::from(vec![
+                    Span::styled(version.version_number.clone(), self.theme.base()),
+                    Span::styled(format!("  {} {}", game, loaders), self.theme.dim()),
+                    Span::styled(format!("  [{}]", version.version_type), self.theme.accent()),
+                ]))
+                .style(row_style(self, idx, selected, hovered))
+            })
+            .collect();
+
+        let list = List::new(items).block(block).highlight_symbol("▸ ");
         frame.render_stateful_widget(list, area, &mut self.project_state);
         register_rows(
             &mut self.hitboxes,

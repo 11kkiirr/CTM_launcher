@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, ButtonId, HitAction};
-use crate::views::{buttons_row, jump, move_sel, register_rows};
+use crate::views::{buttons_row, hovered_index, jump, move_sel, register_rows, row_style};
 
 impl App {
     pub(crate) fn render_mods(&mut self, frame: &mut Frame, area: Rect) {
@@ -44,26 +44,6 @@ impl App {
             .map(|i| i.name().to_string())
             .unwrap_or_else(|| "no instance".to_string());
 
-        let items: Vec<ListItem> = self
-            .installed_mods
-            .iter()
-            .map(|module| {
-                let state = if module.enabled {
-                    Span::styled("[on]  ", self.theme.accent())
-                } else {
-                    Span::styled("[off] ", self.theme.dim())
-                };
-                ListItem::new(Line::from(vec![
-                    state,
-                    Span::styled(module.file_name.clone(), self.theme.base()),
-                    Span::styled(
-                        format!("  {:.1} KB", module.size as f64 / 1024.0),
-                        self.theme.dim(),
-                    ),
-                ]))
-            })
-            .collect();
-
         let focus_marker = if !self.mods_focus_search { "▸ " } else { "" };
         let title = format!(
             " {focus_marker}Installed mods — {instance_name} ({}) ",
@@ -79,10 +59,37 @@ impl App {
             .border_style(border)
             .title(Line::from(title).style(self.theme.header()));
         let inner = block.inner(area);
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(self.theme.selection())
-            .highlight_symbol("▸ ");
+
+        let selected = self.mods_state.selected();
+        let hovered = hovered_index(
+            self,
+            inner,
+            self.mods_state.offset(),
+            self.installed_mods.len(),
+        );
+        let items: Vec<ListItem> = self
+            .installed_mods
+            .iter()
+            .enumerate()
+            .map(|(idx, module)| {
+                let state = if module.enabled {
+                    Span::styled("[on]  ", self.theme.accent())
+                } else {
+                    Span::styled("[off] ", self.theme.dim())
+                };
+                ListItem::new(Line::from(vec![
+                    state,
+                    Span::styled(module.file_name.clone(), self.theme.base()),
+                    Span::styled(
+                        format!("  {:.1} KB", module.size as f64 / 1024.0),
+                        self.theme.dim(),
+                    ),
+                ]))
+                .style(row_style(self, idx, selected, hovered))
+            })
+            .collect();
+
+        let list = List::new(items).block(block).highlight_symbol("▸ ");
         frame.render_stateful_widget(list, area, &mut self.mods_state);
         register_rows(
             &mut self.hitboxes,
@@ -94,18 +101,6 @@ impl App {
     }
 
     fn render_mod_search(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self
-            .mod_search_results
-            .iter()
-            .map(|hit| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(hit.title.clone(), self.theme.base()),
-                    Span::styled(format!("  by {}", hit.author), self.theme.dim()),
-                    Span::styled(format!("  ⤓ {}", hit.downloads), self.theme.accent()),
-                ]))
-            })
-            .collect();
-
         let focus_marker = if self.mods_focus_search { "▸ " } else { "" };
         let title = if self.mod_search_query.is_empty() {
             format!(" {focus_marker}Modrinth search — press 's' ")
@@ -126,10 +121,29 @@ impl App {
             .border_style(border)
             .title(Line::from(title).style(self.theme.header()));
         let inner = block.inner(area);
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(self.theme.selection())
-            .highlight_symbol("▸ ");
+
+        let selected = self.mod_search_state.selected();
+        let hovered = hovered_index(
+            self,
+            inner,
+            self.mod_search_state.offset(),
+            self.mod_search_results.len(),
+        );
+        let items: Vec<ListItem> = self
+            .mod_search_results
+            .iter()
+            .enumerate()
+            .map(|(idx, hit)| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(hit.title.clone(), self.theme.base()),
+                    Span::styled(format!("  by {}", hit.author), self.theme.dim()),
+                    Span::styled(format!("  ⤓ {}", hit.downloads), self.theme.accent()),
+                ]))
+                .style(row_style(self, idx, selected, hovered))
+            })
+            .collect();
+
+        let list = List::new(items).block(block).highlight_symbol("▸ ");
         frame.render_stateful_widget(list, area, &mut self.mod_search_state);
         register_rows(
             &mut self.hitboxes,

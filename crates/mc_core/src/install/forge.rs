@@ -155,27 +155,44 @@ pub(crate) async fn run_installer(
 
     let mc_dir = locate_minecraft_dir(&sandbox)?;
     let versions_dir = mc_dir.join("versions");
-    let mut produced: Option<String> = None;
+
+    // Collect the profile the installer produced (anything that is not the
+    // vanilla base), and read its authoritative `id` from the JSON document.
+    let mut produced: Option<(String, String)> = None;
     if versions_dir.exists() {
         for entry in std::fs::read_dir(&versions_dir)? {
             let entry = entry?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name != game_version {
-                produced = Some(name);
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            if dir_name == game_version {
+                continue;
             }
+            let json = entry.path().join(format!("{dir_name}.json"));
+            let id = std::fs::read(&json)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| value.get("id").and_then(|v| v.as_str()).map(str::to_string))
+                .unwrap_or_else(|| dir_name.clone());
+            produced = Some((dir_name, id));
         }
     }
-    let version_id = produced
+    let (dir_name, version_id) = produced
         .ok_or_else(|| CoreError::Install("installer produced no version profile".into()))?;
 
     common::tick(
         &Some(installer.progress.clone()),
         format!("Harvesting {version_id}"),
     );
-    copy_dir_all(
-        versions_dir.join(&version_id),
-        installer.paths.versions_dir().join(&version_id),
-    )?;
+
+    let dest_dir = installer.paths.versions_dir().join(&version_id);
+    copy_dir_all(versions_dir.join(&dir_name), &dest_dir)?;
+    // Normalize file names to the JSON id so lookups are deterministic.
+    if dir_name != version_id {
+        let old_json = dest_dir.join(format!("{dir_name}.json"));
+        let new_json = dest_dir.join(format!("{version_id}.json"));
+        if old_json.exists() && !new_json.exists() {
+            let _ = std::fs::rename(&old_json, &new_json);
+        }
+    }
     let sandbox_libs = mc_dir.join("libraries");
     if sandbox_libs.exists() {
         copy_dir_all(&sandbox_libs, installer.paths.libraries_dir())?;

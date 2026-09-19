@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, ButtonId, HitAction};
-use crate::views::{buttons_row, jump, move_sel, register_rows};
+use crate::views::{buttons_row, hovered_index, jump, move_sel, register_rows, row_style};
 
 impl App {
     pub(crate) fn render_accounts(&mut self, frame: &mut Frame, area: Rect) {
@@ -35,12 +35,17 @@ impl App {
             ],
         );
 
+        let inner = Block::default().borders(Borders::ALL).inner(chunks[1]);
         let active_id = self.accounts.active_id().map(str::to_string);
+        let account_count = self.accounts.accounts().len();
+        let selected = self.account_state.selected();
+        let hovered = hovered_index(self, inner, self.account_state.offset(), account_count);
         let items: Vec<ListItem> = self
             .accounts
             .accounts()
             .iter()
-            .map(|account| {
+            .enumerate()
+            .map(|(idx, account)| {
                 let active = active_id.as_deref() == Some(account.id.as_str());
                 let marker = if active { "● " } else { "  " };
                 let kind = match account.kind {
@@ -52,6 +57,7 @@ impl App {
                     Span::styled(account.username.clone(), self.theme.base()),
                     Span::styled(format!("  [{kind}]"), self.theme.dim()),
                 ]))
+                .style(row_style(self, idx, selected, hovered))
             })
             .collect();
 
@@ -62,11 +68,7 @@ impl App {
                 Line::from(format!(" Accounts ({}) ", self.accounts.accounts().len()))
                     .style(self.theme.header()),
             );
-        let inner = block.inner(chunks[1]);
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(self.theme.selection())
-            .highlight_symbol("▸ ");
+        let list = List::new(items).block(block).highlight_symbol("▸ ");
         frame.render_stateful_widget(list, chunks[1], &mut self.account_state);
         register_rows(
             &mut self.hitboxes,

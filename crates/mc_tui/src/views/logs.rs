@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, ButtonId, HitAction};
-use crate::views::{buttons_row, jump, move_sel, register_rows};
+use crate::views::{buttons_row, hovered_index, jump, move_sel, register_rows, row_style};
 use mc_core::logs::LogLevel;
 
 impl App {
@@ -44,26 +44,7 @@ impl App {
     }
 
     fn render_log_list(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self
-            .log_buffer
-            .visible()
-            .map(|entry| {
-                let color = self.theme.log_level_color(entry.level);
-                let time = entry.timestamp.clone().unwrap_or_default();
-                let thread = entry.thread.clone().unwrap_or_default();
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("{time:>8} "), self.theme.dim()),
-                    Span::styled(
-                        format!("{:>5} ", entry.level.label()),
-                        ratatui::style::Style::default().fg(color),
-                    ),
-                    Span::styled(format!("[{thread}] "), self.theme.dim()),
-                    Span::styled(entry.message.clone(), self.theme.base()),
-                ]))
-            })
-            .collect();
-
-        let total = items.len();
+        let total = self.log_buffer.visible().count();
         let running = if self.running.is_some() {
             "● live"
         } else {
@@ -83,9 +64,31 @@ impl App {
             .border_style(self.theme.block_border())
             .title(Line::from(title).style(self.theme.header()));
         let inner = block.inner(area);
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(self.theme.selection());
+
+        let selected = self.log_state.selected();
+        let hovered = hovered_index(self, inner, self.log_state.offset(), total);
+        let items: Vec<ListItem> = self
+            .log_buffer
+            .visible()
+            .enumerate()
+            .map(|(idx, entry)| {
+                let color = self.theme.log_level_color(entry.level);
+                let time = entry.timestamp.clone().unwrap_or_default();
+                let thread = entry.thread.clone().unwrap_or_default();
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{time:>8} "), self.theme.dim()),
+                    Span::styled(
+                        format!("{:>5} ", entry.level.label()),
+                        ratatui::style::Style::default().fg(color),
+                    ),
+                    Span::styled(format!("[{thread}] "), self.theme.dim()),
+                    Span::styled(entry.message.clone(), self.theme.base()),
+                ]))
+                .style(row_style(self, idx, selected, hovered))
+            })
+            .collect();
+
+        let list = List::new(items).block(block);
         frame.render_stateful_widget(list, area, &mut self.log_state);
         register_rows(
             &mut self.hitboxes,

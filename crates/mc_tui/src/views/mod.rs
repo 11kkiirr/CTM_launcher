@@ -6,13 +6,49 @@ pub mod logs;
 pub mod modpacks;
 pub mod mods;
 pub mod settings;
+pub mod tiles;
 
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::text::Span;
 use ratatui::widgets::{ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, ButtonId, HitAction};
+
+/// Whether `rect` contains the mouse position.
+pub(crate) fn rect_contains(rect: Rect, (x, y): (u16, u16)) -> bool {
+    x >= rect.x
+        && x < rect.x.saturating_add(rect.width)
+        && y >= rect.y
+        && y < rect.y.saturating_add(rect.height)
+}
+
+/// Index of the list row currently under the mouse, if any.
+pub(crate) fn hovered_index(app: &App, inner: Rect, offset: usize, len: usize) -> Option<usize> {
+    let pos = app.mouse_pos?;
+    if !rect_contains(inner, pos) {
+        return None;
+    }
+    let idx = offset + (pos.1 - inner.y) as usize;
+    (idx < len).then_some(idx)
+}
+
+/// Style for a list row, taking selection and hover into account.
+pub(crate) fn row_style(
+    app: &App,
+    idx: usize,
+    selected: Option<usize>,
+    hovered: Option<usize>,
+) -> Style {
+    if selected == Some(idx) {
+        app.theme.selection()
+    } else if hovered == Some(idx) {
+        app.theme.hover()
+    } else {
+        app.theme.base()
+    }
+}
 
 /// Move a list selection by `delta`, clamping to `len`.
 pub(crate) fn move_sel(state: &mut ListState, len: usize, delta: i32) {
@@ -55,7 +91,12 @@ pub(crate) fn buttons_row(
             width,
             height: 1,
         };
-        frame.render_widget(Paragraph::new(Span::styled(text, app.theme.accent())), rect);
+        let style = if app.is_hovered(rect) {
+            app.theme.hover()
+        } else {
+            app.theme.accent()
+        };
+        frame.render_widget(Paragraph::new(Span::styled(text, style)), rect);
         app.hitboxes.push(crate::app::Hitbox {
             rect,
             action: HitAction::Button(*id),
