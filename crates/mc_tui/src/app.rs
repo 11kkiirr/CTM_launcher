@@ -32,6 +32,7 @@ use crate::forms::{
 };
 use crate::settings::LauncherSettings;
 use crate::theme::Theme;
+use crate::wizard::BuildKind;
 
 /// The Azure application (client) id used for Microsoft device-code auth.
 pub const CLIENT_ID: &str = mc_core::auth::microsoft::DEFAULT_CLIENT_ID;
@@ -163,6 +164,43 @@ pub enum HitAction {
     AccountRow(usize),
     SettingsRow(usize),
     Button(ButtonId),
+    /// A click inside a modal overlay.
+    Overlay(OverlayAction),
+}
+
+/// A clickable region inside a modal overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayAction {
+    /// Create-build wizard: switch to a kind tab.
+    WizardTab(BuildKind),
+    /// Create-build wizard: focus a field row.
+    WizardField(usize),
+    /// Create-build wizard: open a version picker for a field.
+    WizardPick(usize),
+    /// Create-build wizard: submit the active form (Create/Import).
+    WizardSubmit,
+    /// Create-build wizard: select a Modrinth search result.
+    WizardResult(usize),
+    /// Create-build wizard: open the selected Modrinth result.
+    WizardResultOpen,
+    /// Create-build wizard: select a project version.
+    WizardVersion(usize),
+    /// Create-build wizard: install the selected project version.
+    WizardVersionInstall,
+    /// Version picker: select and apply an item.
+    PickerItem(usize),
+    /// Settings/edit form: focus a field.
+    FormField(usize),
+    /// Form: submit.
+    FormSubmit,
+    /// Text prompt: no-op click (keeps input focused).
+    TextDone,
+    /// Confirmation dialog: accept.
+    ConfirmYes,
+    /// Confirmation dialog: decline.
+    ConfirmNo,
+    /// Message dialog: close.
+    MessageClose,
 }
 
 /// Identifiers for on-screen action buttons.
@@ -173,6 +211,7 @@ pub enum ButtonId {
     EditInstance,
     DeleteInstance,
     InstallInstance,
+    RenameInstance,
     ChangeVersion,
     Search,
     ImportModpack,
@@ -275,6 +314,8 @@ pub struct App {
 
     pub installed_mods: Vec<InstalledMod>,
     pub mods_state: ListState,
+    /// A background mod scan is in flight (show a placeholder while empty).
+    pub mods_scanning: bool,
 
     pub log_buffer: LogBuffer,
     /// Index of the first visible log line.
@@ -343,6 +384,7 @@ impl App {
             mods_focus_search: false,
             installed_mods: Vec::new(),
             mods_state: ListState::default(),
+            mods_scanning: false,
             log_buffer: LogBuffer::new(5000),
             log_scroll: 0,
             log_follow: true,
@@ -389,9 +431,20 @@ impl App {
         let frame_budget = Duration::from_millis(16);
         let mut needs_draw = true;
         let mut last_draw = Instant::now() - frame_budget;
+        // Periodic full repaints clear any stray glyph/control-byte artifacts
+        // that can accumulate while streaming game logs.
+        let mut last_full_redraw = Instant::now();
 
         while !self.should_quit {
-            if needs_draw && last_draw.elapsed() >= frame_budget {
+            let mut force_clear = false;
+            if self.nav == Nav::Logs && last_full_redraw.elapsed() >= Duration::from_secs(3) {
+                force_clear = true;
+                last_full_redraw = Instant::now();
+            }
+            if (needs_draw || force_clear) && last_draw.elapsed() >= frame_budget {
+                if force_clear {
+                    terminal.clear()?;
+                }
                 terminal.draw(|frame| self.render(frame))?;
                 last_draw = Instant::now();
                 needs_draw = false;
@@ -623,6 +676,7 @@ impl App {
             }
             EngineEvent::InstalledMods(mods) => {
                 self.installed_mods = mods;
+                self.mods_scanning = false;
                 if self.installed_mods.is_empty() {
                     self.mods_state.select(None);
                 } else if self.mods_state.selected().is_none() {
@@ -763,11 +817,26 @@ impl App {
         let hover_changed = old_action != new_action;
 
         if self.overlay.is_some() {
-            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                self.handle_overlay_click();
-                return true;
-            }
-            return hover_changed;
+            let result = match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(HitAction::Overlay(action)) = self.hit_action_at(new_pos) {
+                        self.dispatch_overlay_action(action);
+                    } else {
+                        self.handle_overlay_click();
+                    }
+                    true
+                }
+                MouseEventKind::ScrollDown => {
+                    self.overlay_scroll(1);
+                    true
+                }
+                MouseEventKind::ScrollUp => {
+                    self.overlay_scroll(-1);
+                    true
+                }
+                _ => hover_changed,
+            };
+            return result;
         }
 
         match mouse.kind {
@@ -829,6 +898,7 @@ impl App {
                 self.focus = Focus::Content;
             }
             HitAction::Button(button) => self.dispatch_button(button),
+            HitAction::Overlay(action) => self.dispatch_overlay_action(action),
         }
     }
 
@@ -850,6 +920,7 @@ impl App {
             ButtonId::DeleteInstance => self.confirm_delete_instance(),
             ButtonId::InstallInstance => self.install_selected_instance(),
             ButtonId::ChangeVersion => self.open_change_version_picker(),
+            ButtonId::RenameInstance => self.open_rename_instance_form(),
             ButtonId::Search => self.open_search_prompt(),
             ButtonId::ImportModpack => self.open_import_prompt(),
             ButtonId::InstallProject => self.install_selected_project(),
@@ -880,21 +951,23 @@ impl App {
             Nav::Instances => self.scroll_tiles(delta),
             Nav::Versions => {}
             Nav::Modpacks => {
+                let step = delta * 4;
                 if self.selected_project.is_some() {
-                    move_selection(&mut self.project_state, self.project_versions.len(), delta);
+                    move_selection(&mut self.project_state, self.project_versions.len(), step);
                 } else {
-                    move_selection(&mut self.search_state, self.search_results.len(), delta);
+                    move_selection(&mut self.search_state, self.search_results.len(), step);
                 }
             }
             Nav::Mods => {
+                let step = delta * 4;
                 if self.mods_focus_search {
                     move_selection(
                         &mut self.mod_search_state,
                         self.mod_search_results.len(),
-                        delta,
+                        step,
                     );
                 } else {
-                    move_selection(&mut self.mods_state, self.installed_mods.len(), delta);
+                    move_selection(&mut self.mods_state, self.installed_mods.len(), step);
                 }
             }
             Nav::Logs => self.scroll_logs(delta * 3),
@@ -906,7 +979,7 @@ impl App {
             Nav::Accounts => move_selection(
                 &mut self.account_state,
                 self.accounts.accounts().len(),
-                delta,
+                delta * 4,
             ),
             Nav::Launcher => {
                 let len = settings_field_count();
@@ -1089,6 +1162,67 @@ impl App {
         }
     }
 
+    /// Route a click on an overlay hitbox.
+    pub(crate) fn dispatch_overlay_action(&mut self, action: OverlayAction) {
+        match action {
+            OverlayAction::WizardTab(kind) => self.wizard_set_kind(kind),
+            OverlayAction::WizardField(idx) => self.wizard_focus_field(idx),
+            OverlayAction::WizardPick(idx) => self.wizard_pick_field(idx),
+            OverlayAction::WizardSubmit => self.wizard_submit_clicked(),
+            OverlayAction::WizardResult(idx) => self.wizard_click_result(idx),
+            OverlayAction::WizardResultOpen => self.wizard_open_selected_project(),
+            OverlayAction::WizardVersion(idx) => self.wizard_select_version(idx),
+            OverlayAction::WizardVersionInstall => self.wizard_install_selected_version(),
+            OverlayAction::PickerItem(idx) => self.picker_select(idx),
+            OverlayAction::FormField(idx) => {
+                let Some(Overlay::Form(form)) = self.overlay.as_mut() else {
+                    return;
+                };
+                form.active = idx;
+            }
+            OverlayAction::FormSubmit => {
+                let Some(Overlay::Form(form)) = self.overlay.clone() else {
+                    return;
+                };
+                self.overlay = None;
+                self.submit_form(form);
+            }
+            OverlayAction::TextDone => {}
+            OverlayAction::ConfirmYes => {
+                let Some(Overlay::Confirm { action, .. }) = self.overlay.clone() else {
+                    return;
+                };
+                self.overlay = None;
+                self.confirm(action);
+            }
+            OverlayAction::ConfirmNo => self.overlay = None,
+            OverlayAction::MessageClose => self.overlay = None,
+        }
+    }
+
+    /// Scroll inside the active overlay (picker / wizard lists).
+    pub(crate) fn overlay_scroll(&mut self, delta: i32) {
+        match self.overlay.as_mut() {
+            Some(Overlay::Picker(picker)) => picker.move_selection(delta * 4),
+            Some(Overlay::Wizard(wizard)) => wizard.move_selection(delta * 4),
+            _ => {}
+        }
+    }
+
+    /// Select and apply a version-picker item.
+    pub(crate) fn picker_select(&mut self, idx: usize) {
+        let Some(Overlay::Picker(picker)) = self.overlay.as_mut() else {
+            return;
+        };
+        picker.selected = idx;
+        let Some(value) = picker.selected_value().map(str::to_string) else {
+            return;
+        };
+        let target = picker.target.clone();
+        self.overlay = None;
+        self.apply_picker_value(target, value);
+    }
+
     pub(crate) fn submit_text(&mut self, action: TextAction, text: String) {
         match action {
             TextAction::SearchModrinth => self.run_search(text),
@@ -1120,6 +1254,7 @@ impl App {
                 }
             }
             TextAction::SkinUrl => self.change_skin(text),
+            TextAction::RenameInstance => self.rename_instance(text),
             TextAction::None => {}
         }
     }
@@ -1412,6 +1547,44 @@ impl App {
         .push_text("Custom JVM Args", jvm.custom_jvm_args.join(" "))
         .push_text("Extra Game Args", jvm.extra_game_args.join(" "));
         self.overlay = Some(Overlay::Form(form));
+    }
+
+    /// Prompt for a new display name for the selected build.
+    pub(crate) fn open_rename_instance_form(&mut self) {
+        let Some(instance) = self.selected_instance().cloned() else {
+            self.set_toast("No instance selected", true);
+            return;
+        };
+        self.overlay = Some(Overlay::text_with(
+            "Rename Build",
+            "New name: ",
+            instance.name().to_string(),
+            TextAction::RenameInstance,
+        ));
+    }
+
+    pub(crate) fn rename_instance(&mut self, new_name: String) {
+        let Some(instance) = self.selected_instance().cloned() else {
+            return;
+        };
+        let trimmed = new_name.trim().to_string();
+        if trimmed.is_empty() {
+            self.set_toast("Name cannot be empty", true);
+            return;
+        }
+        let manager = self.instance_manager.clone();
+        let tx = self.engine_tx.clone();
+        let id = instance.id().to_string();
+        tokio::spawn(async move {
+            match manager.rename(&id, &trimmed).await {
+                Ok(_) => {
+                    let _ = tx.send(EngineEvent::InstancesChanged);
+                }
+                Err(err) => {
+                    let _ = tx.send(EngineEvent::Error(format!("Rename failed: {err}")));
+                }
+            }
+        });
     }
 
     pub(crate) fn save_instance_settings_from_form(&mut self, form: &Form) {
@@ -1863,8 +2036,10 @@ impl App {
         let Some(instance) = self.selected_instance().cloned() else {
             self.installed_mods.clear();
             self.mods_state.select(None);
+            self.mods_scanning = false;
             return;
         };
+        self.mods_scanning = true;
         let tx = self.engine_tx.clone();
         let mods_dir = instance.mods_dir();
         tokio::spawn(async move {
@@ -1928,6 +2103,11 @@ impl App {
         let Some(module) = self.installed_mods.get(idx).cloned() else {
             return;
         };
+        // Optimistic local flip so the toggle is instant; the async reload
+        // confirms it once the rename completes.
+        if let Some(current) = self.installed_mods.get_mut(idx) {
+            current.enabled = !current.enabled;
+        }
         let tx = self.engine_tx.clone();
         tokio::spawn(async move {
             match modrinth::toggle_mod(&module.path).await {
@@ -2793,9 +2973,12 @@ impl App {
             return;
         };
         // A modal scrim: blank the screen behind the dialog so no fragments of
-        // the underlying view show through around the popup.
+        // the underlying view show through around the popup. Overlay hitboxes
+        // replace the content hitboxes while a dialog is open.
+        self.hitboxes.clear();
         frame.render_widget(ratatui::widgets::Clear, area);
         frame.render_widget(Block::default().style(self.theme.base()), area);
+        let surface = Style::default().bg(self.theme.panel_alt);
         match overlay {
             Overlay::Text {
                 title,
@@ -2811,6 +2994,7 @@ impl App {
                     Line::from(Span::styled("Enter confirm · Esc cancel", self.theme.dim())),
                 ];
                 crate::widgets::render_popup(frame, popup, &title, lines, &self.theme);
+                self.push_hitbox(popup, HitAction::Overlay(OverlayAction::TextDone));
             }
             Overlay::Form(form) => {
                 let height = (form.fields.len() as u16 * 2 + 4).min(area.height.saturating_sub(2));
@@ -2819,22 +3003,59 @@ impl App {
                     (height * 100 / area.height.max(1)).max(20),
                     area,
                 );
-                let mut lines = Vec::new();
+                frame.render_widget(ratatui::widgets::Clear, popup);
+                frame.render_widget(Block::default().style(surface), popup);
+                crate::views::accent_bar(frame, popup, &self.theme);
+
+                let content = Rect {
+                    x: popup.x + 2,
+                    y: popup.y + 1,
+                    width: popup.width.saturating_sub(3),
+                    height: popup.height.saturating_sub(2),
+                };
+                let rows = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Min(1),
+                    ])
+                    .split(content);
+                frame.render_widget(
+                    Paragraph::new(Span::styled(form.title.clone(), self.theme.header()))
+                        .style(surface),
+                    rows[0],
+                );
+
+                let field_area = rows[2];
+                let mut y = field_area.y;
                 for (idx, field) in form.fields.iter().enumerate() {
+                    if y + 2 > field_area.y + field_area.height {
+                        break;
+                    }
                     let active = idx == form.active;
                     let label_style = if active {
                         self.theme.accent()
                     } else {
                         self.theme.dim()
                     };
-                    lines.push(Line::from(Span::styled(
-                        format!("{} {}", if active { "▸" } else { " " }, field.label),
-                        label_style,
-                    )));
+                    frame.render_widget(
+                        Paragraph::new(Line::from(Span::styled(
+                            format!("{} {}", if active { "▸" } else { " " }, field.label),
+                            label_style,
+                        )))
+                        .style(surface),
+                        Rect {
+                            x: field_area.x,
+                            y,
+                            width: field_area.width,
+                            height: 1,
+                        },
+                    );
                     let value_style = if active {
-                        self.theme.selection()
+                        self.theme.row_selected()
                     } else {
-                        self.theme.base()
+                        self.theme.row()
                     };
                     let display = match &field.kind {
                         crate::forms::FieldKind::Bool(_) => {
@@ -2849,17 +3070,52 @@ impl App {
                     } else {
                         format!("   ({})", field.hint)
                     };
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("    {display}"), value_style),
-                        Span::styled(hint, self.theme.dim()),
-                    ]));
+                    frame.render_widget(
+                        Paragraph::new(Line::from(vec![
+                            Span::styled(format!("  {display}"), value_style),
+                            Span::styled(hint, self.theme.dim()),
+                        ]))
+                        .style(surface),
+                        Rect {
+                            x: field_area.x,
+                            y: y + 1,
+                            width: field_area.width,
+                            height: 1,
+                        },
+                    );
+                    self.push_hitbox(
+                        Rect {
+                            x: field_area.x,
+                            y,
+                            width: field_area.width,
+                            height: 2,
+                        },
+                        HitAction::Overlay(OverlayAction::FormField(idx)),
+                    );
+                    y += 2;
                 }
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "Tab/↑↓ field · ←→ change · Space toggle · Enter submit · Esc cancel",
-                    self.theme.dim(),
-                )));
-                crate::widgets::render_popup(frame, popup, &form.title, lines, &self.theme);
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        "Tab/↑↓ field · ←→ change · Space toggle · Enter submit · Esc cancel",
+                        self.theme.dim(),
+                    ))
+                    .style(surface),
+                    Rect {
+                        x: field_area.x,
+                        y: y + 1,
+                        width: field_area.width,
+                        height: 1,
+                    },
+                );
+                self.push_hitbox(
+                    Rect {
+                        x: field_area.x,
+                        y: y + 1,
+                        width: field_area.width,
+                        height: 1,
+                    },
+                    HitAction::Overlay(OverlayAction::FormSubmit),
+                );
             }
             Overlay::Confirm { title, message, .. } => {
                 let popup = crate::widgets::centered_rect(52, 22, area);
@@ -2869,6 +3125,25 @@ impl App {
                     Line::from(Span::styled("[Y]es   [N]o", self.theme.accent())),
                 ];
                 crate::widgets::render_popup(frame, popup, &title, lines, &self.theme);
+                let mid = popup.width / 2;
+                self.push_hitbox(
+                    Rect {
+                        x: popup.x,
+                        y: popup.y,
+                        width: mid,
+                        height: popup.height,
+                    },
+                    HitAction::Overlay(OverlayAction::ConfirmYes),
+                );
+                self.push_hitbox(
+                    Rect {
+                        x: popup.x + mid,
+                        y: popup.y,
+                        width: popup.width - mid,
+                        height: popup.height,
+                    },
+                    HitAction::Overlay(OverlayAction::ConfirmNo),
+                );
             }
             Overlay::Message { title, lines } => {
                 let popup = crate::widgets::centered_rect(74, 84, area);
@@ -2879,6 +3154,7 @@ impl App {
                     self.theme.dim(),
                 )));
                 crate::widgets::render_popup(frame, popup, &title, rendered, &self.theme);
+                self.push_hitbox(popup, HitAction::Overlay(OverlayAction::MessageClose));
             }
             Overlay::DeviceCode(prompt) => {
                 let popup = crate::widgets::centered_rect(64, 40, area);
@@ -2906,14 +3182,9 @@ impl App {
             }
             Overlay::Wizard(_) => self.render_wizard(frame, area),
             Overlay::Picker(picker) => {
-                use ratatui::widgets::{Clear, List, ListItem};
                 let popup = crate::widgets::centered_rect(60, 72, area);
-                frame.render_widget(Clear, popup);
-                frame.render_widget(
-                    Block::default()
-                        .style(ratatui::style::Style::default().bg(self.theme.panel_alt)),
-                    popup,
-                );
+                frame.render_widget(ratatui::widgets::Clear, popup);
+                frame.render_widget(Block::default().style(surface), popup);
                 crate::views::accent_bar(frame, popup, &self.theme);
 
                 let content = Rect {
@@ -2933,7 +3204,7 @@ impl App {
                     .split(content);
                 frame.render_widget(
                     Paragraph::new(Span::styled(picker.title.clone(), self.theme.header()))
-                        .style(ratatui::style::Style::default().bg(self.theme.panel_alt)),
+                        .style(surface),
                     rows[0],
                 );
                 frame.render_widget(
@@ -2941,35 +3212,46 @@ impl App {
                         Span::styled("Filter  ", self.theme.comment_style()),
                         Span::styled(format!("{}█", picker.query), self.theme.accent()),
                     ]))
-                    .style(ratatui::style::Style::default().bg(self.theme.panel_alt)),
+                    .style(surface),
                     rows[2],
                 );
 
                 let list_area = rows[3];
                 let visible = list_area.height as usize;
                 let start = picker.selected.saturating_sub(visible.saturating_sub(1));
-                let end = (start + visible).min(picker.filtered.len());
-                let items: Vec<ListItem> = (start..end)
-                    .map(|row| {
-                        let label = picker
-                            .filtered
-                            .get(row)
-                            .and_then(|idx| picker.items.get(*idx))
-                            .cloned()
-                            .unwrap_or_default();
-                        let style = if row == picker.selected {
-                            self.theme.row_selected()
-                        } else {
-                            self.theme.row()
-                        };
-                        ListItem::new(Line::from(Span::styled(label.clone(), style))).style(style)
-                    })
-                    .collect();
-                frame.render_widget(
-                    List::new(items)
-                        .style(ratatui::style::Style::default().bg(self.theme.panel_alt)),
-                    list_area,
-                );
+                for row in 0..visible {
+                    let idx = start + row;
+                    if idx >= picker.filtered.len() {
+                        break;
+                    }
+                    let real = picker.filtered[idx];
+                    let Some(label) = picker.items.get(real) else {
+                        continue;
+                    };
+                    let rect = Rect {
+                        x: list_area.x,
+                        y: list_area.y + row as u16,
+                        width: list_area.width,
+                        height: 1,
+                    };
+                    let style = if idx == picker.selected {
+                        self.theme.row_selected()
+                    } else {
+                        self.theme.row()
+                    };
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(label.clone(), style)).style(surface),
+                        rect,
+                    );
+                    self.push_hitbox(rect, HitAction::Overlay(OverlayAction::PickerItem(idx)));
+                }
+                if picker.filtered.is_empty() {
+                    frame.render_widget(
+                        Paragraph::new(Span::styled("No matches.", self.theme.dim()))
+                            .style(surface),
+                        list_area,
+                    );
+                }
             }
         }
     }
@@ -3043,6 +3325,7 @@ fn footer_hints(nav: Nav) -> &'static [(&'static str, &'static str)] {
             ("i", "install"),
             ("p", "import"),
             ("v", "versions"),
+            ("r", "rename"),
             ("d", "delete"),
         ],
         Nav::Mods => &[
@@ -3247,6 +3530,141 @@ mod tests {
 
         app.jump_logs(true);
         assert!(app.log_follow, "jump to bottom re-enables follow");
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn mods_scan_and_toggle() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+
+        let Some(instance) = app.selected_instance().cloned() else {
+            panic!("no instance selected");
+        };
+        std::fs::create_dir_all(instance.mods_dir()).unwrap();
+        std::fs::write(instance.mods_dir().join("sodium.jar"), br#"fake jar"#).unwrap();
+
+        app.reload_mods();
+        let mut scanned = false;
+        for _ in 0..64 {
+            if let Some(event) = app.engine_rx.recv().await {
+                app.handle_engine_event(event);
+            }
+            if app.installed_mods.len() == 1 {
+                scanned = true;
+                break;
+            }
+        }
+        assert!(scanned, "mod scan never produced results");
+        assert_eq!(app.installed_mods[0].file_name, "sodium.jar");
+        assert!(app.installed_mods[0].enabled);
+
+        app.mods_state.select(Some(0));
+        app.toggle_selected_mod();
+        let mut toggled = false;
+        for _ in 0..64 {
+            if let Some(event) = app.engine_rx.recv().await {
+                app.handle_engine_event(event);
+            }
+            if !app.installed_mods.is_empty() && !app.installed_mods[0].enabled {
+                toggled = true;
+                break;
+            }
+        }
+        assert!(toggled, "toggle did not disable the mod");
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn wizard_mouse_actions() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+
+        app.open_create_wizard();
+        assert!(matches!(app.overlay, Some(Overlay::Wizard(_))));
+
+        // Click the Import tab.
+        app.dispatch_overlay_action(OverlayAction::WizardTab(BuildKind::Import));
+        let Some(Overlay::Wizard(wizard)) = app.overlay.as_ref() else {
+            panic!("wizard missing");
+        };
+        assert_eq!(wizard.kind, BuildKind::Import);
+
+        // Click a field, then the submit button.
+        app.dispatch_overlay_action(OverlayAction::WizardField(0));
+        let Some(Overlay::Wizard(wizard2)) = app.overlay.as_ref() else {
+            panic!("wizard missing");
+        };
+        assert_eq!(wizard2.field, 0);
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn picker_click_selects() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+
+        app.open_create_wizard();
+        app.pending_wizard = Some(crate::wizard::CreateWizard::default());
+        app.show_version_picker(
+            crate::forms::PickerTarget::WizardGame,
+            vec!["1.21.1".into(), "1.20.1".into()],
+        );
+        assert!(matches!(app.overlay, Some(Overlay::Picker { .. })));
+
+        app.dispatch_overlay_action(OverlayAction::PickerItem(1));
+        let Some(Overlay::Wizard(wizard)) = app.overlay.as_ref() else {
+            panic!("picker did not restore the wizard");
+        };
+        assert_eq!(wizard.game_version, "1.20.1");
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn rename_build() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        app.instance_manager
+            .create(
+                "Old Name",
+                "1.21.1",
+                LoaderType::Fabric,
+                Some("0.15.7".into()),
+            )
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+
+        app.rename_instance("New Name".into());
+        let mut renamed = false;
+        for _ in 0..64 {
+            if let Some(event) = app.engine_rx.recv().await {
+                app.handle_engine_event(event);
+            }
+            app.reload_instances();
+            if let Some(instance) = app.selected_instance() {
+                if instance.name() == "New Name" {
+                    renamed = true;
+                    break;
+                }
+            }
+        }
+        assert!(renamed, "rename did not take effect");
 
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);
     }

@@ -205,6 +205,7 @@ pub enum TextAction {
     CustomJvmArgs,
     CustomGameArgs,
     SkinUrl,
+    RenameInstance,
     None,
 }
 
@@ -314,6 +315,21 @@ impl Overlay {
             title: title.into(),
             prompt: prompt.into(),
             value: String::new(),
+            action,
+        }
+    }
+
+    /// A text prompt with a pre-filled value.
+    pub fn text_with(
+        title: impl Into<String>,
+        prompt: impl Into<String>,
+        value: impl Into<String>,
+        action: TextAction,
+    ) -> Self {
+        Overlay::Text {
+            title: title.into(),
+            prompt: prompt.into(),
+            value: value.into(),
             action,
         }
     }

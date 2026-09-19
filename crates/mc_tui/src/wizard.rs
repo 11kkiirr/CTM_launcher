@@ -1,5 +1,5 @@
-//! The "New Build" creation wizard: clean build, `.mrpack` import or a
-//! Modrinth modpack.
+//! The "New Build" creation wizard: a three-tab dialog with one page per kind
+//! (Clean build, `.mrpack` import, Modrinth modpack). Fully mouse-driven.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use mc_core::instance::LoaderType;
@@ -7,10 +7,10 @@ use mc_core::modrinth::{Project, SearchHit, Version};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::app::{App, HitAction, OverlayAction};
 use crate::forms::{Overlay, PickerTarget};
 use crate::views::row_style;
 
@@ -44,13 +44,20 @@ impl BuildKind {
     }
 }
 
-/// Wizard steps.
+/// Wizard steps (the kind tab determines which page is shown).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WizardStep {
-    Kind,
     Configure,
     ModrinthSearch,
     ModrinthProject,
+}
+
+/// A field row tag used to render and wire up the configure pages.
+enum WRowTag {
+    Text,
+    Pick,
+    Choice,
+    Submit,
 }
 
 /// State for the create-build wizard.
@@ -75,7 +82,7 @@ impl Default for CreateWizard {
     fn default() -> Self {
         Self {
             kind: BuildKind::Clean,
-            step: WizardStep::Kind,
+            step: WizardStep::Configure,
             name: "New Build".to_string(),
             game_version: "1.21.1".to_string(),
             loader_idx: 0,
@@ -123,6 +130,21 @@ impl CreateWizard {
             BuildKind::Modrinth => 1,
         }
     }
+
+    /// Move the selection of the active results/project list.
+    pub fn move_selection(&mut self, delta: i32) {
+        match self.step {
+            WizardStep::ModrinthSearch if !self.results.is_empty() => {
+                let next = self.selected as i32 + delta;
+                self.selected = next.clamp(0, self.results.len() as i32 - 1) as usize;
+            }
+            WizardStep::ModrinthProject if !self.project_versions.is_empty() => {
+                let next = self.selected as i32 + delta;
+                self.selected = next.clamp(0, self.project_versions.len() as i32 - 1) as usize;
+            }
+            _ => {}
+        }
+    }
 }
 
 impl App {
@@ -130,44 +152,27 @@ impl App {
         self.overlay = Some(Overlay::Wizard(CreateWizard::default()));
     }
 
-    pub(crate) fn handle_wizard_key(&mut self, key: KeyEvent) {
-        let step = match self.overlay.as_ref() {
-            Some(Overlay::Wizard(wizard)) => wizard.step,
-            _ => return,
-        };
-        match step {
-            WizardStep::Kind => self.handle_wizard_kind(key),
-            WizardStep::Configure => self.handle_wizard_configure(key),
-            WizardStep::ModrinthSearch => self.handle_wizard_search(key),
-            WizardStep::ModrinthProject => self.handle_wizard_project(key),
-        }
-    }
+    // -----------------------------------------------------------------
+    // Keyboard input
+    // -----------------------------------------------------------------
 
-    fn handle_wizard_kind(&mut self, key: KeyEvent) {
-        let Some(Overlay::Wizard(mut wizard)) = self.overlay.take() else {
-            return;
-        };
+    pub(crate) fn handle_wizard_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc => return,
-            KeyCode::Up | KeyCode::Char('k') => {
-                wizard.kind = BuildKind::all()[(wizard.kind as usize + 2) % 3];
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                wizard.kind = BuildKind::all()[(wizard.kind as usize + 1) % 3];
-            }
-            KeyCode::Char('1') => wizard.kind = BuildKind::Clean,
-            KeyCode::Char('2') => wizard.kind = BuildKind::Import,
-            KeyCode::Char('3') => wizard.kind = BuildKind::Modrinth,
-            KeyCode::Enter => {
-                wizard.step = match wizard.kind {
-                    BuildKind::Modrinth => WizardStep::ModrinthSearch,
-                    _ => WizardStep::Configure,
+            KeyCode::Char('1') => self.wizard_set_kind(BuildKind::Clean),
+            KeyCode::Char('2') => self.wizard_set_kind(BuildKind::Import),
+            KeyCode::Char('3') => self.wizard_set_kind(BuildKind::Modrinth),
+            _ => {
+                let step = match self.overlay.as_ref() {
+                    Some(Overlay::Wizard(wizard)) => wizard.step,
+                    _ => return,
                 };
-                wizard.field = 0;
+                match step {
+                    WizardStep::Configure => self.handle_wizard_configure(key),
+                    WizardStep::ModrinthSearch => self.handle_wizard_search(key),
+                    WizardStep::ModrinthProject => self.handle_wizard_project(key),
+                }
             }
-            _ => {}
         }
-        self.overlay = Some(Overlay::Wizard(wizard));
     }
 
     fn handle_wizard_configure(&mut self, key: KeyEvent) {
@@ -179,7 +184,8 @@ impl App {
 
         match key.code {
             KeyCode::Esc => {
-                wizard.step = WizardStep::Kind;
+                self.overlay = None;
+                restore = false;
             }
             KeyCode::Up | KeyCode::BackTab => wizard.field = (wizard.field + count - 1) % count,
             KeyCode::Down | KeyCode::Tab => wizard.field = (wizard.field + 1) % count,
@@ -241,8 +247,7 @@ impl App {
         };
         match key.code {
             KeyCode::Esc => {
-                wizard.step = WizardStep::Kind;
-                self.overlay = Some(Overlay::Wizard(wizard));
+                self.overlay = None;
             }
             KeyCode::Backspace => {
                 wizard.query.pop();
@@ -280,6 +285,8 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 wizard.step = WizardStep::ModrinthSearch;
+                wizard.project = None;
+                wizard.project_versions.clear();
                 self.overlay = Some(Overlay::Wizard(wizard));
             }
             KeyCode::Down | KeyCode::Char('j') if !wizard.project_versions.is_empty() => {
@@ -293,6 +300,95 @@ impl App {
             KeyCode::Enter => self.submit_modrinth(&wizard),
             _ => self.overlay = Some(Overlay::Wizard(wizard)),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Mouse actions
+    // -----------------------------------------------------------------
+
+    pub(crate) fn wizard_set_kind(&mut self, kind: BuildKind) {
+        let Some(Overlay::Wizard(mut wizard)) = self.overlay.take() else {
+            return;
+        };
+        wizard.kind = kind;
+        wizard.step = match kind {
+            BuildKind::Modrinth => WizardStep::ModrinthSearch,
+            _ => WizardStep::Configure,
+        };
+        wizard.field = 0;
+        self.overlay = Some(Overlay::Wizard(wizard));
+    }
+
+    pub(crate) fn wizard_focus_field(&mut self, idx: usize) {
+        let Some(Overlay::Wizard(mut wizard)) = self.overlay.take() else {
+            return;
+        };
+        wizard.field = idx;
+        self.overlay = Some(Overlay::Wizard(wizard));
+    }
+
+    pub(crate) fn wizard_pick_field(&mut self, idx: usize) {
+        let Some(Overlay::Wizard(wizard)) = self.overlay.clone() else {
+            return;
+        };
+        match wizard.kind {
+            BuildKind::Clean if idx == 1 => {
+                self.pending_wizard = Some(wizard.clone());
+                self.request_game_versions();
+            }
+            BuildKind::Clean if idx == 3 => {
+                self.pending_wizard = Some(wizard.clone());
+                self.request_loader_versions();
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn wizard_submit_clicked(&mut self) {
+        let Some(Overlay::Wizard(wizard)) = self.overlay.clone() else {
+            return;
+        };
+        match wizard.kind {
+            BuildKind::Clean => self.submit_clean_build(&wizard),
+            BuildKind::Import => self.submit_import(&wizard),
+            BuildKind::Modrinth => self.wizard_install_selected_version(),
+        }
+    }
+
+    pub(crate) fn wizard_click_result(&mut self, idx: usize) {
+        let Some(Overlay::Wizard(mut wizard)) = self.overlay.take() else {
+            return;
+        };
+        wizard.selected = idx;
+        self.overlay = Some(Overlay::Wizard(wizard));
+    }
+
+    pub(crate) fn wizard_open_selected_project(&mut self) {
+        let Some(Overlay::Wizard(wizard)) = self.overlay.clone() else {
+            return;
+        };
+        if wizard.results.is_empty() {
+            self.pending_wizard = Some(wizard.clone());
+            self.wizard_search();
+        } else {
+            self.pending_wizard = Some(wizard.clone());
+            self.wizard_open_project();
+        }
+    }
+
+    pub(crate) fn wizard_select_version(&mut self, idx: usize) {
+        let Some(Overlay::Wizard(mut wizard)) = self.overlay.take() else {
+            return;
+        };
+        wizard.selected = idx;
+        self.overlay = Some(Overlay::Wizard(wizard));
+    }
+
+    pub(crate) fn wizard_install_selected_version(&mut self) {
+        let Some(Overlay::Wizard(wizard)) = self.overlay.clone() else {
+            return;
+        };
+        self.submit_modrinth(&wizard);
     }
 
     // -----------------------------------------------------------------
@@ -453,7 +549,7 @@ impl App {
         let Some(Overlay::Wizard(wizard)) = self.overlay.clone() else {
             return;
         };
-        let popup = crate::widgets::centered_rect(76, 76, area);
+        let popup = crate::widgets::centered_rect(76, 84, area);
         frame.render_widget(ratatui::widgets::Clear, popup);
         let surface = Style::default().fg(self.theme.fg).bg(self.theme.panel_alt);
         frame.render_widget(ratatui::widgets::Block::default().style(surface), popup);
@@ -470,6 +566,7 @@ impl App {
             .constraints([
                 Constraint::Length(1),
                 Constraint::Length(1),
+                Constraint::Length(1),
                 Constraint::Min(4),
                 Constraint::Length(1),
             ])
@@ -480,79 +577,74 @@ impl App {
             chunks[0],
         );
 
-        let mut tabs = Vec::new();
-        for kind in BuildKind::all() {
-            let selected = kind == wizard.kind;
-            let style = if selected {
-                self.theme.row_selected()
-            } else {
-                self.theme.card_dim()
-            };
-            tabs.push(Span::styled(format!(" {} ", kind.label()), style));
-            tabs.push(Span::raw("  "));
-        }
-        frame.render_widget(Paragraph::new(Line::from(tabs)).style(surface), chunks[1]);
+        self.render_wizard_tabs(frame, chunks[1]);
 
-        match wizard.step {
-            WizardStep::Kind => self.render_wizard_kinds(frame, chunks[2]),
-            WizardStep::Configure => self.render_wizard_configure(frame, chunks[2]),
-            WizardStep::ModrinthSearch => self.render_wizard_search(frame, chunks[2]),
-            WizardStep::ModrinthProject => self.render_wizard_project(frame, chunks[2]),
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                wizard.kind.description().to_string(),
+                self.theme.card_dim(),
+            ))
+            .style(surface),
+            chunks[2],
+        );
+
+        match (wizard.kind, wizard.step) {
+            (BuildKind::Modrinth, WizardStep::ModrinthSearch) => {
+                self.render_wizard_search(frame, chunks[3])
+            }
+            (BuildKind::Modrinth, WizardStep::ModrinthProject) => {
+                self.render_wizard_project(frame, chunks[3])
+            }
+            _ => self.render_wizard_configure(frame, chunks[3]),
         }
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("Enter", self.theme.accent()),
+                Span::styled("1-3", self.theme.accent()),
+                Span::styled(" tab", self.theme.card_dim()),
+                Span::styled("   ↑↓/Tab", self.theme.accent()),
+                Span::styled(" move", self.theme.card_dim()),
+                Span::styled("   Enter", self.theme.accent()),
                 Span::styled(" continue", self.theme.card_dim()),
                 Span::styled("   Esc", self.theme.accent()),
                 Span::styled(" back", self.theme.card_dim()),
-                Span::styled("   Tab/↑↓", self.theme.accent()),
-                Span::styled(" move", self.theme.card_dim()),
             ]))
             .style(surface),
-            chunks[3],
+            chunks[4],
         );
     }
 
-    fn render_wizard_kinds(&mut self, frame: &mut Frame, area: Rect) {
-        let Some(Overlay::Wizard(wizard)) = self.overlay.as_ref() else {
+    fn render_wizard_tabs(&mut self, frame: &mut Frame, area: Rect) {
+        let Some(Overlay::Wizard(wizard)) = self.overlay.clone() else {
             return;
         };
-        let surface = Style::default().fg(self.theme.fg).bg(self.theme.panel_alt);
-        for (idx, kind) in BuildKind::all().iter().enumerate() {
-            let row = Rect {
-                x: area.x,
-                y: area.y + idx as u16 * 2,
-                width: area.width,
+        let mut x = area.x;
+        for kind in BuildKind::all() {
+            let label = format!(" {} ", kind.label());
+            let width = label.chars().count() as u16;
+            let rect = Rect {
+                x,
+                y: area.y,
+                width,
                 height: 1,
             };
-            let selected = *kind == wizard.kind;
-            let style = if selected {
-                self.theme.row_selected()
+            let selected = kind == wizard.kind;
+            let bg = if selected {
+                self.theme.selection_bg
             } else {
-                surface
+                self.theme.panel_alt
             };
-            let marker = if selected { "▸ " } else { "  " };
+            let fg = if selected {
+                self.theme.accent_bright()
+            } else {
+                self.theme.card_dim()
+            };
             frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    format!("{marker}{}", kind.label()),
-                    style,
-                )))
-                .style(style),
-                row,
+                Paragraph::new(Span::styled(label, fg)).style(Style::default().bg(bg)),
+                rect,
             );
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    format!("    {}", kind.description()),
-                    self.theme.card_dim(),
-                ))
-                .style(surface),
-                Rect {
-                    y: row.y + 1,
-                    height: 1,
-                    ..row
-                },
-            );
+            self.push_hitbox(rect, HitAction::Overlay(OverlayAction::WizardTab(kind)));
+            x += width + 1;
         }
     }
 
@@ -560,51 +652,44 @@ impl App {
         let Some(Overlay::Wizard(wizard)) = self.overlay.clone() else {
             return;
         };
-        match wizard.kind {
-            BuildKind::Clean => {
-                let rows = [
-                    ("Name", wizard.name.clone()),
-                    ("Minecraft", wizard.game_version.clone()),
-                    ("Loader", wizard.loader().label().to_string()),
-                    (
-                        "Loader Version",
-                        if wizard.loader_version.is_empty() {
-                            "latest".to_string()
-                        } else {
-                            wizard.loader_version.clone()
-                        },
-                    ),
-                    ("", "[ Create ]".to_string()),
-                ];
-                self.render_wizard_rows(frame, area, &rows, wizard.field);
-            }
-            BuildKind::Import => {
-                let rows = [
-                    ("Archive", wizard.path.clone()),
-                    ("", "[ Import ]".to_string()),
-                ];
-                self.render_wizard_rows(frame, area, &rows, wizard.field);
-            }
-            _ => {}
-        }
-    }
-
-    fn render_wizard_rows(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        rows: &[(&str, String)],
-        active: usize,
-    ) {
+        let rows: Vec<(&str, String, WRowTag)> = match wizard.kind {
+            BuildKind::Clean => vec![
+                ("Name", wizard.name.clone(), WRowTag::Text),
+                ("Minecraft", wizard.game_version.clone(), WRowTag::Pick),
+                (
+                    "Loader",
+                    wizard.loader().label().to_string(),
+                    WRowTag::Choice,
+                ),
+                (
+                    "Loader Version",
+                    if wizard.loader_version.is_empty() {
+                        "latest".to_string()
+                    } else {
+                        wizard.loader_version.clone()
+                    },
+                    WRowTag::Pick,
+                ),
+                ("", "Create".to_string(), WRowTag::Submit),
+            ],
+            BuildKind::Import => vec![
+                ("Archive", wizard.path.clone(), WRowTag::Text),
+                ("", "Import".to_string(), WRowTag::Submit),
+            ],
+            _ => return,
+        };
         let surface = Style::default().fg(self.theme.fg).bg(self.theme.panel_alt);
-        for (idx, (label, value)) in rows.iter().enumerate() {
-            let row = Rect {
+        for (idx, (label, value, tag)) in rows.iter().enumerate() {
+            let rect = Rect {
                 x: area.x,
                 y: area.y + idx as u16,
                 width: area.width,
                 height: 1,
             };
-            let selected = idx == active;
+            if rect.y >= area.y + area.height {
+                break;
+            }
+            let selected = idx == wizard.field;
             let style = if selected {
                 self.theme.row_selected()
             } else {
@@ -614,12 +699,24 @@ impl App {
             let line = if label.is_empty() {
                 Line::from(Span::styled(format!("{marker}{value}"), style))
             } else {
-                Line::from(vec![
+                let mut spans = vec![
                     Span::styled(format!("{marker}{label:<16}"), self.theme.card_dim()),
                     Span::styled(value.clone(), style),
-                ])
+                ];
+                match tag {
+                    WRowTag::Pick => spans.push(Span::styled("   ▾ pick", self.theme.accent())),
+                    WRowTag::Choice => spans.push(Span::styled("   ‹ ›", self.theme.accent())),
+                    _ => {}
+                }
+                Line::from(spans)
             };
-            frame.render_widget(Paragraph::new(line).style(style), row);
+            frame.render_widget(Paragraph::new(line).style(style), rect);
+            let action = match tag {
+                WRowTag::Pick => OverlayAction::WizardPick(idx),
+                WRowTag::Submit => OverlayAction::WizardSubmit,
+                _ => OverlayAction::WizardField(idx),
+            };
+            self.push_hitbox(rect, HitAction::Overlay(action));
         }
     }
 
@@ -641,22 +738,47 @@ impl App {
             .style(surface),
             chunks[0],
         );
+        self.push_hitbox(
+            chunks[0],
+            HitAction::Overlay(OverlayAction::WizardResultOpen),
+        );
 
-        let selected = Some(wizard.selected);
-        let items: Vec<ListItem> = wizard
-            .results
-            .iter()
-            .enumerate()
-            .map(|(idx, hit)| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(hit.title.clone(), surface),
+        let list_area = chunks[1];
+        let visible = list_area.height as usize;
+        let start = wizard.selected.saturating_sub(visible.saturating_sub(1));
+        for row in 0..visible {
+            let idx = start + row;
+            let Some(hit) = wizard.results.get(idx) else {
+                break;
+            };
+            let rect = Rect {
+                x: list_area.x,
+                y: list_area.y + row as u16,
+                width: list_area.width,
+                height: 1,
+            };
+            let style = row_style(self, idx, Some(wizard.selected), None);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(hit.title.clone(), style),
                     Span::styled(format!("  by {}", hit.author), self.theme.card_dim()),
                     Span::styled(format!("  ⤓ {}", hit.downloads), self.theme.accent()),
                 ]))
-                .style(row_style(self, idx, selected, None))
-            })
-            .collect();
-        frame.render_widget(List::new(items).style(surface), chunks[1]);
+                .style(surface),
+                rect,
+            );
+            self.push_hitbox(rect, HitAction::Overlay(OverlayAction::WizardResult(idx)));
+        }
+        if wizard.results.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "Type a query and press Enter to search.",
+                    self.theme.card_dim(),
+                ))
+                .style(surface),
+                list_area,
+            );
+        }
     }
 
     fn render_wizard_project(&mut self, frame: &mut Frame, area: Rect) {
@@ -671,7 +793,11 @@ impl App {
             .unwrap_or_default();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(2), Constraint::Min(3)])
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
             .split(area);
         frame.render_widget(
             Paragraph::new(vec![
@@ -685,26 +811,53 @@ impl App {
             chunks[0],
         );
 
-        let selected = Some(wizard.selected);
-        let items: Vec<ListItem> = wizard
-            .project_versions
-            .iter()
-            .enumerate()
-            .map(|(idx, version)| {
-                let game = version.game_versions.first().cloned().unwrap_or_default();
-                ListItem::new(Line::from(vec![
-                    Span::styled(version.version_number.clone(), surface),
+        let list_area = chunks[1];
+        let visible = list_area.height as usize;
+        let start = wizard.selected.saturating_sub(visible.saturating_sub(1));
+        for row in 0..visible {
+            let idx = start + row;
+            let Some(version) = wizard.project_versions.get(idx) else {
+                break;
+            };
+            let rect = Rect {
+                x: list_area.x,
+                y: list_area.y + row as u16,
+                width: list_area.width,
+                height: 1,
+            };
+            let style = row_style(self, idx, Some(wizard.selected), None);
+            let game = version.game_versions.first().cloned().unwrap_or_default();
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(version.version_number.clone(), style),
                     Span::styled(
                         format!("  {game} {}", version.loaders.join(", ")),
                         self.theme.card_dim(),
                     ),
                 ]))
-                .style(row_style(self, idx, selected, None))
-            })
-            .collect();
+                .style(surface),
+                rect,
+            );
+            self.push_hitbox(rect, HitAction::Overlay(OverlayAction::WizardVersion(idx)));
+        }
+
+        let install_rect = Rect {
+            x: chunks[2].x,
+            y: chunks[2].y,
+            width: chunks[2].width,
+            height: 1,
+        };
         frame.render_widget(
-            List::new(items).style(surface).highlight_symbol("▸ "),
-            chunks[1],
+            Paragraph::new(Span::styled(
+                "  Install selected version",
+                self.theme.accent(),
+            ))
+            .style(surface),
+            install_rect,
+        );
+        self.push_hitbox(
+            install_rect,
+            HitAction::Overlay(OverlayAction::WizardVersionInstall),
         );
     }
 }

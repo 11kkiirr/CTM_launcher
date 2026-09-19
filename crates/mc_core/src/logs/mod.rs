@@ -72,6 +72,55 @@ pub struct LogEntry {
     pub raw: String,
 }
 
+/// Remove ANSI/VT escape sequences from a raw log line.
+///
+/// Games and wrappers sometimes emit coloured output; leaving the escapes in
+/// place corrupts the TUI buffer with stray control bytes.
+pub fn strip_ansi(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c != '\x1b' {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        let Some(next) = chars.get(i + 1) else {
+            break;
+        };
+        i += 2;
+        if *next == '[' {
+            // CSI sequence: drop until the final byte (0x40..0x7E).
+            while i < chars.len() {
+                let b = chars[i];
+                i += 1;
+                if matches!(b, '@'..='~') {
+                    break;
+                }
+            }
+        } else if *next == ']' {
+            // OSC sequence: drop until BEL or ST (ESC \).
+            while i < chars.len() {
+                let b = chars[i];
+                i += 1;
+                if b == '\x07' {
+                    break;
+                }
+                if b == '\x1b' {
+                    if chars.get(i).cloned() == Some('\\') {
+                        i += 1;
+                    }
+                    break;
+                }
+            }
+        }
+        // Any other two-character escape is simply dropped.
+    }
+    out
+}
+
 fn log_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -84,10 +133,12 @@ fn log_regex() -> &'static Regex {
 
 /// Parse a raw log line into a structured entry.
 ///
+/// ANSI escapes are stripped first so control bytes never reach the UI.
 /// Falls back to a plain [`LogLevel::Unknown`] entry when the line does not
 /// match the standard Minecraft/Log4j layout.
 pub fn parse_line(raw: &str) -> LogEntry {
-    if let Some(caps) = log_regex().captures(raw) {
+    let clean = strip_ansi(raw);
+    if let Some(caps) = log_regex().captures(&clean) {
         let get = |name: &str| caps.name(name).map(|m| m.as_str().to_string());
         return LogEntry {
             level: LogLevel::parse(&get("level").unwrap_or_default()),
@@ -95,7 +146,7 @@ pub fn parse_line(raw: &str) -> LogEntry {
             thread: get("thread"),
             target: get("target").filter(|s| !s.is_empty()),
             message: get("msg").unwrap_or_default(),
-            raw: raw.to_string(),
+            raw: clean,
         };
     }
     LogEntry {
@@ -103,8 +154,8 @@ pub fn parse_line(raw: &str) -> LogEntry {
         timestamp: None,
         thread: None,
         target: None,
-        message: raw.to_string(),
-        raw: raw.to_string(),
+        message: clean.clone(),
+        raw: clean,
     }
 }
 
@@ -466,6 +517,14 @@ mod tests {
             Some("net.minecraft.client.Minecraft/")
         );
         assert_eq!(entry.message, "Something odd");
+    }
+
+    #[test]
+    fn strips_ansi_escapes() {
+        let entry = parse_line("\x1b[31m\x1b[1m[12:34:56] [main/INFO]: \x1b[0mcoloured");
+        assert_eq!(entry.message, "coloured");
+        assert!(!entry.raw.contains('\x1b'));
+        assert_eq!(entry.level, LogLevel::Info);
     }
 
     #[test]

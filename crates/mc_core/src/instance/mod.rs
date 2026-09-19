@@ -421,6 +421,19 @@ impl InstanceManager {
         Ok(())
     }
 
+    /// Rename an instance's display name, persisting `instance.json`.
+    pub async fn rename(&self, id: &str, new_name: &str) -> Result<()> {
+        let trimmed = new_name.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(CoreError::Other("instance name cannot be empty".into()));
+        }
+        let instance = self.get(id)?;
+        let mut metadata = instance.metadata.clone();
+        metadata.name = trimmed;
+        write_json(instance.metadata_file(), &metadata).await?;
+        Ok(())
+    }
+
     /// Build a filesystem-safe, unique id from a display name.
     fn unique_id(&self, name: &str) -> Result<String> {
         let base = slugify(name);
@@ -500,6 +513,32 @@ mod tests {
         let listed = manager.list().unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name(), "Test Pack");
+
+        manager.delete(instance.id()).await.unwrap();
+        assert!(manager.list().unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn rename_updates_display_name() {
+        let dir = std::env::temp_dir().join(format!("ctm-inst-{}", uuid::Uuid::new_v4()));
+        let paths = Paths::rooted_at(&dir);
+        paths.ensure_layout().unwrap();
+        let manager = InstanceManager::new(paths);
+
+        let instance = manager
+            .create(
+                "Old Name",
+                "1.20.1",
+                LoaderType::Fabric,
+                Some("0.15.7".into()),
+            )
+            .await
+            .unwrap();
+        manager.rename(instance.id(), "New Name").await.unwrap();
+        let reloaded = manager.get(instance.id()).unwrap();
+        assert_eq!(reloaded.name(), "New Name");
 
         manager.delete(instance.id()).await.unwrap();
         assert!(manager.list().unwrap().is_empty());

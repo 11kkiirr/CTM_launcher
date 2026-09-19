@@ -120,6 +120,7 @@ impl Theme {
     }
 
     /// Selected list row: green on a soft dark-green background.
+    #[allow(dead_code)]
     pub fn selection(&self) -> Style {
         Style::default()
             .bg(self.selection_bg)

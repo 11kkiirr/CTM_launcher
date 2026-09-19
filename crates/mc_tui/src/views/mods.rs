@@ -118,12 +118,13 @@ impl App {
         );
 
         if self.installed_mods.is_empty() {
+            let hint = if self.mods_scanning {
+                "Scanning mods…".to_string()
+            } else {
+                "No mods installed. Press 's' to search Modrinth.".to_string()
+            };
             frame.render_widget(
-                Paragraph::new(Span::styled(
-                    "No mods installed. Press 's' to search Modrinth.",
-                    self.theme.card_dim(),
-                ))
-                .style(self.theme.card()),
+                Paragraph::new(Span::styled(hint, self.theme.card_dim())).style(self.theme.card()),
                 list_area,
             );
         }

@@ -45,6 +45,7 @@ impl App {
                 ("Install / Repair", "i", ButtonId::InstallInstance),
                 ("Import", "p", ButtonId::ImportModpack),
                 ("Versions", "v", ButtonId::ChangeVersion),
+                ("Rename", "r", ButtonId::RenameInstance),
                 ("Delete", "d", ButtonId::DeleteInstance),
             ],
         );
@@ -329,6 +330,10 @@ impl App {
             KeyCode::Char('v') => {
                 self.select_instance(current);
                 self.open_change_version_picker();
+            }
+            KeyCode::Char('r') => {
+                self.select_instance(current);
+                self.open_rename_instance_form();
             }
             KeyCode::Char('d') => {
                 self.select_instance(current);
