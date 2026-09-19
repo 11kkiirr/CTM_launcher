@@ -13,7 +13,7 @@ use mc_core::modrinth::{Project, SearchHit, Version};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 use ratatui_image::{Resize, StatefulImage};
 
@@ -203,65 +203,295 @@ impl App {
     }
 
     fn render_browse_results(&mut self, frame: &mut Frame, area: Rect) {
+        const CARD_H: u16 = 5;
+        const ICON_W: u16 = 12;
+        const GAP: u16 = 1;
+
         let inner = crate::views::card(self, frame, area, self.browse.focus == BrowseFocus::List);
         if inner.height == 0 {
             return;
         }
         let hits = self.browse.results.clone();
-        let visible = inner.height as usize;
-        let start = self.browse.selected.saturating_sub(visible.saturating_sub(1));
-        let end = (start + visible).min(hits.len().max(1));
+        let step = CARD_H + GAP;
+        let visible_items = (inner.height / step) as usize;
+        let first_visible_item =
+            self.browse.selected.saturating_sub(visible_items.saturating_sub(1));
+
         let visible_hits: Vec<SearchHit> = hits
             .iter()
-            .skip(start)
-            .take(end - start)
+            .skip(first_visible_item)
+            .take(visible_items)
             .map(SearchHit::clone)
             .collect();
         self.browse_prefetch_icons(&visible_hits);
-        for row in 0..visible {
-            let idx = start + row;
+
+        for item in 0..visible_items {
+            let idx = first_visible_item + item;
             let Some(hit) = hits.get(idx).cloned() else {
                 break;
             };
-            let rect = Rect {
+            let card_y = inner.y + (item as u16) * step;
+            let card_rect = Rect {
                 x: inner.x,
-                y: inner.y + row as u16,
+                y: card_y,
                 width: inner.width,
-                height: 1,
+                height: CARD_H,
             };
-            let style = if idx == self.browse.selected {
-                self.theme.row_selected()
-            } else if self.is_hovered(rect) {
-                self.theme.row_hover()
+            let is_selected = idx == self.browse.selected;
+            let is_hovered = self.is_hovered(card_rect);
+
+            // Card background
+            let bg = if is_selected {
+                self.theme.selection_bg
+            } else if is_hovered {
+                self.theme.hover_bg
+            } else {
+                self.theme.panel_alt
+            };
+            let surface = Style::default().bg(bg);
+            frame.render_widget(Block::default().style(surface), card_rect);
+
+            // Icon area (full card height) on the left
+            let icon_rect = Rect {
+                x: inner.x,
+                y: card_y,
+                width: ICON_W,
+                height: CARD_H,
+            };
+            self.render_browse_card_icon(frame, icon_rect, &hit, bg);
+
+            // Green accent bar on the left, just right of the icon
+            if is_selected && card_rect.width > ICON_W {
+                let bar = Rect {
+                    x: inner.x + ICON_W,
+                    y: card_rect.y,
+                    width: 1,
+                    height: CARD_H,
+                };
+                let bar_lines: Vec<Line> = (0..CARD_H)
+                    .map(|_| {
+                        Line::from(Span::styled(
+                            "\u{258e}",
+                            Style::default().fg(self.theme.green),
+                        ))
+                    })
+                    .collect();
+                frame.render_widget(Paragraph::new(bar_lines).style(surface), bar);
+            }
+
+            // Text content (right of icon + bar)
+            let bar_w: u16 = if is_selected && card_rect.width > ICON_W { 1 } else { 0 };
+            let text_x = inner.x + ICON_W + bar_w;
+            let text_w = card_rect.width.saturating_sub(ICON_W + bar_w);
+
+            let title_style = if is_selected {
+                Style::default()
+                    .fg(self.theme.green)
+                    .bg(bg)
+                    .add_modifier(ratatui::style::Modifier::BOLD)
+            } else if is_hovered {
+                Style::default().fg(self.theme.green).bg(bg)
             } else {
                 self.theme.row()
             };
+            let dim_style = if is_selected {
+                Style::default().fg(self.theme.green).bg(bg)
+            } else {
+                Style::default().fg(self.theme.muted).bg(bg)
+            };
+
+            // Row 1: title
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    truncate(&hit.title, text_w as usize),
+                    title_style,
+                ))
+                .style(surface),
+                Rect {
+                    x: text_x,
+                    y: card_y,
+                    width: text_w,
+                    height: 1,
+                },
+            );
+
+            // Row 2: description
+            let desc = if hit.description.is_empty() {
+                "No description".to_string()
+            } else {
+                truncate(&hit.description, text_w as usize)
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    desc,
+                    Style::default().fg(self.theme.comment).bg(bg),
+                ))
+                .style(surface),
+                Rect {
+                    x: text_x,
+                    y: card_y + 1,
+                    width: text_w,
+                    height: 1,
+                },
+            );
+
+            // Row 3: version + downloads + follows
+            let version = hit.latest_version.as_deref().unwrap_or("--");
+            let mut line3: Vec<Span> = Vec::new();
+            line3.push(Span::styled(format!("v{version}"), dim_style));
+            line3.push(Span::styled(
+                format!("  \u{2913} {}", hit.downloads),
+                Style::default().fg(self.theme.green).bg(bg),
+            ));
+            line3.push(Span::styled(
+                format!("  \u{2661} {}", hit.follows),
+                dim_style,
+            ));
             let categories = if hit.display_categories.is_empty() {
                 String::new()
             } else {
-                hit.display_categories.first().cloned().unwrap_or_default()
+                format!(
+                    "  {}",
+                    hit.display_categories.first().cloned().unwrap_or_default()
+                )
             };
-            let mut spans: Vec<Span> = Vec::new();
-            spans.extend(self.browse_row_icon(&hit));
-            spans.push(Span::styled(truncate(&hit.title, 26), style));
-            spans.push(Span::styled(format!("  by {}", truncate(&hit.author, 12)), self.theme.card_dim()));
-            spans.push(Span::styled(format!("  ⤓ {}", hit.downloads), self.theme.accent()));
-            spans.push(Span::styled(format!("  ♡ {}", hit.follows), self.theme.card_dim()));
-            spans.push(Span::styled(format!("  {categories}"), self.theme.card_comment()));
-            frame.render_widget(Paragraph::new(Line::from(spans)).style(self.theme.card()), rect);
-            self.push_hitbox(rect, HitAction::BrowseResult(idx));
+            if !categories.is_empty() {
+                line3.push(Span::styled(
+                    categories,
+                    Style::default().fg(self.theme.comment).bg(bg),
+                ));
+            }
+            frame.render_widget(
+                Paragraph::new(Line::from(line3)).style(surface),
+                Rect {
+                    x: text_x,
+                    y: card_y + 2,
+                    width: text_w,
+                    height: 1,
+                },
+            );
+
+            // Row 4: client/server side
+            let side_label = match (hit.client_side.as_str(), hit.server_side.as_str()) {
+                ("required", "required") => "Client + Server",
+                ("required", _) => "Client",
+                (_, "required") => "Server",
+                ("optional", "optional") => "Client + Server (optional)",
+                ("optional", _) => "Client (optional)",
+                (_, "optional") => "Server (optional)",
+                _ => "",
+            };
+            if !side_label.is_empty() {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        side_label,
+                        Style::default().fg(self.theme.comment).bg(bg),
+                    ))
+                    .style(surface),
+                    Rect {
+                        x: text_x,
+                        y: card_y + 3,
+                        width: text_w,
+                        height: 1,
+                    },
+                );
+            }
+
+            self.push_hitbox(card_rect, HitAction::BrowseResult(idx));
         }
+
         if hits.is_empty() {
             let hint = if self.browse.loading {
-                "Loading…".to_string()
+                "Loading...".to_string()
             } else if self.browse.query.is_empty() {
                 "No projects found.".to_string()
             } else {
-                format!("No results for '{}'. Press 's' to change the query.", self.browse.query)
+                format!(
+                    "No results for '{}'. Press 's' to change the query.",
+                    self.browse.query
+                )
             };
             frame.render_widget(
                 Paragraph::new(Span::styled(hint, self.theme.card_dim())).style(self.theme.card()),
                 inner,
+            );
+        }
+    }
+
+    /// Render a full-height icon on the left side of a browse card.
+    /// Uses the same ratatui-image protocol rendering as the detail view
+    /// when available, falling back to truecolor half-blocks or a colour swatch.
+    fn render_browse_card_icon(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        hit: &SearchHit,
+        bg: ratatui::style::Color,
+    ) {
+        let color = hit
+            .color
+            .map(|c| ratatui::style::Color::Rgb((c >> 16) as u8, (c >> 8) as u8, c as u8))
+            .unwrap_or(self.theme.green_dim);
+        let surface = Style::default().bg(bg);
+
+        let Some(url) = hit.icon_url.as_ref() else {
+            self.render_card_icon_fallback(frame, area, color);
+            return;
+        };
+
+        // Try the full-protocol image rendering (kitty/sixel/iterm2/halfblocks).
+        if let Some(img) = self.browse_images.get(url) {
+            if crate::images::terminal_supports_truecolor() {
+                if self.browse_protocols.get(url).is_none() {
+                    if let Some(dynamic) = crate::images::to_dynamic_image(img) {
+                        let protocol = self.picker.new_resize_protocol(dynamic);
+                        self.browse_protocols.insert(url.to_string(), protocol);
+                    }
+                }
+                if let Some(proto) = self.browse_protocols.get_mut(url) {
+                    frame.render_stateful_widget(
+                        StatefulImage::default().resize(Resize::Fit(None)),
+                        area,
+                        proto,
+                    );
+                    return;
+                }
+            }
+            // Half-block fallback when protocol unavailable.
+            let icon_lines =
+                crate::images::image_lines(img, area.width as u32, area.height as u32, bg);
+            for (i, line) in icon_lines.iter().enumerate() {
+                let row = Rect { x: area.x, y: area.y + i as u16, width: area.width, height: 1 };
+                if row.y >= area.y + area.height { break; }
+                frame.render_widget(
+                    Paragraph::new(Line::from(line.spans.clone())).style(surface), row,
+                );
+            }
+            for i in icon_lines.len()..area.height as usize {
+                let row = Rect { x: area.x, y: area.y + i as u16, width: area.width, height: 1 };
+                frame.render_widget(Paragraph::new("").style(surface), row);
+            }
+            return;
+        }
+
+        // Colour swatch when no image loaded yet.
+        self.render_card_icon_fallback(frame, area, color);
+    }
+
+    fn render_card_icon_fallback(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        color: ratatui::style::Color,
+    ) {
+        for row_idx in 0..area.height {
+            let row = Rect { x: area.x, y: area.y + row_idx, width: area.width, height: 1 };
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    " ".repeat(area.width as usize),
+                    Style::default().bg(color),
+                )),
+                row,
             );
         }
     }
@@ -275,41 +505,6 @@ impl App {
             }
         }
     }
-
-/// A small icon thumbnail (or a coloured placeholder) for a search result,
-/// plus a trailing space. When a full-resolution image is queued on top, this
-/// renders the cheap colour swatch as a fallback underneath.
-fn browse_row_icon(&self, hit: &SearchHit) -> Vec<Span<'_>> {
-    const ICON_W: u32 = 3;
-    let mut spans: Vec<Span> = Vec::new();
-    let color = hit
-        .color
-        .map(|c| ratatui::style::Color::Rgb((c >> 16) as u8, (c >> 8) as u8, c as u8))
-        .unwrap_or(self.theme.green_dim);
-    let fallback = Span::styled("   ", Style::default().bg(color));
-    let Some(url) = hit.icon_url.as_ref() else {
-        spans.push(fallback);
-        spans.push(Span::styled(" ", self.theme.card()));
-        return spans;
-    };
-    let Some(img) = self.browse_images.get(url) else {
-        spans.push(fallback);
-        spans.push(Span::styled(" ", self.theme.card()));
-        return spans;
-    };
-    if !crate::images::terminal_supports_truecolor() {
-        spans.push(fallback);
-    } else {
-        let lines = crate::images::image_lines(img, ICON_W, 1, self.theme.panel);
-        if let Some(line) = lines.first() {
-            for s in line.spans.iter() {
-                spans.push(Span::styled(s.content.to_string(), s.style));
-            }
-        }
-    }
-    spans.push(Span::styled(" ", self.theme.card()));
-    spans
-}
 
     fn render_browse_detail(&mut self, frame: &mut Frame, area: Rect) {
         let Some(project) = self.browse.detail.clone() else {

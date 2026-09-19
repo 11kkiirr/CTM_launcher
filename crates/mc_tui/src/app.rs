@@ -705,6 +705,18 @@ impl App {
                 if let Some(data) = data {
                     if let Ok(img) = mc_core::img::decode_image(&data) {
                         self.browse_images.insert(url, img);
+                    } else if let Ok(dynamic) = image::load_from_memory(&data) {
+                        let rgba = dynamic.to_rgba8();
+                        let w = rgba.width();
+                        let h = rgba.height();
+                        self.browse_images.insert(
+                            url,
+                            mc_core::img::RgbaImage {
+                                width: w,
+                                height: h,
+                                pixels: rgba.into_raw(),
+                            },
+                        );
                     }
                 }
             }
