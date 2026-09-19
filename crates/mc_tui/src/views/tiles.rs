@@ -72,9 +72,9 @@ impl App {
         );
 
         let grid = Rect {
-            x: inner.x,
+            x: inner.x + 1,
             y: inner.y + 2,
-            width: inner.width,
+            width: inner.width.saturating_sub(1),
             height: inner.height.saturating_sub(2),
         };
         if grid.width < TILE_W || grid.height < TILE_H {
@@ -129,36 +129,26 @@ impl App {
     ) {
         let bg = if selected {
             self.theme.selection_bg
+        } else if hovered {
+            self.theme.hover_bg
         } else {
             self.theme.panel_alt
         };
         let surface = Style::default().bg(bg);
-        let border = if selected {
-            self.theme.green_bright
-        } else if hovered {
-            self.theme.green
-        } else {
-            self.theme.border
-        };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(border))
-            .style(surface);
-        let inner = block.inner(rect);
-        frame.render_widget(block, rect);
+        // Flat block, no border.
+        frame.render_widget(Block::default().style(surface), rect);
         if selected {
             crate::views::accent_bar(frame, rect, &self.theme);
         }
-        if inner.width < 6 || inner.height < CONTENT_H {
+        if rect.width < 6 || rect.height < CONTENT_H {
             return;
         }
 
-        let top = inner.y + inner.height.saturating_sub(CONTENT_H) / 2;
-        let cx = inner.x;
-        let cw = inner.width;
+        let top = rect.y + rect.height.saturating_sub(CONTENT_H) / 2;
+        let cx = rect.x;
+        let cw = rect.width;
 
-        // 1) Centered logo / short-name box.
+        // 1) Centered logo / short-name box. The outline stays.
         let short = short_name(instance.name());
         let box_w = (short.chars().count() as u16 + 4).max(6).min(cw);
         let box_x = cx + cw.saturating_sub(box_w) / 2;
@@ -216,7 +206,7 @@ impl App {
             },
         );
 
-        // 3) Loader & version on one muted line.
+        // 3) Loader & version on one muted line (blends with the card).
         let meta = format!(
             "{} / {}",
             instance.metadata.game_version,
@@ -225,7 +215,7 @@ impl App {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 truncate(&meta, cw as usize),
-                self.theme.card_dim(),
+                Style::default().fg(self.theme.muted).bg(bg),
             ))
             .alignment(Alignment::Center)
             .style(surface),
@@ -265,25 +255,15 @@ impl App {
             self.theme.panel_alt
         };
         let surface = Style::default().bg(bg);
-        let border = if hovered {
-            self.theme.green
-        } else {
-            self.theme.border
-        };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(border))
-            .style(surface);
-        let inner = block.inner(rect);
-        frame.render_widget(block, rect);
+        // Flat block, no border.
+        frame.render_widget(Block::default().style(surface), rect);
 
         let style = if hovered {
             self.theme.accent_bright()
         } else {
             self.theme.card_dim()
         };
-        let top = inner.height.saturating_sub(2) / 2;
+        let top = rect.height.saturating_sub(2) / 2;
         let mut lines: Vec<Line> = (0..top).map(|_| Line::from("")).collect();
         lines.push(Line::from(Span::styled("＋", style)));
         lines.push(Line::from(Span::styled("New Build", style)));
@@ -291,7 +271,7 @@ impl App {
             Paragraph::new(lines)
                 .alignment(Alignment::Center)
                 .style(surface),
-            inner,
+            rect,
         );
     }
 

@@ -22,7 +22,7 @@ use mc_core::CoreError;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, ListState, Paragraph};
+use ratatui::widgets::{Block, ListState, Paragraph};
 use ratatui::Frame;
 use tokio::sync::mpsc;
 
@@ -2558,29 +2558,19 @@ impl App {
     }
 
     /// A chunky, padded navigation block button with an index number. The
-    /// active entry gets a solid green border and a dark green tint.
+    /// active entry gets a solid dark-green fill. No borders.
     fn render_nav_button(&mut self, frame: &mut Frame, rect: Rect, nav: Nav, number: usize) {
         let selected = nav == self.nav;
         let hovered = self.is_hovered(rect);
         let bg = if selected {
             self.theme.selection_bg
+        } else if hovered {
+            self.theme.hover_bg
         } else {
             self.theme.panel_alt
         };
-        let border = if selected {
-            self.theme.green_bright
-        } else if hovered {
-            self.theme.green
-        } else {
-            self.theme.border
-        };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(border))
-            .style(Style::default().bg(bg));
-        let inner = block.inner(rect);
-        frame.render_widget(block, rect);
+        // Flat block, no border.
+        frame.render_widget(Block::default().style(Style::default().bg(bg)), rect);
 
         let surface = Style::default().bg(bg);
         let num_style = if selected {
@@ -2594,12 +2584,12 @@ impl App {
             Style::default().fg(self.theme.fg).bg(bg)
         };
         let row = Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
+            x: rect.x,
+            y: rect.y + rect.height / 2,
+            width: rect.width,
             height: 1,
         };
-        if inner.height > 0 {
+        if rect.height > 0 {
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled(format!(" {number}  "), num_style),
@@ -2686,7 +2676,7 @@ impl App {
         // side. Both remain reachable now that they are out of the nav menu.
         let account = format!("@ {active}");
         let account_w = account.chars().count() as u16;
-        let settings = "[ ⚙ Settings ]";
+        let settings = "⚙ Settings";
         let settings_w = settings.chars().count() as u16;
         let total = account_w + 2 + settings_w;
         if total + 2 < area.width {

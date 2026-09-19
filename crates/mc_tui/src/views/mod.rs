@@ -184,7 +184,8 @@ pub(crate) fn tab_row(
     }
 }
 
-/// Render a horizontal row of keybinding "pills": `[ Label [key] ]`.
+/// Render a horizontal row of keybinding "pills", e.g. `Launch  Enter`.
+/// Bracket-free flat blocks on a dark background.
 ///
 /// Used for the modernized top action toolbar.
 pub(crate) fn pill_row(
@@ -196,7 +197,7 @@ pub(crate) fn pill_row(
     pills: &[(&str, &str, ButtonId)],
 ) {
     for (label, key, id) in pills {
-        let width = label.chars().count() as u16 + key.chars().count() as u16 + 7;
+        let width = label.chars().count() as u16 + key.chars().count() as u16 + 4;
         if x + width > max_width {
             break;
         }
@@ -218,12 +219,9 @@ pub(crate) fn pill_row(
             Style::default().fg(app.theme.fg)
         };
         let line = Line::from(vec![
-            Span::styled("[ ", app.theme.comment_style()),
-            Span::styled(label.to_string(), label_style),
-            Span::styled(" [", app.theme.comment_style()),
+            Span::styled(format!(" {label}  "), label_style),
             Span::styled(key.to_string(), app.theme.accent()),
-            Span::styled("] ", app.theme.comment_style()),
-            Span::styled("]", app.theme.comment_style()),
+            Span::styled(" ", app.theme.comment_style()),
         ]);
         frame.render_widget(Paragraph::new(line).style(Style::default().bg(bg)), rect);
         app.hitboxes.push(crate::app::Hitbox {
