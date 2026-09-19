@@ -65,6 +65,10 @@ pub async fn remove_mod(path: impl AsRef<Path>) -> Result<()> {
 }
 
 /// Scan an instance's `mods/` directory, hashing every `.jar`.
+///
+/// The SHA-1 is intentionally *not* computed here: hashing large jars makes a
+/// scan slow. It is filled in lazily by [`update_check_sha1`] when the user
+/// asks to check for updates.
 pub async fn scan_installed_mods(mods_dir: impl AsRef<Path>) -> Result<Vec<InstalledMod>> {
     let mods_dir = mods_dir.as_ref();
     if !mods_dir.exists() {
@@ -83,12 +87,11 @@ pub async fn scan_installed_mods(mods_dir: impl AsRef<Path>) -> Result<Vec<Insta
         }
         let path = entry.path();
         let metadata = entry.metadata().await?;
-        let sha1 = sha1_file(&path).await.unwrap_or_default();
         out.push(InstalledMod {
             path,
             file_name: file_name.clone(),
             enabled: !is_disabled(&file_name),
-            sha1,
+            sha1: String::new(),
             size: metadata.len(),
         });
     }
@@ -98,6 +101,14 @@ pub async fn scan_installed_mods(mods_dir: impl AsRef<Path>) -> Result<Vec<Insta
             .cmp(&logical_name(&b.file_name).to_lowercase())
     });
     Ok(out)
+}
+
+/// Ensure a mod has its SHA-1 computed, hashing lazily when missing.
+pub async fn update_check_sha1(module: &InstalledMod) -> Result<String> {
+    if !module.sha1.is_empty() {
+        return Ok(module.sha1.clone());
+    }
+    sha1_file(&module.path).await
 }
 
 /// Download a Modrinth version file into `mods_dir`, verifying its SHA-1.

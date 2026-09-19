@@ -53,10 +53,10 @@ pub enum WizardStep {
 }
 
 /// A field row tag used to render and wire up the configure pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WRowTag {
     Text,
     Pick,
-    Choice,
     Submit,
 }
 
@@ -316,7 +316,13 @@ impl App {
             _ => WizardStep::Configure,
         };
         wizard.field = 0;
-        self.overlay = Some(Overlay::Wizard(wizard));
+        let browse = kind == BuildKind::Modrinth;
+        self.overlay = Some(Overlay::Wizard(wizard.clone()));
+        if browse {
+            // Open the first page of popular modpacks right away.
+            self.pending_wizard = Some(wizard);
+            self.wizard_search();
+        }
     }
 
     pub(crate) fn wizard_focus_field(&mut self, idx: usize) {
@@ -336,12 +342,29 @@ impl App {
                 self.pending_wizard = Some(wizard.clone());
                 self.request_game_versions();
             }
+            BuildKind::Clean if idx == 2 => {
+                self.pending_wizard = Some(wizard.clone());
+                self.open_loader_picker();
+            }
             BuildKind::Clean if idx == 3 => {
                 self.pending_wizard = Some(wizard.clone());
                 self.request_loader_versions();
             }
             _ => {}
         }
+    }
+
+    /// Open a mouse-friendly loader-type picker.
+    pub(crate) fn open_loader_picker(&mut self) {
+        let labels: Vec<String> = CreateWizard::loaders()
+            .iter()
+            .map(|l| l.label().to_string())
+            .collect();
+        self.overlay = Some(Overlay::Picker(crate::forms::VersionPicker::new(
+            "Mod Loader",
+            labels,
+            PickerTarget::WizardLoaderType,
+        )));
     }
 
     pub(crate) fn wizard_submit_clicked(&mut self) {
@@ -399,10 +422,8 @@ impl App {
         let Some(wizard) = self.pending_wizard.as_ref() else {
             return;
         };
+        // An empty query browses the first page of popular modpacks.
         let query = wizard.query.trim().to_string();
-        if query.is_empty() {
-            return;
-        }
         let modrinth = self.modrinth.clone();
         let tx = self.engine_tx.clone();
         self.progress = Some((None, format!("Searching '{query}'...")));
@@ -505,6 +526,7 @@ impl App {
         let title = match target {
             PickerTarget::WizardGame | PickerTarget::ChangeGameVersion => "Minecraft Version",
             PickerTarget::WizardLoader => "Loader Version",
+            PickerTarget::WizardLoaderType => "Mod Loader",
         };
         self.overlay = Some(Overlay::Picker(crate::forms::VersionPicker::new(
             title, versions, target,
@@ -524,6 +546,17 @@ impl App {
             PickerTarget::WizardLoader => {
                 if let Some(mut wizard) = self.pending_wizard.take() {
                     wizard.loader_version = value;
+                    wizard.step = WizardStep::Configure;
+                    self.overlay = Some(Overlay::Wizard(wizard));
+                }
+            }
+            PickerTarget::WizardLoaderType => {
+                if let Some(mut wizard) = self.pending_wizard.take() {
+                    let idx = CreateWizard::loaders()
+                        .iter()
+                        .position(|l| l.label() == value)
+                        .unwrap_or(0);
+                    wizard.loader_idx = idx;
                     wizard.step = WizardStep::Configure;
                     self.overlay = Some(Overlay::Wizard(wizard));
                 }
@@ -656,11 +689,7 @@ impl App {
             BuildKind::Clean => vec![
                 ("Name", wizard.name.clone(), WRowTag::Text),
                 ("Minecraft", wizard.game_version.clone(), WRowTag::Pick),
-                (
-                    "Loader",
-                    wizard.loader().label().to_string(),
-                    WRowTag::Choice,
-                ),
+                ("Loader", wizard.loader().label().to_string(), WRowTag::Pick),
                 (
                     "Loader Version",
                     if wizard.loader_version.is_empty() {
@@ -703,10 +732,8 @@ impl App {
                     Span::styled(format!("{marker}{label:<16}"), self.theme.card_dim()),
                     Span::styled(value.clone(), style),
                 ];
-                match tag {
-                    WRowTag::Pick => spans.push(Span::styled("   ▾ pick", self.theme.accent())),
-                    WRowTag::Choice => spans.push(Span::styled("   ‹ ›", self.theme.accent())),
-                    _ => {}
+                if *tag == WRowTag::Pick {
+                    spans.push(Span::styled("   ▾ pick", self.theme.accent()));
                 }
                 Line::from(spans)
             };
@@ -717,6 +744,26 @@ impl App {
                 _ => OverlayAction::WizardField(idx),
             };
             self.push_hitbox(rect, HitAction::Overlay(action));
+        }
+        if wizard.kind == BuildKind::Import {
+            let browse_row = Rect {
+                x: area.x,
+                y: area.y + rows.len() as u16 + 1,
+                width: area.width,
+                height: 1,
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "   Browse… (file dialog)",
+                    self.theme.accent(),
+                ))
+                .style(surface),
+                browse_row,
+            );
+            self.push_hitbox(
+                browse_row,
+                HitAction::Overlay(OverlayAction::WizardBrowseImport),
+            );
         }
     }
 

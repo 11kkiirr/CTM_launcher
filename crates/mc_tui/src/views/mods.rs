@@ -33,6 +33,7 @@ impl App {
             &[
                 ("Toggle", ButtonId::ToggleMod),
                 ("Delete", ButtonId::DeleteMod),
+                ("Browse", ButtonId::BrowseMods),
                 ("Search", ButtonId::ModSearch),
                 ("Updates", ButtonId::UpdateMods),
             ],

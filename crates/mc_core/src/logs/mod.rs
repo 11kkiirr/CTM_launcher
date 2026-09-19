@@ -72,51 +72,64 @@ pub struct LogEntry {
     pub raw: String,
 }
 
-/// Remove ANSI/VT escape sequences from a raw log line.
+/// Remove ANSI/VT escape sequences and stray control bytes from a raw log line.
 ///
-/// Games and wrappers sometimes emit coloured output; leaving the escapes in
-/// place corrupts the TUI buffer with stray control bytes.
+/// Games and wrappers sometimes emit coloured output or control codes; leaving
+/// them in place corrupts the TUI buffer with stray bytes.
 pub fn strip_ansi(input: &str) -> String {
     let chars: Vec<char> = input.chars().collect();
     let mut out = String::new();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
-        if c != '\x1b' {
-            out.push(c);
+        if c == '\x1b' {
+            // Escape sequence: handle CSI / OSC / two-char escapes.
+            let Some(next) = chars.get(i + 1) else {
+                break;
+            };
+            i += 2;
+            if *next == '[' {
+                // CSI sequence: drop until the final byte (0x40..0x7E).
+                while i < chars.len() {
+                    let b = chars[i];
+                    i += 1;
+                    if matches!(b, '@'..='~') {
+                        break;
+                    }
+                }
+            } else if *next == ']' {
+                // OSC sequence: drop until BEL or ST (ESC \).
+                while i < chars.len() {
+                    let b = chars[i];
+                    i += 1;
+                    if b == '\x07' {
+                        break;
+                    }
+                    if b == '\x1b' {
+                        if chars.get(i).cloned() == Some('\\') {
+                            i += 1;
+                        }
+                        break;
+                    }
+                }
+            } else if *next >= ' ' && *next <= '/' {
+                // ESC followed by an intermediate byte (e.g. `(B`): consume the
+                // final byte too.
+                if i < chars.len() {
+                    i += 1;
+                }
+            }
+            // Any other two-character escape is simply dropped.
+            continue;
+        }
+        // Drop all other C0 control bytes (carriage returns, bell, ...) and
+        // DEL, but keep horizontal tab and newline.
+        if ('\x00'..='\x1f').contains(&c) && c != '\t' && c != '\n' || c == '\x7f' {
             i += 1;
             continue;
         }
-        let Some(next) = chars.get(i + 1) else {
-            break;
-        };
-        i += 2;
-        if *next == '[' {
-            // CSI sequence: drop until the final byte (0x40..0x7E).
-            while i < chars.len() {
-                let b = chars[i];
-                i += 1;
-                if matches!(b, '@'..='~') {
-                    break;
-                }
-            }
-        } else if *next == ']' {
-            // OSC sequence: drop until BEL or ST (ESC \).
-            while i < chars.len() {
-                let b = chars[i];
-                i += 1;
-                if b == '\x07' {
-                    break;
-                }
-                if b == '\x1b' {
-                    if chars.get(i).cloned() == Some('\\') {
-                        i += 1;
-                    }
-                    break;
-                }
-            }
-        }
-        // Any other two-character escape is simply dropped.
+        out.push(c);
+        i += 1;
     }
     out
 }
@@ -525,6 +538,12 @@ mod tests {
         assert_eq!(entry.message, "coloured");
         assert!(!entry.raw.contains('\x1b'));
         assert_eq!(entry.level, LogLevel::Info);
+    }
+
+    #[test]
+    fn strips_stray_control_bytes() {
+        let clean = strip_ansi("line one\rline two\x07\x1b(B");
+        assert_eq!(clean, "line oneline two");
     }
 
     #[test]

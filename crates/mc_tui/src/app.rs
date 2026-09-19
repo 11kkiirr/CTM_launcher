@@ -179,6 +179,8 @@ pub enum OverlayAction {
     WizardPick(usize),
     /// Create-build wizard: submit the active form (Create/Import).
     WizardSubmit,
+    /// Create-build wizard: open the native file dialog for `.mrpack` import.
+    WizardBrowseImport,
     /// Create-build wizard: select a Modrinth search result.
     WizardResult(usize),
     /// Create-build wizard: open the selected Modrinth result.
@@ -220,6 +222,7 @@ pub enum ButtonId {
     DeleteMod,
     ModSearch,
     UpdateMods,
+    BrowseMods,
     OfflineLogin,
     MicrosoftLogin,
     SetActiveAccount,
@@ -431,20 +434,9 @@ impl App {
         let frame_budget = Duration::from_millis(16);
         let mut needs_draw = true;
         let mut last_draw = Instant::now() - frame_budget;
-        // Periodic full repaints clear any stray glyph/control-byte artifacts
-        // that can accumulate while streaming game logs.
-        let mut last_full_redraw = Instant::now();
 
         while !self.should_quit {
-            let mut force_clear = false;
-            if self.nav == Nav::Logs && last_full_redraw.elapsed() >= Duration::from_secs(3) {
-                force_clear = true;
-                last_full_redraw = Instant::now();
-            }
-            if (needs_draw || force_clear) && last_draw.elapsed() >= frame_budget {
-                if force_clear {
-                    terminal.clear()?;
-                }
+            if needs_draw && last_draw.elapsed() >= frame_budget {
                 terminal.draw(|frame| self.render(frame))?;
                 last_draw = Instant::now();
                 needs_draw = false;
@@ -603,6 +595,13 @@ impl App {
             EngineEvent::InstancesChanged => {
                 self.reload_instances();
                 self.reload_mods();
+            }
+            EngineEvent::ImportPathPicked(Some(path)) => {
+                self.import_modpack(std::path::PathBuf::from(path.trim()));
+            }
+            EngineEvent::ImportPathPicked(None) => {
+                // Dialog unavailable or cancelled: fall back to manual entry.
+                self.open_import_prompt();
             }
             EngineEvent::AccountsChanged => {
                 self.reload_accounts();
@@ -922,12 +921,13 @@ impl App {
             ButtonId::ChangeVersion => self.open_change_version_picker(),
             ButtonId::RenameInstance => self.open_rename_instance_form(),
             ButtonId::Search => self.open_search_prompt(),
-            ButtonId::ImportModpack => self.open_import_prompt(),
+            ButtonId::ImportModpack => self.browse_for_mrpack(),
             ButtonId::InstallProject => self.install_selected_project(),
             ButtonId::ToggleMod => self.toggle_selected_mod(),
             ButtonId::DeleteMod => self.confirm_delete_mod(),
             ButtonId::ModSearch => self.open_mod_search_prompt(),
             ButtonId::UpdateMods => self.check_mod_updates(),
+            ButtonId::BrowseMods => self.run_mod_search(String::new()),
             ButtonId::OfflineLogin => self.open_offline_login(),
             ButtonId::MicrosoftLogin => self.start_microsoft_login(),
             ButtonId::SetActiveAccount => self.set_active_account(),
@@ -1169,6 +1169,7 @@ impl App {
             OverlayAction::WizardField(idx) => self.wizard_focus_field(idx),
             OverlayAction::WizardPick(idx) => self.wizard_pick_field(idx),
             OverlayAction::WizardSubmit => self.wizard_submit_clicked(),
+            OverlayAction::WizardBrowseImport => self.browse_for_mrpack(),
             OverlayAction::WizardResult(idx) => self.wizard_click_result(idx),
             OverlayAction::WizardResultOpen => self.wizard_open_selected_project(),
             OverlayAction::WizardVersion(idx) => self.wizard_select_version(idx),
@@ -1795,6 +1796,33 @@ impl App {
         ));
     }
 
+    /// Open a native file dialog to pick a `.mrpack` file.
+    ///
+    /// Uses `zenity`/`kdialog` when available; falls back to the manual path
+    /// prompt otherwise.
+    pub(crate) fn browse_for_mrpack(&mut self) {
+        let tx = self.engine_tx.clone();
+        tokio::spawn(async move {
+            let result = tokio::process::Command::new("zenity")
+                .arg("--file-selection")
+                .arg("--title=Select .mrpack file")
+                .arg("--file-filter=*.mrpack")
+                .output()
+                .await;
+            match result {
+                Ok(output) if output.status.success() => {
+                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    let _ = tx.send(EngineEvent::ImportPathPicked(
+                        (!path.is_empty()).then_some(path),
+                    ));
+                }
+                _ => {
+                    let _ = tx.send(EngineEvent::ImportPathPicked(None));
+                }
+            }
+        });
+    }
+
     pub(crate) fn run_search(&mut self, query: String) {
         self.search_query = query.clone();
         self.selected_project = None;
@@ -2154,11 +2182,16 @@ impl App {
         tokio::spawn(async move {
             let mut updates = Vec::new();
             for module in mods {
-                if module.sha1.is_empty() {
+                // SHA-1 is computed lazily here so the initial mod scan stays fast.
+                let sha1 = match modrinth::update_check_sha1(&module).await {
+                    Ok(hash) => hash,
+                    Err(_) => continue,
+                };
+                if sha1.is_empty() {
                     continue;
                 }
                 if let Ok(Some((installed, latest))) = modrinth
-                    .check_update(&module.sha1, Some(&game_version), Some(&loader))
+                    .check_update(&sha1, Some(&game_version), Some(&loader))
                     .await
                 {
                     updates.push(format!(
@@ -2742,24 +2775,27 @@ impl App {
     fn render_nav_button(&mut self, frame: &mut Frame, rect: Rect, nav: Nav, number: usize) {
         let selected = nav == self.nav;
         let hovered = self.is_hovered(rect);
-        let bg = if selected {
+        let bg = if selected || hovered {
             self.theme.selection_bg
-        } else if hovered {
-            self.theme.hover_bg
         } else {
             self.theme.panel_alt
         };
-        // Flat block, no border.
+        // Flat block, no border. Hover uses the same dark-green fill as the
+        // active entry so the interaction is obvious.
         frame.render_widget(Block::default().style(Style::default().bg(bg)), rect);
 
         let surface = Style::default().bg(bg);
         let num_style = if selected {
             self.theme.accent_bright()
+        } else if hovered {
+            self.theme.accent()
         } else {
-            self.theme.card_comment()
+            self.theme.comment_style()
         };
         let label_style = if selected {
             self.theme.accent_bright()
+        } else if hovered {
+            self.theme.accent()
         } else {
             Style::default().fg(self.theme.fg).bg(bg)
         };
@@ -2772,7 +2808,7 @@ impl App {
         if rect.height > 0 {
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(format!(" {number}  "), num_style),
+                    Span::styled(format!(" {number}   "), num_style),
                     Span::styled(nav.menu_label().to_string(), label_style),
                 ]))
                 .style(surface),
@@ -3665,6 +3701,28 @@ mod tests {
             }
         }
         assert!(renamed, "rename did not take effect");
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn loader_picker_flow() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+
+        app.open_create_wizard();
+        // Click the Loader field (index 2) on the Clean tab.
+        app.dispatch_overlay_action(OverlayAction::WizardPick(2));
+        assert!(matches!(app.overlay, Some(Overlay::Picker { .. })));
+
+        // Click "Fabric" (index 1) in the loader picker.
+        app.dispatch_overlay_action(OverlayAction::PickerItem(1));
+        let Some(Overlay::Wizard(wizard)) = app.overlay.as_ref() else {
+            panic!("loader picker did not restore the wizard");
+        };
+        assert_eq!(wizard.loader_idx, 1);
+        assert_eq!(wizard.loader(), mc_core::instance::LoaderType::Fabric);
 
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);
     }

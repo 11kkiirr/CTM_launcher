@@ -227,6 +227,8 @@ pub enum PickerTarget {
     WizardGame,
     /// Create wizard: the modloader version.
     WizardLoader,
+    /// Create wizard: the modloader type (Vanilla/Fabric/...).
+    WizardLoaderType,
     /// Versions page: change the selected build's game version.
     ChangeGameVersion,
 }

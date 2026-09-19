@@ -15,8 +15,10 @@ pub enum EngineEvent {
     Progress { ratio: Option<f64>, label: String },
     /// Clear the progress bar.
     ProgressDone,
-    /// A batch of log lines (used when loading a saved log file).
+    /// A fresh batch of log lines (used when loading a saved log file).
     LogLines(Vec<String>),
+    /// A native file dialog returned a path (or None when cancelled/unavailable).
+    ImportPathPicked(Option<String>),
     /// A list of human-readable lines to show in a message overlay.
     Message(Vec<String>),
     /// A game process started successfully.

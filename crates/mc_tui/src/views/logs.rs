@@ -13,8 +13,8 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::{App, ButtonId, Focus};
-use crate::views::{tab_row, truncate};
-use mc_core::logs::LogLevel;
+use crate::views::tab_row;
+use mc_core::logs::{LogEntry, LogLevel};
 
 impl App {
     pub(crate) fn render_logs(&mut self, frame: &mut Frame, area: Rect) {
@@ -82,19 +82,31 @@ impl App {
             .constraints([Constraint::Length(1), Constraint::Min(1)])
             .split(inner);
 
+        let viewport = rows[1];
+        let visible = viewport.height as usize;
+        self.log_visible = visible;
+        let wrap_w = (viewport.width as usize).saturating_sub(2).max(1);
+
+        // Flatten the filtered log into wrapped display rows so every message
+        // stays inside the panel no matter how long it is.
+        let entries: Vec<&LogEntry> = self.log_buffer.visible().collect();
+        let total_height: usize = entries
+            .iter()
+            .map(|entry| wrapped_height(&entry.message, wrap_w))
+            .sum();
+        let max_scroll = total_height.saturating_sub(visible);
+        if self.log_follow {
+            self.log_scroll = max_scroll;
+        } else {
+            self.log_scroll = self.log_scroll.min(max_scroll);
+        }
+        let start = self.log_scroll;
+        let end = (start + visible).min(total_height.max(1));
+
         let range = if total == 0 {
             "no output".to_string()
         } else {
-            let visible = rows[1].height as usize;
-            let max_scroll = total.saturating_sub(visible);
-            if self.log_follow {
-                self.log_scroll = max_scroll;
-            } else {
-                self.log_scroll = self.log_scroll.min(max_scroll);
-            }
-            let start = self.log_scroll;
-            let end = (start + visible).min(total);
-            format!("lines {}-{} / {total}", start + 1, end)
+            format!("lines {}-{} / {total_height}", start + 1, end)
         };
 
         frame.render_widget(
@@ -114,10 +126,6 @@ impl App {
             rows[0],
         );
 
-        let viewport = rows[1];
-        let visible = viewport.height as usize;
-        self.log_visible = visible;
-
         if total == 0 {
             frame.render_widget(
                 Paragraph::new(Span::styled(
@@ -130,40 +138,50 @@ impl App {
             return;
         }
 
-        let max_scroll = total.saturating_sub(visible);
-        if self.log_follow {
-            self.log_scroll = max_scroll;
-        } else {
-            self.log_scroll = self.log_scroll.min(max_scroll);
-        }
-        let start = self.log_scroll;
-
-        let lines: Vec<Line> = self
-            .log_buffer
-            .visible()
-            .skip(start)
-            .take(visible)
-            .map(|entry| {
+        // Render only the wrapped rows inside the viewport.
+        let mut lines: Vec<Line> = Vec::new();
+        let mut cursor = 0usize;
+        for entry in entries {
+            let height = wrapped_height(&entry.message, wrap_w);
+            if cursor + height > start {
                 let color = self.theme.log_level_color(entry.level);
                 let time = entry.timestamp.clone().unwrap_or_default();
                 let thread = entry.thread.clone().unwrap_or_default();
                 let prefix = format!("{time:>8} {:>5} [{thread}] ", entry.level.label());
-                let prefix_width = prefix.chars().count();
-                let message_width = (viewport.width as usize).saturating_sub(prefix_width);
-                Line::from(vec![
-                    Span::styled(format!("{time:>8} "), self.theme.card_comment()),
-                    Span::styled(
-                        format!("{:>5} ", entry.level.label()),
-                        Style::default().fg(color).bg(self.theme.panel),
-                    ),
-                    Span::styled(format!("[{thread}] "), self.theme.card_dim()),
-                    Span::styled(truncate(&entry.message, message_width), self.theme.card()),
-                ])
-            })
-            .collect();
-
-        // No wrapping: each entry occupies exactly one row and long lines are
-        // truncated, so the viewport never overflows the panel.
+                let prefix_w = prefix.chars().count();
+                let frags = char_chunks(&entry.message, wrap_w);
+                for (fi, frag) in frags.iter().enumerate() {
+                    let line_no = cursor + fi;
+                    if line_no >= end {
+                        break;
+                    }
+                    if line_no >= start {
+                        let line = if fi == 0 {
+                            Line::from(vec![
+                                Span::styled(format!("{time:>8} "), self.theme.card_comment()),
+                                Span::styled(
+                                    format!("{:>5} ", entry.level.label()),
+                                    Style::default().fg(color).bg(self.theme.panel),
+                                ),
+                                Span::styled(format!("[{thread}] "), self.theme.card_dim()),
+                                Span::styled(frag.clone(), self.theme.card()),
+                            ])
+                        } else {
+                            let indent: String = (0..prefix_w).map(|_| ' ').collect::<String>();
+                            Line::from(vec![
+                                Span::styled(indent, self.theme.card_dim()),
+                                Span::styled(frag.clone(), self.theme.card()),
+                            ])
+                        };
+                        lines.push(line);
+                    }
+                }
+            }
+            cursor += height;
+            if cursor >= end {
+                break;
+            }
+        }
         frame.render_widget(Paragraph::new(lines).style(self.theme.card()), viewport);
     }
 
@@ -246,4 +264,33 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// Number of display rows a message occupies when wrapped at `width` chars.
+fn wrapped_height(text: &str, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    text.chars().count().div_ceil(width).max(1)
+}
+
+/// Split `text` into fragments no wider than `width` chars (at least one).
+fn char_chunks(text: &str, width: usize) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let width = width.max(1);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let end = (i + width).min(chars.len());
+        let mut frag = String::new();
+        for c in chars.iter().skip(i).take(end - i) {
+            frag.push(*c);
+        }
+        out.push(frag);
+        i = end;
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
 }

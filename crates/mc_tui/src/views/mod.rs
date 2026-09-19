@@ -40,11 +40,8 @@ pub(crate) fn inner(area: Rect) -> Rect {
 ///
 /// Focused cards additionally get a green `▎` accent bar down the left edge.
 /// Returns the padded inner rectangle for content.
-pub(crate) fn card(app: &App, frame: &mut Frame, area: Rect, focused: bool) -> Rect {
+pub(crate) fn card(app: &App, frame: &mut Frame, area: Rect, _focused: bool) -> Rect {
     frame.render_widget(Block::default().style(app.theme.card()), area);
-    if focused {
-        accent_bar(frame, area, &app.theme);
-    }
     inner(area)
 }
 
