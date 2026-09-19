@@ -1,30 +1,24 @@
-//! Instance picker rendered as flat, borderless cards in the main content area.
+//! Instance picker rendered as compact, squarish cards in the main content area.
 
 use crossterm::event::{KeyCode, KeyEvent};
-use mc_core::instance::{Instance, LoaderType};
+use mc_core::instance::Instance;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, ButtonId, Focus, HitAction};
-use crate::views::{buttons_row, truncate};
+use crate::views::{pill_row, truncate};
 
-const TILE_W: u16 = 30;
-const TILE_H: u16 = 7;
+/// Cards are wider than tall, but close to square once cell aspect is taken
+/// into account.
+const TILE_W: u16 = 24;
+const TILE_H: u16 = 10;
 const GAP_X: u16 = 2;
 const GAP_Y: u16 = 1;
-
-/// A small glyph for a mod loader.
-pub(crate) fn loader_icon(loader: LoaderType) -> &'static str {
-    match loader {
-        LoaderType::NeoForge | LoaderType::Forge => "⚙",
-        LoaderType::Fabric | LoaderType::Quilt => "⚡",
-        LoaderType::Paper => "◇",
-        LoaderType::Vanilla => "▣",
-    }
-}
+/// Height of the vertically centered inner content block.
+const CONTENT_H: u16 = 6;
 
 impl App {
     /// Render the build action toolbar plus the grid of instance cards.
@@ -38,19 +32,20 @@ impl App {
             ])
             .split(area);
 
-        buttons_row(
+        pill_row(
             self,
             frame,
             rows[0].x,
             rows[0].y,
             area.x + area.width,
             &[
-                ("Launch", ButtonId::Launch),
-                ("Install / Repair", ButtonId::InstallInstance),
-                ("New", ButtonId::NewInstance),
-                ("Edit", ButtonId::EditInstance),
-                ("Change Version", ButtonId::ChangeVersion),
-                ("Delete", ButtonId::DeleteInstance),
+                ("Launch", "Enter", ButtonId::Launch),
+                ("+ New", "n", ButtonId::NewInstance),
+                ("Edit", "e", ButtonId::EditInstance),
+                ("Install / Repair", "i", ButtonId::InstallInstance),
+                ("Import", "p", ButtonId::ImportModpack),
+                ("Versions", "v", ButtonId::ChangeVersion),
+                ("Delete", "d", ButtonId::DeleteInstance),
             ],
         );
 
@@ -138,46 +133,129 @@ impl App {
             self.theme.panel_alt
         };
         let surface = Style::default().bg(bg);
-        frame.render_widget(Block::default().style(surface), rect);
+        let border = if selected {
+            self.theme.green_bright
+        } else if hovered {
+            self.theme.green
+        } else {
+            self.theme.border
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(border))
+            .style(surface);
+        let inner = block.inner(rect);
+        frame.render_widget(block, rect);
         if selected {
             crate::views::accent_bar(frame, rect, &self.theme);
         }
+        if inner.width < 6 || inner.height < CONTENT_H {
+            return;
+        }
 
-        let inner = Rect {
-            x: rect.x + 2,
-            y: rect.y + 1,
-            width: rect.width.saturating_sub(4),
-            height: rect.height.saturating_sub(2),
+        let top = inner.y + inner.height.saturating_sub(CONTENT_H) / 2;
+        let cx = inner.x;
+        let cw = inner.width;
+
+        // 1) Centered logo / short-name box.
+        let short = short_name(instance.name());
+        let box_w = (short.chars().count() as u16 + 4).max(6).min(cw);
+        let box_x = cx + cw.saturating_sub(box_w) / 2;
+        let box_rect = Rect {
+            x: box_x,
+            y: top,
+            width: box_w,
+            height: 3,
         };
-        let width = inner.width as usize;
-        let loader = instance.metadata.loader;
-        let title_style = if selected || hovered {
-            self.theme.accent()
+        let box_border = if selected {
+            self.theme.green_bright
         } else {
-            Style::default().fg(self.theme.fg)
+            self.theme.border
         };
-        let meta = format!(
-            "{} {}  {}",
-            loader_icon(loader),
-            loader.label(),
-            instance.metadata.game_version
+        let logo_box = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(box_border))
+            .style(surface);
+        let logo_inner = logo_box.inner(box_rect);
+        frame.render_widget(logo_box, box_rect);
+        let short_style = if selected {
+            self.theme.accent_bright()
+        } else {
+            Style::default().fg(self.theme.fg).bg(bg)
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(short, short_style))
+                .alignment(Alignment::Center)
+                .style(surface),
+            logo_inner,
         );
-        let sub = match &instance.metadata.modpack {
-            Some(pack) => format!("⛁ {}", pack.name),
-            None => "● Ready".to_string(),
-        };
-        let sub_style = if instance.metadata.modpack.is_some() {
-            self.theme.info_style()
+
+        // 2) Instance title (bold).
+        let title_style = if selected {
+            self.theme.accent_bright()
         } else {
-            self.theme.accent()
+            Style::default()
+                .fg(self.theme.fg)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD)
         };
-        let lines = vec![
-            Line::from(""),
-            Line::from(Span::styled(truncate(instance.name(), width), title_style)),
-            Line::from(Span::styled(truncate(&meta, width), self.theme.dim())),
-            Line::from(Span::styled(truncate(&sub, width), sub_style)),
-        ];
-        frame.render_widget(Paragraph::new(lines).style(surface), inner);
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                truncate(instance.name(), cw as usize),
+                title_style,
+            ))
+            .alignment(Alignment::Center)
+            .style(surface),
+            Rect {
+                x: cx,
+                y: top + 3,
+                width: cw,
+                height: 1,
+            },
+        );
+
+        // 3) Loader & version on one muted line.
+        let meta = format!(
+            "{} / {}",
+            instance.metadata.game_version,
+            instance.metadata.loader.as_str()
+        );
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                truncate(&meta, cw as usize),
+                self.theme.card_dim(),
+            ))
+            .alignment(Alignment::Center)
+            .style(surface),
+            Rect {
+                x: cx,
+                y: top + 4,
+                width: cw,
+                height: 1,
+            },
+        );
+
+        // 4) Game status.
+        let status = match &instance.metadata.modpack {
+            Some(pack) => format!("⛁ {}", pack.name),
+            None => "Ready to play".to_string(),
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                truncate(&status, cw as usize),
+                self.theme.accent(),
+            ))
+            .alignment(Alignment::Center)
+            .style(surface),
+            Rect {
+                x: cx,
+                y: top + 5,
+                width: cw,
+                height: 1,
+            },
+        );
     }
 
     fn render_add_tile(&self, frame: &mut Frame, rect: Rect, hovered: bool) {
@@ -187,26 +265,32 @@ impl App {
             self.theme.panel_alt
         };
         let surface = Style::default().bg(bg);
-        frame.render_widget(Block::default().style(surface), rect);
+        let border = if hovered {
+            self.theme.green
+        } else {
+            self.theme.border
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(border))
+            .style(surface);
+        let inner = block.inner(rect);
+        frame.render_widget(block, rect);
+
         let style = if hovered {
-            self.theme.accent()
+            self.theme.accent_bright()
         } else {
             self.theme.card_dim()
         };
-        let inner = Rect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
-        };
+        let top = inner.height.saturating_sub(2) / 2;
+        let mut lines: Vec<Line> = (0..top).map(|_| Line::from("")).collect();
+        lines.push(Line::from(Span::styled("＋", style)));
+        lines.push(Line::from(Span::styled("New Build", style)));
         frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(""),
-                Line::from(""),
-                Line::from(Span::styled("＋  New Build", style)),
-            ])
-            .alignment(Alignment::Center)
-            .style(surface),
+            Paragraph::new(lines)
+                .alignment(Alignment::Center)
+                .style(surface),
             inner,
         );
     }
@@ -252,19 +336,24 @@ impl App {
                 self.select_instance(current);
                 self.launch_selected();
             }
+            KeyCode::Char('n') => self.open_create_instance_form(),
+            KeyCode::Char('e') => {
+                self.select_instance(current);
+                self.open_edit_instance_form();
+            }
             KeyCode::Char('i') => {
                 self.select_instance(current);
                 self.install_selected_instance();
             }
-            KeyCode::Char('e') => {
+            KeyCode::Char('p') => self.open_import_prompt(),
+            KeyCode::Char('v') => {
                 self.select_instance(current);
-                self.open_edit_instance_form();
+                self.open_change_version_picker();
             }
             KeyCode::Char('d') => {
                 self.select_instance(current);
                 self.confirm_delete_instance();
             }
-            KeyCode::Char('n') => self.open_create_instance_form(),
             _ => {}
         }
     }
@@ -277,4 +366,13 @@ fn tile_rect(inner: Rect, row: usize, col: usize) -> Rect {
         width: TILE_W,
         height: TILE_H,
     }
+}
+
+/// A two-character uppercase short name, e.g. `test1` -> `TE`.
+fn short_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric())
+        .take(2)
+        .collect::<String>()
+        .to_ascii_uppercase()
 }

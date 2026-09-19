@@ -20,8 +20,9 @@ use mc_core::skins::{SkinClient, SkinVariant};
 use mc_core::util::{Paths, Progress, ProgressCallback};
 use mc_core::CoreError;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, ListState, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, ListState, Paragraph};
 use ratatui::Frame;
 use tokio::sync::mpsc;
 
@@ -34,6 +35,9 @@ use crate::theme::Theme;
 
 /// The Azure application (client) id used for Microsoft device-code auth.
 pub const CLIENT_ID: &str = mc_core::auth::microsoft::DEFAULT_CLIENT_ID;
+
+/// Height in rows of a chunky sidebar navigation block button.
+const NAV_BUTTON_HEIGHT: u16 = 3;
 
 /// Navigation entries shown in the right-hand panel.
 ///
@@ -59,6 +63,8 @@ pub enum Nav {
 }
 
 impl Nav {
+    /// Every page, including ones no longer shown in the sidebar menu.
+    #[allow(dead_code)]
     pub fn all() -> [Nav; 8] {
         [
             Nav::Instances,
@@ -72,9 +78,24 @@ impl Nav {
         ]
     }
 
-    /// Build-scoped pages, in tab order.
-    pub fn build_pages() -> [Nav; 5] {
-        [Nav::Mods, Nav::Modpacks, Nav::Versions, Nav::Jvm, Nav::Logs]
+    /// The pages shown in the right-hand navigation menu, in order.
+    ///
+    /// `Modpacks` and `Accounts` are intentionally omitted; they are reached
+    /// from the instance toolbar and the header account badge respectively.
+    pub fn menu() -> [Nav; 5] {
+        [
+            Nav::Instances,
+            Nav::Mods,
+            Nav::Versions,
+            Nav::Jvm,
+            Nav::Logs,
+        ]
+    }
+
+    /// 1-based index shown next to a menu entry, if it is in the menu.
+    #[allow(dead_code)]
+    pub fn number(&self) -> Option<usize> {
+        Self::menu().iter().position(|n| n == self).map(|i| i + 1)
     }
 
     pub fn label(&self) -> &'static str {
@@ -87,6 +108,14 @@ impl Nav {
             Nav::Logs => "Logs",
             Nav::Accounts => "Accounts",
             Nav::Launcher => "Launcher Settings",
+        }
+    }
+
+    /// Short label used inside the sidebar menu buttons.
+    pub fn menu_label(&self) -> &'static str {
+        match self {
+            Nav::Jvm => "JVM",
+            other => other.label(),
         }
     }
 
@@ -105,6 +134,7 @@ impl Nav {
     }
 
     /// Whether this page requires a selected build.
+    #[allow(dead_code)]
     pub fn is_build_scoped(&self) -> bool {
         matches!(
             self,
@@ -649,9 +679,11 @@ impl App {
             KeyCode::BackTab => self.toggle_focus(),
             KeyCode::F(2) => self.open_nav(Nav::Accounts),
             KeyCode::F(3) => self.open_nav(Nav::Launcher),
-            KeyCode::Char(c @ '1'..='6') if self.nav.is_build_scoped() => {
+            KeyCode::Char(c @ '1'..='5') => {
                 let idx = (c as u8 - b'1') as usize;
-                self.open_nav(Nav::build_pages()[idx]);
+                if let Some(nav) = Nav::menu().get(idx) {
+                    self.open_nav(*nav);
+                }
             }
             KeyCode::Char('n') if self.nav == Nav::Instances => self.open_create_instance_form(),
             _ => self.handle_view_key(key),
@@ -703,7 +735,7 @@ impl App {
     }
 
     pub(crate) fn handle_sidebar_key(&mut self, key: KeyEvent) {
-        let all = Nav::all();
+        let all = Nav::menu();
         let idx = all.iter().position(|n| *n == self.nav).unwrap_or(0);
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => {
@@ -2342,8 +2374,8 @@ impl App {
     pub(crate) fn show_help(&mut self) {
         let lines = vec![
             "Navigation (right panel)".to_string(),
-            "  ↑↓ / jk      move through the navigation panel".to_string(),
-            "  1-5          build pages: Mods/Modpacks/Versions/JVM/Logs".to_string(),
+            "  ↑↓ / jk      move through the navigation menu".to_string(),
+            "  1-5          Instances/Mods/Versions/JVM/Logs".to_string(),
             "  F2 / F3      Accounts / Launcher Settings".to_string(),
             "  Esc          back to the Instances page".to_string(),
             "  Tab          toggle panel/content focus".to_string(),
@@ -2351,9 +2383,9 @@ impl App {
             "  q / Ctrl-C   quit".to_string(),
             String::new(),
             "Instances (main area + toolbar)".to_string(),
-            "  arrows/hjkl  move between build tiles".to_string(),
+            "  arrows/hjkl  move between build cards".to_string(),
             "  Enter        launch the selected build".to_string(),
-            "  n new · i install · e edit · d delete · toolbar has Change Version".to_string(),
+            "  n new · e edit · i install · p import · v versions · d delete".to_string(),
             String::new(),
             "Mods / Modpacks / Versions / JVM".to_string(),
             "  Mods: t pane · Space toggle · s search · u updates · d delete".to_string(),
@@ -2364,7 +2396,7 @@ impl App {
             "  j/k or wheel scroll · PgUp/PgDn page · g/G top/bottom".to_string(),
             "  f follow · p pause · c clear · / filter · a analyze crash · l level".to_string(),
             String::new(),
-            "Mouse: hover highlights; click tiles, nav items, lists and buttons.".to_string(),
+            "Mouse: hover highlights; click cards, nav blocks, lists and buttons.".to_string(),
         ];
         self.overlay = Some(Overlay::message("Help", lines));
     }
@@ -2477,20 +2509,23 @@ impl App {
         let focused = self.focus == Focus::Sidebar;
         let inner = crate::views::card(self, frame, area, focused);
 
-        let nav_len = Nav::all().len() as u16;
-        let build_len = if self.selected_instance().is_some() {
+        let menu = Nav::menu();
+        let nav_height = menu.len() as u16 * NAV_BUTTON_HEIGHT;
+        let build_height = if self.selected_instance().is_some() {
             7
         } else {
             2
         };
+        // Navigation at the top, then a flexible spacer, then the build info
+        // pinned strictly to the bottom of the sidebar.
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
-                Constraint::Length(nav_len),
+                Constraint::Length(nav_height),
+                Constraint::Min(1),
                 Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(build_len),
+                Constraint::Length(build_height),
             ])
             .split(inner);
 
@@ -2500,44 +2535,81 @@ impl App {
             chunks[0],
         );
 
-        for (idx, nav) in Nav::all().iter().enumerate() {
-            let row = Rect {
-                x: chunks[1].x,
-                y: chunks[1].y + idx as u16,
-                width: chunks[1].width,
-                height: 1,
-            };
-            if row.y >= chunks[1].y + chunks[1].height {
+        for (idx, nav) in menu.iter().enumerate() {
+            let y = chunks[1].y + idx as u16 * NAV_BUTTON_HEIGHT;
+            if y + NAV_BUTTON_HEIGHT > chunks[1].y + chunks[1].height {
                 break;
             }
-            let selected = *nav == self.nav;
-            let style = if selected {
-                self.theme.row_selected()
-            } else if self.is_hovered(row) {
-                self.theme.row_hover()
-            } else {
-                self.theme.row()
+            let rect = Rect {
+                x: chunks[1].x,
+                y,
+                width: chunks[1].width,
+                height: NAV_BUTTON_HEIGHT,
             };
-            let prefix = if selected { "▸ " } else { "  • " };
-            let label_style = if selected {
-                self.theme.accent()
-            } else {
-                self.theme.row()
-            };
-            let line = Line::from(vec![
-                Span::styled(prefix.to_string(), style),
-                Span::styled(nav.label().to_string(), label_style),
-            ]);
-            frame.render_widget(Paragraph::new(line).style(style), row);
-            self.push_hitbox(row, HitAction::NavItem(*nav));
+            self.render_nav_button(frame, rect, *nav, idx + 1);
         }
 
         frame.render_widget(
-            Paragraph::new(Span::styled("Build", self.theme.card_comment()))
+            Paragraph::new(Span::styled("Build Info", self.theme.card_comment()))
                 .style(self.theme.card()),
             chunks[3],
         );
         self.render_build_info(frame, chunks[4]);
+    }
+
+    /// A chunky, padded navigation block button with an index number. The
+    /// active entry gets a solid green border and a dark green tint.
+    fn render_nav_button(&mut self, frame: &mut Frame, rect: Rect, nav: Nav, number: usize) {
+        let selected = nav == self.nav;
+        let hovered = self.is_hovered(rect);
+        let bg = if selected {
+            self.theme.selection_bg
+        } else {
+            self.theme.panel_alt
+        };
+        let border = if selected {
+            self.theme.green_bright
+        } else if hovered {
+            self.theme.green
+        } else {
+            self.theme.border
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(border))
+            .style(Style::default().bg(bg));
+        let inner = block.inner(rect);
+        frame.render_widget(block, rect);
+
+        let surface = Style::default().bg(bg);
+        let num_style = if selected {
+            self.theme.accent_bright()
+        } else {
+            self.theme.card_comment()
+        };
+        let label_style = if selected {
+            self.theme.accent_bright()
+        } else {
+            Style::default().fg(self.theme.fg).bg(bg)
+        };
+        let row = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        };
+        if inner.height > 0 {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(format!(" {number}  "), num_style),
+                    Span::styled(nav.menu_label().to_string(), label_style),
+                ]))
+                .style(surface),
+                row,
+            );
+        }
+        self.push_hitbox(rect, HitAction::NavItem(nav));
     }
 
     fn render_build_info(&mut self, frame: &mut Frame, area: Rect) {
@@ -2610,27 +2682,53 @@ impl App {
         ]);
         frame.render_widget(Paragraph::new(left).style(self.theme.bar()), area);
 
-        let text = format!("☺ {active} ");
-        let width = text.chars().count() as u16;
-        if width < area.width {
-            let rect = Rect {
-                x: area.x + area.width - width,
+        // Top-right: the account badge and the launcher settings button side by
+        // side. Both remain reachable now that they are out of the nav menu.
+        let account = format!("@ {active}");
+        let account_w = account.chars().count() as u16;
+        let settings = "[ ⚙ Settings ]";
+        let settings_w = settings.chars().count() as u16;
+        let total = account_w + 2 + settings_w;
+        if total + 2 < area.width {
+            let start = area.x + area.width - total - 1;
+
+            let acc_rect = Rect {
+                x: start,
                 y: area.y,
-                width,
+                width: account_w,
                 height: 1,
             };
-            let style = if self.nav == Nav::Accounts {
-                self.theme.selection()
-            } else if self.is_hovered(rect) {
+            let acc_style = if self.nav == Nav::Accounts {
+                self.theme.row_selected()
+            } else if self.is_hovered(acc_rect) {
                 self.theme.hover()
             } else {
                 self.theme.accent()
             };
             frame.render_widget(
-                Paragraph::new(Span::styled(text, style)).style(self.theme.bar()),
-                rect,
+                Paragraph::new(Span::styled(account, acc_style)).style(self.theme.bar()),
+                acc_rect,
             );
-            self.push_hitbox(rect, HitAction::NavItem(Nav::Accounts));
+            self.push_hitbox(acc_rect, HitAction::NavItem(Nav::Accounts));
+
+            let set_rect = Rect {
+                x: start + account_w + 2,
+                y: area.y,
+                width: settings_w,
+                height: 1,
+            };
+            let set_style = if self.nav == Nav::Launcher {
+                self.theme.row_selected()
+            } else if self.is_hovered(set_rect) {
+                self.theme.hover()
+            } else {
+                self.theme.accent()
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(settings, set_style)).style(self.theme.bar()),
+                set_rect,
+            );
+            self.push_hitbox(set_rect, HitAction::NavItem(Nav::Launcher));
         }
     }
 
@@ -2951,8 +3049,10 @@ fn footer_hints(nav: Nav) -> &'static [(&'static str, &'static str)] {
         Nav::Instances => &[
             ("Enter", "launch"),
             ("n", "new"),
-            ("i", "install"),
             ("e", "edit"),
+            ("i", "install"),
+            ("p", "import"),
+            ("v", "versions"),
             ("d", "delete"),
         ],
         Nav::Mods => &[
@@ -3045,10 +3145,12 @@ mod tests {
             terminal.draw(|frame| app.render(frame)).unwrap();
             let content = buffer_text(&terminal);
             assert!(content.contains("CTMLauncher"), "header missing on {nav:?}");
-            assert!(
-                content.contains(nav.label()),
-                "nav label missing on {nav:?}"
-            );
+            if nav.number().is_some() {
+                assert!(
+                    content.contains(nav.menu_label()),
+                    "menu label missing on {nav:?}"
+                );
+            }
         }
 
         // Build info panel shows the selected build.

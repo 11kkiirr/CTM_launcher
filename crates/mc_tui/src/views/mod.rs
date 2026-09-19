@@ -184,6 +184,56 @@ pub(crate) fn tab_row(
     }
 }
 
+/// Render a horizontal row of keybinding "pills": `[ Label [key] ]`.
+///
+/// Used for the modernized top action toolbar.
+pub(crate) fn pill_row(
+    app: &mut App,
+    frame: &mut Frame,
+    mut x: u16,
+    y: u16,
+    max_width: u16,
+    pills: &[(&str, &str, ButtonId)],
+) {
+    for (label, key, id) in pills {
+        let width = label.chars().count() as u16 + key.chars().count() as u16 + 7;
+        if x + width > max_width {
+            break;
+        }
+        let rect = Rect {
+            x,
+            y,
+            width,
+            height: 1,
+        };
+        let hovered = app.is_hovered(rect);
+        let bg = if hovered {
+            app.theme.selection_bg
+        } else {
+            app.theme.panel_alt
+        };
+        let label_style = if hovered {
+            app.theme.accent_bright()
+        } else {
+            Style::default().fg(app.theme.fg)
+        };
+        let line = Line::from(vec![
+            Span::styled("[ ", app.theme.comment_style()),
+            Span::styled(label.to_string(), label_style),
+            Span::styled(" [", app.theme.comment_style()),
+            Span::styled(key.to_string(), app.theme.accent()),
+            Span::styled("] ", app.theme.comment_style()),
+            Span::styled("]", app.theme.comment_style()),
+        ]);
+        frame.render_widget(Paragraph::new(line).style(Style::default().bg(bg)), rect);
+        app.hitboxes.push(crate::app::Hitbox {
+            rect,
+            action: HitAction::Button(*id),
+        });
+        x += width + 1;
+    }
+}
+
 /// A card section title: a green label with an optional muted suffix.
 pub(crate) fn section_title(label: &str, suffix: &str, theme: &Theme) -> Line<'static> {
     let mut spans = vec![Span::styled(label.to_string(), theme.header())];
