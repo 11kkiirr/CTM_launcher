@@ -163,6 +163,7 @@ pub enum HitAction {
     ProjectVersionRow(usize),
     ModRow(usize),
     ModSearchRow(usize),
+    ModsSearchBar,
     AccountRow(usize),
     SettingsRow(usize),
     Button(ButtonId),
@@ -170,6 +171,7 @@ pub enum HitAction {
     BrowseVersion(usize),
     BrowseInstall,
     BrowseQuickInstall(usize),
+    BrowseSearchBar,
     BrowseFilter(crate::views::browse::FilterItem),
     BrowsePagePrev,
     BrowsePageNext,
@@ -213,6 +215,8 @@ pub enum ButtonId {
     ModSearch,
     UpdateMods,
     BrowseMods,
+    ShadersBrowse,
+    RpBrowse,
     OfflineLogin,
     MicrosoftLogin,
     SetActiveAccount,
@@ -295,6 +299,10 @@ pub struct App {
     pub mod_search_results: Vec<SearchHit>,
     pub mod_search_state: ListState,
     pub mods_focus_search: bool,
+    /// Inline search bar query for filtering installed mods.
+    pub mods_search_query: String,
+    /// Whether the installed mods search bar is focused.
+    pub mods_search_focused: bool,
 
     pub installed_mods: Vec<InstalledMod>,
     pub mods_state: ListState,
@@ -302,8 +310,15 @@ pub struct App {
 
     pub resource_packs: Vec<String>,
     pub resource_packs_state: ListState,
+    /// Inline filter for installed resource packs.
+    pub rp_search_focused: bool,
+    pub rp_inline_query: String,
+
     pub shaders: Vec<String>,
     pub shaders_state: ListState,
+    /// Inline filter for installed shaders.
+    pub shaders_search_focused: bool,
+    pub shaders_inline_query: String,
     pub worlds: Vec<String>,
     pub worlds_state: ListState,
     pub screenshots: Vec<String>,
@@ -380,14 +395,21 @@ impl App {
             mod_search_results: Vec::new(),
             mod_search_state: ListState::default(),
             mods_focus_search: false,
+            mods_search_query: String::new(),
+            mods_search_focused: false,
             installed_mods: Vec::new(),
             mods_state: ListState::default(),
             mods_scanning: false,
 
             resource_packs: Vec::new(),
             resource_packs_state: ListState::default(),
+            rp_search_focused: false,
+            rp_inline_query: String::new(),
+
             shaders: Vec::new(),
             shaders_state: ListState::default(),
+            shaders_search_focused: false,
+            shaders_inline_query: String::new(),
             worlds: Vec::new(),
             worlds_state: ListState::default(),
             screenshots: Vec::new(),

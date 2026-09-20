@@ -11,7 +11,7 @@ use ratatui_image::{Resize, StatefulImage};
 use crate::app::{App, ButtonId, Focus, HitAction};
 use crate::views::{buttons_row, card, section_title, truncate};
 
-const CARD_W: u16 = 34;
+const CARD_W: u16 = 32;
 const CARD_H: u16 = 10;
 const GAP_X: u16 = 2;
 const GAP_Y: u16 = 1;
@@ -21,6 +21,7 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Min(3),
@@ -46,11 +47,11 @@ impl App {
                 &self.theme,
             ))
             .style(self.theme.card()),
-            chunks[1],
+            chunks[2],
         );
 
         let focused = self.focus == Focus::Content;
-        let inner = card(self, frame, chunks[2], focused);
+        let inner = card(self, frame, chunks[3], focused);
         if inner.height == 0 || inner.width == 0 {
             return;
         }
@@ -71,6 +72,8 @@ impl App {
         let total = self.screenshots.len();
         let cols = ((inner.width + GAP_X) / (CARD_W + GAP_X)).max(1) as usize;
         let visible_rows = ((inner.height + GAP_Y) / (CARD_H + GAP_Y)).max(1) as usize;
+        let grid_w = cols as u16 * CARD_W + (cols as u16).saturating_sub(1) * GAP_X;
+        let offset_x = inner.width.saturating_sub(grid_w) / 2;
 
         let instance = self.selected_instance().cloned();
         let game_dir = instance.map(|i| i.game_dir());
@@ -82,7 +85,7 @@ impl App {
                     break;
                 }
                 let rect = Rect {
-                    x: inner.x + col as u16 * (CARD_W + GAP_X),
+                    x: inner.x + offset_x + col as u16 * (CARD_W + GAP_X),
                     y: inner.y + row as u16 * (CARD_H + GAP_Y),
                     width: CARD_W,
                     height: CARD_H,
@@ -120,7 +123,7 @@ impl App {
             return;
         }
 
-        let pad_left: u16 = 3;
+        let pad_left: u16 = 2;
         // Image area: top portion of the card.
         let img_h = rect.height.saturating_sub(3);
         let img_area = Rect {

@@ -926,14 +926,6 @@ pub(crate) fn open_browse(&mut self) {
     }
 }
 
-pub(crate) fn open_browse_search(&mut self) {
-    self.overlay = Some(Overlay::text(
-        format!("Search {}", self.browse.kind.label()),
-        "Query (empty = popular): ",
-        TextAction::BrowseSearch,
-    ));
-}
-
 pub(crate) fn run_browse_search(&mut self, query: String) {
     self.browse.query = query.trim().to_string();
     self.browse_close_detail();
@@ -1182,7 +1174,11 @@ pub(crate) fn browse_install(&mut self) {
         self.set_toast("Select an instance in the Instances tab first", true);
         return;
     };
-    let dest_dir = instance.mods_dir();
+    let dest_dir = match self.browse.kind {
+        crate::views::browse::BrowseKind::Mods => instance.mods_dir(),
+        crate::views::browse::BrowseKind::ResourcePacks => instance.resourcepacks_dir(),
+        crate::views::browse::BrowseKind::Shaders => instance.shaders_dir(),
+    };
     let game_version = instance.metadata.game_version.clone();
     let loader = instance.metadata.loader.as_str().to_string();
     let resolve_deps = true;
@@ -1230,9 +1226,14 @@ pub(crate) fn browse_quick_install(&mut self, idx: usize) {
         self.set_toast("Select an instance first", true);
         return;
     };
-    let dest_dir = instance.mods_dir();
+    let dest_dir = match self.browse.kind {
+        crate::views::browse::BrowseKind::Mods => instance.mods_dir(),
+        crate::views::browse::BrowseKind::ResourcePacks => instance.resourcepacks_dir(),
+        crate::views::browse::BrowseKind::Shaders => instance.shaders_dir(),
+    };
     let game_version = instance.metadata.game_version.clone();
     let loader = instance.metadata.loader.as_str().to_string();
+    let compat = matches!(self.browse.kind, crate::views::browse::BrowseKind::Mods);
     let client = self.client.clone();
     let modrinth = self.modrinth.clone();
     let tx = self.engine_tx.clone();
@@ -1241,8 +1242,10 @@ pub(crate) fn browse_quick_install(&mut self, idx: usize) {
     self.progress = Some((None, format!("Installing {}...", title)));
     tokio::spawn(async move {
         let result = async {
+            let gv = if compat { Some(&*game_version) } else { None };
+            let ld = if compat { Some(&*loader) } else { None };
             let Some(version) = modrinth
-                .latest_version(&project_id, Some(&game_version), Some(&loader))
+                .latest_version(&project_id, gv, ld)
                 .await?
             else {
                 return Err(CoreError::Modrinth(
@@ -1255,8 +1258,8 @@ pub(crate) fn browse_quick_install(&mut self, idx: usize) {
                 &version,
                 &dest_dir,
                 true,
-                Some(&game_version),
-                Some(&loader),
+                gv,
+                ld,
             )
             .await
         }

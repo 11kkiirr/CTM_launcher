@@ -6,7 +6,7 @@
 //! page with a rendered Markdown description plus a preview image (truecolor
 //! half-blocks) when the terminal supports it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use mc_core::modrinth::{Project, SearchHit, Version};
@@ -21,16 +21,20 @@ use crate::app::{App, HitAction};
 use crate::md::render_md;
 use crate::views::truncate;
 
-/// The content category the browser covers (mods only).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The content category the browser covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BrowseKind {
     Mods,
+    ResourcePacks,
+    Shaders,
 }
 
 impl BrowseKind {
     pub fn label(&self) -> &'static str {
         match self {
             BrowseKind::Mods => "Mods",
+            BrowseKind::ResourcePacks => "Resource Packs",
+            BrowseKind::Shaders => "Shaders",
         }
     }
 
@@ -38,6 +42,8 @@ impl BrowseKind {
     pub fn project_type(&self) -> &'static str {
         match self {
             BrowseKind::Mods => "mod",
+            BrowseKind::ResourcePacks => "resourcepack",
+            BrowseKind::Shaders => "shader",
         }
     }
 
@@ -45,6 +51,8 @@ impl BrowseKind {
     pub fn loaders(&self) -> &'static [&'static str] {
         match self {
             BrowseKind::Mods => &["fabric", "forge", "neoforge", "quilt"],
+            BrowseKind::ResourcePacks => &[],
+            BrowseKind::Shaders => &["iris", "optifine"],
         }
     }
 
@@ -56,6 +64,12 @@ impl BrowseKind {
                 "library", "technology", "worldgen", "games", "social",
                 "storage", "transport", "utilitarian", "crafting",
             ],
+            BrowseKind::ResourcePacks => &[
+                "aesthetic", "texture-packs", "sound-packs", "hud", "fonts",
+            ],
+            BrowseKind::Shaders => &[
+                "performance", "realistic", "fantasy", "vanilla", "toon",
+            ],
         }
     }
 }
@@ -63,6 +77,7 @@ impl BrowseKind {
 /// Which region of the browser owns keyboard input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowseFocus {
+    Search,
     Sidebar,
     List,
     Body,
@@ -139,17 +154,16 @@ impl SortOrder {
     }
 }
 
-/// The complete browser state.
+/// Per-kind cached browser state.
 #[derive(Debug, Clone)]
-pub struct Browse {
-    pub kind: BrowseKind,
+pub struct BrowseCache {
     pub query: String,
+    pub search_input: String,
     pub results: Vec<SearchHit>,
     pub selected: usize,
     pub offset: u32,
     pub total: u32,
     pub loading: bool,
-    /// Detailed view state.
     pub detail: Option<Project>,
     pub versions: Vec<Version>,
     pub version_selected: usize,
@@ -160,7 +174,69 @@ pub struct Browse {
     pub body_scroll: usize,
     pub body_visible: usize,
     pub image_requested: HashSet<String>,
-    // Filters
+    pub filter_compat: bool,
+    pub filter_side: SideFilter,
+    pub filter_categories: Vec<String>,
+    pub filter_loaders: Vec<String>,
+    pub sort: SortOrder,
+    pub sidebar_selected: FilterItem,
+}
+
+impl Default for BrowseCache {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            search_input: String::new(),
+            results: Vec::new(),
+            selected: 0,
+            offset: 0,
+            total: 0,
+            loading: false,
+            detail: None,
+            versions: Vec::new(),
+            version_selected: 0,
+            focus: BrowseFocus::List,
+            body: Vec::new(),
+            body_for: String::new(),
+            body_width: 0,
+            body_scroll: 0,
+            body_visible: 0,
+            image_requested: HashSet::new(),
+            filter_compat: true,
+            filter_side: SideFilter::All,
+            filter_categories: Vec::new(),
+            filter_loaders: Vec::new(),
+            sort: SortOrder::Downloads,
+            sidebar_selected: FilterItem::Sort,
+        }
+    }
+}
+
+/// The complete browser state.
+#[derive(Debug, Clone)]
+pub struct Browse {
+    pub kind: BrowseKind,
+    /// Per-kind caches so each content type has its own results/scroll/etc.
+    pub caches: HashMap<BrowseKind, BrowseCache>,
+    // The fields below are shared convenience accessors — kept in sync
+    // with the active kind's cache.
+    pub query: String,
+    pub search_input: String,
+    pub results: Vec<SearchHit>,
+    pub selected: usize,
+    pub offset: u32,
+    pub total: u32,
+    pub loading: bool,
+    pub detail: Option<Project>,
+    pub versions: Vec<Version>,
+    pub version_selected: usize,
+    pub focus: BrowseFocus,
+    pub body: Vec<Line<'static>>,
+    pub body_for: String,
+    pub body_width: usize,
+    pub body_scroll: usize,
+    pub body_visible: usize,
+    pub image_requested: HashSet<String>,
     pub filter_compat: bool,
     pub filter_side: SideFilter,
     pub filter_categories: Vec<String>,
@@ -173,7 +249,9 @@ impl Default for Browse {
     fn default() -> Self {
         Self {
             kind: BrowseKind::Mods,
+            caches: HashMap::new(),
             query: String::new(),
+            search_input: String::new(),
             results: Vec::new(),
             selected: 0,
             offset: 0,
@@ -200,6 +278,94 @@ impl Default for Browse {
 }
 
 impl Browse {
+    /// Save the current active fields into the cache for the current kind.
+    pub fn save_cache(&mut self) {
+        let cache = BrowseCache {
+            query: self.query.clone(),
+            search_input: self.search_input.clone(),
+            results: self.results.clone(),
+            selected: self.selected,
+            offset: self.offset,
+            total: self.total,
+            loading: self.loading,
+            detail: self.detail.clone(),
+            versions: self.versions.clone(),
+            version_selected: self.version_selected,
+            focus: self.focus,
+            body: self.body.clone(),
+            body_for: self.body_for.clone(),
+            body_width: self.body_width,
+            body_scroll: self.body_scroll,
+            body_visible: self.body_visible,
+            image_requested: self.image_requested.clone(),
+            filter_compat: self.filter_compat,
+            filter_side: self.filter_side,
+            filter_categories: self.filter_categories.clone(),
+            filter_loaders: self.filter_loaders.clone(),
+            sort: self.sort,
+            sidebar_selected: self.sidebar_selected,
+        };
+        self.caches.insert(self.kind, cache);
+    }
+
+    /// Load cached state for the given kind into the active fields.
+    /// If no cache exists, reset to defaults for that kind.
+    pub fn load_cache(&mut self, kind: BrowseKind) {
+        if let Some(cache) = self.caches.remove(&kind) {
+            self.query = cache.query;
+            self.search_input = cache.search_input;
+            self.results = cache.results;
+            self.selected = cache.selected;
+            self.offset = cache.offset;
+            self.total = cache.total;
+            self.loading = cache.loading;
+            self.detail = cache.detail;
+            self.versions = cache.versions;
+            self.version_selected = cache.version_selected;
+            self.focus = cache.focus;
+            self.body = cache.body;
+            self.body_for = cache.body_for;
+            self.body_width = cache.body_width;
+            self.body_scroll = cache.body_scroll;
+            self.body_visible = cache.body_visible;
+            self.image_requested = cache.image_requested;
+            self.filter_compat = cache.filter_compat;
+            self.filter_side = cache.filter_side;
+            self.filter_categories = cache.filter_categories;
+            self.filter_loaders = cache.filter_loaders;
+            self.sort = cache.sort;
+            self.sidebar_selected = cache.sidebar_selected;
+        } else {
+            // No cache — reset to defaults for this kind.
+            self.query = String::new();
+            self.search_input = String::new();
+            self.results = Vec::new();
+            self.selected = 0;
+            self.offset = 0;
+            self.total = 0;
+            self.loading = false;
+            self.detail = None;
+            self.versions = Vec::new();
+            self.version_selected = 0;
+            self.focus = BrowseFocus::List;
+            self.body = Vec::new();
+            self.body_for = String::new();
+            self.body_width = 0;
+            self.body_scroll = 0;
+            self.body_visible = 0;
+            self.image_requested = HashSet::new();
+            self.filter_compat = matches!(kind, BrowseKind::Mods);
+            self.filter_side = SideFilter::All;
+            self.filter_categories = Vec::new();
+            self.filter_loaders = Vec::new();
+            self.sort = SortOrder::Downloads;
+            self.sidebar_selected = FilterItem::Sort;
+        }
+        self.kind = kind;
+    }
+}
+
+impl Browse {
     pub fn in_detail(&self) -> bool {
         self.detail.is_some()
     }
@@ -222,13 +388,72 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(5),
+                Constraint::Length(1), // search bar
+                Constraint::Length(1), // status
+                Constraint::Min(5),   // sidebar + list
             ])
             .split(area);
 
-        // Search / status / filter line.
+        // ── Search bar (row 0) ──
+        let search_focused = self.browse.focus == BrowseFocus::Search;
+        let search_bg = if search_focused {
+            self.theme.panel_alt
+        } else {
+            self.theme.panel
+        };
+        let search_rect = Rect {
+            x: chunks[0].x,
+            y: chunks[0].y,
+            width: chunks[0].width,
+            height: 1,
+        };
+        // Green accent bar on the left when focused
+        if search_focused && search_rect.width > 0 {
+            let bar = Rect { x: search_rect.x, y: search_rect.y, width: 1, height: 1 };
+            frame.render_widget(
+                Paragraph::new(Span::styled(" ", self.theme.accent()))
+                    .style(Style::default().bg(search_bg)),
+                bar,
+            );
+        }
+        let search_label = " Search  ";
+        let query_part = if self.browse.search_input.is_empty() && self.browse.query.is_empty() {
+            Span::styled(
+                "type to search Modrinth...",
+                Style::default().fg(self.theme.muted).bg(search_bg),
+            )
+        } else if search_focused {
+            Span::styled(
+                format!("{}█", self.browse.search_input),
+                Style::default().fg(self.theme.green).bg(search_bg),
+            )
+        } else if !self.browse.query.is_empty() {
+            Span::styled(
+                &self.browse.query,
+                Style::default().fg(self.theme.fg).bg(search_bg),
+            )
+        } else {
+            Span::styled(
+                &self.browse.search_input,
+                Style::default().fg(self.theme.fg).bg(search_bg),
+            )
+        };
+        let search_line = Line::from(vec![
+            Span::styled(
+                search_label,
+                Style::default().fg(if search_focused { self.theme.green } else { self.theme.muted }).bg(search_bg),
+            ),
+            query_part,
+        ]);
+        let bar_x = if search_focused { search_rect.x + 1 } else { search_rect.x };
+        let bar_w = if search_focused { search_rect.width.saturating_sub(1) } else { search_rect.width };
+        frame.render_widget(
+            Paragraph::new(search_line).style(Style::default().bg(search_bg)),
+            Rect { x: bar_x, y: search_rect.y, width: bar_w, height: 1 },
+        );
+        self.push_hitbox(search_rect, HitAction::BrowseSearchBar);
+
+        // ── Status / filter line (row 1) ──
         let page_size = 30u32;
         let current_page = self.browse.offset / page_size + 1;
         let total_pages = if self.browse.total == 0 {
@@ -238,9 +463,8 @@ impl App {
         };
         let status = if self.browse.query.is_empty() {
             format!(
-                "{} {}  ·  page {}/{}  ·  {} results",
+                "{}  ·  page {}/{}  ·  {} results",
                 self.browse.sort.label(),
-                self.browse.kind.label(),
                 current_page,
                 total_pages,
                 self.browse.total
@@ -1178,12 +1402,36 @@ impl App {
     }
 
     fn key_browse_list(&mut self, key: KeyEvent) {
-        // Tab toggles between sidebar and list focus.
+        // Tab toggles between sidebar, search, and list focus.
         if key.code == KeyCode::Tab {
             self.browse.focus = match self.browse.focus {
+                BrowseFocus::Search => BrowseFocus::Sidebar,
                 BrowseFocus::Sidebar => BrowseFocus::List,
-                BrowseFocus::List | _ => BrowseFocus::Sidebar,
+                BrowseFocus::List | _ => BrowseFocus::Search,
             };
+            return;
+        }
+
+        // When search bar is focused, character input goes to the search field.
+        if self.browse.focus == BrowseFocus::Search {
+            match key.code {
+                KeyCode::Esc => {
+                    self.browse.focus = BrowseFocus::List;
+                }
+                KeyCode::Enter => {
+                    self.browse.query = self.browse.search_input.trim().to_string();
+                    self.browse_close_detail();
+                    self.browse_load_first_page();
+                    self.browse.focus = BrowseFocus::List;
+                }
+                KeyCode::Backspace => {
+                    self.browse.search_input.pop();
+                }
+                KeyCode::Char(c) => {
+                    self.browse.search_input.push(c);
+                }
+                _ => {}
+            }
             return;
         }
 
@@ -1212,7 +1460,6 @@ impl App {
             }
             KeyCode::Char('n') | KeyCode::Char('N') => self.browse_next_page(),
             KeyCode::Char('p') | KeyCode::Char('P') => self.browse_prev_page(),
-            KeyCode::Char('s') | KeyCode::Char('/') => self.open_browse_search(),
             KeyCode::Char('f') => {
                 self.browse.filter_compat = !self.browse.filter_compat;
                 self.browse_load_first_page();

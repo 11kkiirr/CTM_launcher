@@ -23,6 +23,7 @@ impl App {
             .constraints([
                 Constraint::Length(1),
                 Constraint::Length(1),
+                Constraint::Length(1),
                 Constraint::Min(3),
             ])
             .split(area);
@@ -46,11 +47,11 @@ impl App {
                 &self.theme,
             ))
             .style(self.theme.card()),
-            chunks[1],
+            chunks[2],
         );
 
         let focused = self.focus == Focus::Content;
-        let inner = card(self, frame, chunks[2], focused);
+        let inner = card(self, frame, chunks[3], focused);
         if inner.height == 0 || inner.width == 0 {
             return;
         }

@@ -212,6 +212,9 @@ impl App {
                 self.mod_search_state.select(Some(idx));
                 self.focus = Focus::Content;
             }
+            HitAction::ModsSearchBar => {
+                self.mods_search_focused = true;
+            }
             HitAction::AccountRow(idx) => {
                 self.account_state.select(Some(idx));
                 self.focus = Focus::Content;
@@ -225,6 +228,10 @@ impl App {
             HitAction::BrowseVersion(idx) => self.browse_select_version(idx),
             HitAction::BrowseInstall => self.browse_install(),
             HitAction::BrowseQuickInstall(idx) => self.browse_quick_install(idx),
+            HitAction::BrowseSearchBar => {
+                self.browse.focus = crate::views::browse::BrowseFocus::Search;
+                self.browse.search_input = self.browse.query.clone();
+            }
             HitAction::BrowseFilter(item) => self.browse_filter_click(item),
             HitAction::BrowsePagePrev => self.browse_prev_page(),
             HitAction::BrowsePageNext => self.browse_next_page(),
@@ -257,7 +264,24 @@ impl App {
             ButtonId::DeleteMod => self.confirm_delete_mod(),
             ButtonId::ModSearch => self.open_mod_search_prompt(),
             ButtonId::UpdateMods => self.check_mod_updates(),
-            ButtonId::BrowseMods => self.open_nav(Nav::Browse),
+            ButtonId::BrowseMods => {
+                let kind = crate::views::browse::BrowseKind::Mods;
+                self.browse.save_cache();
+                self.browse.load_cache(kind);
+                self.open_nav(Nav::Browse);
+            }
+            ButtonId::ShadersBrowse => {
+                let kind = crate::views::browse::BrowseKind::Shaders;
+                self.browse.save_cache();
+                self.browse.load_cache(kind);
+                self.open_nav(Nav::Browse);
+            }
+            ButtonId::RpBrowse => {
+                let kind = crate::views::browse::BrowseKind::ResourcePacks;
+                self.browse.save_cache();
+                self.browse.load_cache(kind);
+                self.open_nav(Nav::Browse);
+            }
             ButtonId::OfflineLogin => self.open_offline_login(),
             ButtonId::MicrosoftLogin => self.start_microsoft_login(),
             ButtonId::SetActiveAccount => self.set_active_account(),
