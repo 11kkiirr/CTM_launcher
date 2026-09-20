@@ -21,7 +21,7 @@ use crate::engine::{EngineReceiver, EngineSender};
 use crate::forms::{gc_options, Overlay, PickerTarget};
 use crate::settings::LauncherSettings;
 use crate::theme::Theme;
-use crate::views::browse::{Browse, BrowseKind};
+use crate::views::browse::Browse;
 use crate::wizard::BuildKind;
 
 /// The Azure application (client) id used for Microsoft device-code auth.
@@ -166,7 +166,6 @@ pub enum HitAction {
     AccountRow(usize),
     SettingsRow(usize),
     Button(ButtonId),
-    BrowseKindTab(BrowseKind),
     BrowseResult(usize),
     BrowseVersion(usize),
     BrowseInstall,

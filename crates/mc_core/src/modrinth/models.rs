@@ -233,4 +233,10 @@ pub struct InstalledMod {
     /// SHA-1 of the file contents.
     pub sha1: String,
     pub size: u64,
+    /// Human-readable mod name parsed from jar manifest (e.g. "Sodium").
+    pub mod_name: String,
+    /// Mod version parsed from jar manifest (e.g. "0.5.8").
+    pub version: String,
+    /// File modification time used as install/update date (YYYY-MM-DD HH:MM).
+    pub install_date: String,
 }

@@ -272,7 +272,7 @@ pub(crate) fn render_header(&mut self, frame: &mut Frame, area: Rect) {
 
     let subtitle = match self.nav {
         Nav::Instances => "Instances".to_string(),
-        Nav::Browse => "Modrinth Browser".to_string(),
+        Nav::Browse => "Browse Mods".to_string(),
         Nav::Accounts => "Accounts".to_string(),
         Nav::Launcher => "Launcher Settings".to_string(),
         _ => self

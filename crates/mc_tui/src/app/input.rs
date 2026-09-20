@@ -221,7 +221,6 @@ impl App {
                 self.focus = Focus::Content;
             }
             HitAction::Button(button) => self.dispatch_button(button),
-            HitAction::BrowseKindTab(kind) => self.browse_switch_kind(kind),
             HitAction::BrowseResult(idx) => self.browse_select_result(idx),
             HitAction::BrowseVersion(idx) => self.browse_select_version(idx),
             HitAction::BrowseInstall => self.browse_install(),

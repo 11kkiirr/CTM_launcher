@@ -21,31 +21,16 @@ use crate::app::{App, HitAction};
 use crate::md::render_md;
 use crate::views::truncate;
 
-/// The four content categories the browser covers.
+/// The content category the browser covers (mods only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowseKind {
     Mods,
-    Modpacks,
-    Resourcepacks,
-    Shaders,
 }
 
 impl BrowseKind {
-    pub fn all() -> [BrowseKind; 4] {
-        [
-            BrowseKind::Mods,
-            BrowseKind::Modpacks,
-            BrowseKind::Resourcepacks,
-            BrowseKind::Shaders,
-        ]
-    }
-
     pub fn label(&self) -> &'static str {
         match self {
             BrowseKind::Mods => "Mods",
-            BrowseKind::Modpacks => "Modpacks",
-            BrowseKind::Resourcepacks => "Resourcepacks",
-            BrowseKind::Shaders => "Shaders",
         }
     }
 
@@ -53,38 +38,23 @@ impl BrowseKind {
     pub fn project_type(&self) -> &'static str {
         match self {
             BrowseKind::Mods => "mod",
-            BrowseKind::Modpacks => "modpack",
-            BrowseKind::Resourcepacks => "resourcepack",
-            BrowseKind::Shaders => "shader",
         }
     }
 
-    /// Loader names shown in the sidebar (only for Mods / Modpacks).
+    /// Loader names shown in the sidebar.
     pub fn loaders(&self) -> &'static [&'static str] {
         match self {
-            BrowseKind::Mods | BrowseKind::Modpacks => &["fabric", "forge", "neoforge", "quilt"],
-            BrowseKind::Resourcepacks | BrowseKind::Shaders => &[],
+            BrowseKind::Mods => &["fabric", "forge", "neoforge", "quilt"],
         }
     }
 
-    /// Category facet values shown in the sidebar for each content type.
+    /// Category facet values shown in the sidebar.
     pub fn categories(&self) -> &'static [&'static str] {
         match self {
             BrowseKind::Mods => &[
                 "adventure", "decoration", "magic", "mobs", "optimization",
                 "library", "technology", "worldgen", "games", "social",
                 "storage", "transport", "utilitarian", "crafting",
-            ],
-            BrowseKind::Modpacks => &[
-                "kitchen-sink", "lightweight", "hardcore", "quest",
-                "technology", "magic", "adventure",
-            ],
-            BrowseKind::Resourcepacks => &[
-                "textures", "audio", "gui", "models", "terrain",
-                "dependencies",
-            ],
-            BrowseKind::Shaders => &[
-                "performance", "realistic", "stylized", "vanilla-like",
             ],
         }
     }
@@ -258,8 +228,6 @@ impl App {
             ])
             .split(area);
 
-        self.render_browse_tabs(frame, chunks[0]);
-
         // Search / status / filter line.
         let page_size = 30u32;
         let current_page = self.browse.offset / page_size + 1;
@@ -354,35 +322,6 @@ impl App {
         self.render_browse_results(frame, body_chunks[1]);
     }
 
-    fn render_browse_tabs(&mut self, frame: &mut Frame, area: Rect) {
-        let mut x = area.x;
-        for kind in BrowseKind::all() {
-            let label = format!(" {} ", kind.label());
-            let width = label.chars().count() as u16;
-            let rect = Rect {
-                x,
-                y: area.y,
-                width,
-                height: 1,
-            };
-            let style = if kind == self.browse.kind {
-                self.theme.accent_bright()
-            } else if self.is_hovered(rect) {
-                self.theme.hover()
-            } else {
-                self.theme.dim()
-            };
-            frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
-            self.push_hitbox(rect, HitAction::BrowseKindTab(kind));
-            x += width + 1;
-        }
-        let hint = "  1-4 type · s search · [/] pages · Tab filters";
-        frame.render_widget(
-            Paragraph::new(Span::styled(hint, self.theme.card_comment())),
-            Rect { x, y: area.y, width: area.width.saturating_sub(x.saturating_sub(area.x)), height: 1 },
-        );
-    }
-
     fn render_browse_filter_sidebar(&mut self, frame: &mut Frame, area: Rect) {
         let inner = crate::views::card(self, frame, area, self.browse.focus == BrowseFocus::Sidebar);
         if inner.height == 0 {
@@ -393,9 +332,13 @@ impl App {
         let mut y = inner.y;
 
         // ── General section ──
+        let general_header = Rect { x: inner.x, y, width: inner.width, height: 1 };
         frame.render_widget(
-            Paragraph::new(Span::styled(" General", self.theme.header())).style(self.theme.card()),
-            Rect { x: inner.x, y, width: inner.width, height: 1 },
+            Paragraph::new(Line::from(vec![
+                Span::styled(" \u{258e}", self.theme.accent()),
+                Span::styled(" General", self.theme.header()),
+            ])).style(self.theme.card()),
+            general_header,
         );
         y += 1;
 
@@ -408,7 +351,7 @@ impl App {
             };
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(" Sort  ", self.theme.card_dim()),
+                    Span::styled("   Sort  ", self.theme.card_dim()),
                     Span::styled(self.browse.sort.label().to_string(), style),
                 ]))
                 .style(self.theme.card()),
@@ -432,7 +375,7 @@ impl App {
             };
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(" Side  ", self.theme.card_dim()),
+                    Span::styled("   Side  ", self.theme.card_dim()),
                     Span::styled(side_label.to_string(), style),
                 ]))
                 .style(self.theme.card()),
@@ -452,7 +395,7 @@ impl App {
             };
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(" Compat", self.theme.card_dim()),
+                    Span::styled("   Compat", self.theme.card_dim()),
                     Span::styled(format!("  {compat_text}"), style),
                 ]))
                 .style(self.theme.card()),
@@ -462,13 +405,17 @@ impl App {
             y += 1;
         }
 
-        // ── Loaders section (Mods / Modpacks only) ──
+        // ── Loaders section ──
         let loaders = self.browse.kind.loaders();
         if !loaders.is_empty() {
             y += 1;
+            let loader_header = Rect { x: inner.x, y, width: inner.width, height: 1 };
             frame.render_widget(
-                Paragraph::new(Span::styled(" Loaders", self.theme.header())).style(self.theme.card()),
-                Rect { x: inner.x, y, width: inner.width, height: 1 },
+                Paragraph::new(Line::from(vec![
+                    Span::styled(" \u{258e}", self.theme.accent()),
+                    Span::styled(" Loaders", self.theme.header()),
+                ])).style(self.theme.card()),
+                loader_header,
             );
             y += 1;
             for (i, loader) in loaders.iter().enumerate() {
@@ -482,7 +429,7 @@ impl App {
                 } else {
                     self.theme.card()
                 };
-                let label = format!("  [{marker}] {loader}");
+                let label = format!("   [{marker}] {loader}");
                 let truncated = truncate(&label, max_w);
                 frame.render_widget(
                     Paragraph::new(Span::styled(truncated, style)).style(self.theme.card()),
@@ -497,9 +444,13 @@ impl App {
         let cats = self.browse.kind.categories();
         if !cats.is_empty() {
             y += 1;
+            let cat_header = Rect { x: inner.x, y, width: inner.width, height: 1 };
             frame.render_widget(
-                Paragraph::new(Span::styled(" Categories", self.theme.header())).style(self.theme.card()),
-                Rect { x: inner.x, y, width: inner.width, height: 1 },
+                Paragraph::new(Line::from(vec![
+                    Span::styled(" \u{258e}", self.theme.accent()),
+                    Span::styled(" Categories", self.theme.header()),
+                ])).style(self.theme.card()),
+                cat_header,
             );
             y += 1;
             for (i, cat) in cats.iter().enumerate() {
@@ -513,7 +464,7 @@ impl App {
                 } else {
                     self.theme.card()
                 };
-                let label = format!("  [{marker}] {cat}");
+                let label = format!("   [{marker}] {cat}");
                 let truncated = truncate(&label, max_w);
                 frame.render_widget(
                     Paragraph::new(Span::styled(truncated, style)).style(self.theme.card()),
@@ -883,28 +834,27 @@ impl App {
         };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Min(5)])
+            .constraints([Constraint::Length(1), Constraint::Min(5)])
             .split(area);
 
-        self.render_browse_tabs(frame, chunks[0]);
-        self.render_browse_detail_header(frame, chunks[1], &project);
+        self.render_browse_detail_header(frame, chunks[0], &project);
 
-        let left_w = (area.width as usize * 2 / 5).min(38).max(24) as u16;
+        let left_w = (area.width as usize * 2 / 5).clamp(24, 38) as u16;
         let columns = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(left_w), Constraint::Length(1), Constraint::Min(1)])
-            .split(chunks[2]);
+            .split(chunks[1]);
         self.render_browse_detail_left(frame, columns[0]);
         self.render_browse_detail_body(frame, columns[2]);
     }
 
     fn render_browse_detail_header(&mut self, frame: &mut Frame, area: Rect, project: &Project) {
         let line = Line::from(vec![
-            Span::styled("◀ back  ", self.theme.accent()),
+            Span::styled(" \u{25C0} back  ", self.theme.accent()),
             Span::styled(truncate(&project.title, 28), self.theme.header()),
             Span::styled(format!("  {}  ", project.project_type), self.theme.card_comment()),
-            Span::styled(format!("⤓ {}", project.downloads), self.theme.accent()),
-            Span::styled(format!("  ♡ {}", project.followers), self.theme.card_dim()),
+            Span::styled(format!("\u{2913} {}", project.downloads), self.theme.accent()),
+            Span::styled(format!("  \u{2661} {}", project.followers), self.theme.card_dim()),
             Span::styled(
                 format!("  {} version(s)", self.browse.versions.len()),
                 self.theme.card_comment(),
@@ -927,101 +877,130 @@ impl App {
             return;
         };
 
-        let icon_h = 9u16;
-        let meta_h = 4u16;
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(icon_h),
-                Constraint::Length(meta_h),
-                Constraint::Length(1),
-                Constraint::Min(2),
-                Constraint::Length(1),
-            ])
-            .split(inner);
-
-        // Icon preview (truecolor half-blocks) or a colour swatch.
-        self.render_browse_icon(frame, rows[0], &project);
-
-        // Meta block.
-        let author = project
-            .additional_categories
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
-        let updated = project.updated.clone();
-        let updated = if updated.is_empty() {
-            String::new()
-        } else {
-            updated.chars().take(10).collect::<String>()
+        // Full-width icon at the top
+        let icon_h = (inner.height / 3).clamp(6, 12);
+        let icon_area = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: icon_h,
         };
-        let meta: Vec<Line> = vec![
-            Line::from(vec![
-                Span::styled("Author  ", self.theme.card_dim()),
-                Span::styled(author, self.theme.card()),
-            ]),
-            Line::from(vec![
-                Span::styled("License ", self.theme.card_dim()),
-                Span::styled(
-                    project.license.as_ref().map(|l| l.name.clone()).unwrap_or_default(),
-                    self.theme.card(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("Updated ", self.theme.card_dim()),
-                Span::styled(updated, self.theme.card()),
-            ]),
-            Line::from(vec![
-                Span::styled("Install ", self.theme.card_dim()),
-                Span::styled(self.browse.kind.label().to_string(), self.theme.accent()),
-            ]),
-        ];
-        frame.render_widget(Paragraph::new(meta).style(self.theme.card()), rows[1]);
+        self.render_browse_icon(frame, icon_area, &project);
 
-        // Versions header + list.
+        // Version list below icon
+        let remaining_h = inner.height.saturating_sub(icon_h);
+        if remaining_h == 0 {
+            return;
+        }
+
+        // Separate compatible vs all versions
+        let instance_gv = self
+            .selected_instance()
+            .map(|i| i.metadata.game_version.clone());
+        let instance_loader = self
+            .selected_instance()
+            .map(|i| i.metadata.loader.as_str().to_string());
+
+        let mut compatible: Vec<usize> = Vec::new();
+        let mut incompatible: Vec<usize> = Vec::new();
+        for (idx, ver) in self.browse.versions.iter().enumerate() {
+            let gv_match = instance_gv
+                .as_ref()
+                .map(|gv| ver.game_versions.iter().any(|v| v == gv))
+                .unwrap_or(true);
+            let ld_match = instance_loader
+                .as_ref()
+                .map(|ld| ver.loaders.iter().any(|v| v == ld))
+                .unwrap_or(true);
+            if gv_match && ld_match {
+                compatible.push(idx);
+            } else {
+                incompatible.push(idx);
+            }
+        }
+
+        // Version header
+        let header_y = inner.y + icon_h;
+        let header_rect = Rect {
+            x: inner.x,
+            y: header_y,
+            width: inner.width,
+            height: 1,
+        };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("Versions", self.theme.header()),
-                Span::styled("   v focus · Enter install", self.theme.card_dim()),
+                Span::styled(
+                    format!(
+                        "   {}/{} compatible",
+                        compatible.len(),
+                        self.browse.versions.len()
+                    ),
+                    self.theme.card_dim(),
+                ),
             ]))
             .style(self.theme.card()),
-            rows[2],
+            header_rect,
         );
 
-        let versions_area = rows[3];
-        let visible = versions_area.height as usize;
+        // Version list (compatible first, then incompatible)
+        let list_y = header_y + 1;
+        let list_h = remaining_h.saturating_sub(1);
+        let visible = list_h as usize;
+
+        // Build ordered list: compatible first, then incompatible
+        let mut ordered: Vec<usize> = compatible.clone();
+        ordered.extend(incompatible.iter());
+
         let start = self
             .browse
             .version_selected
             .saturating_sub(visible.saturating_sub(1));
         for row in 0..visible {
-            let idx = start + row;
+            let list_idx = start + row;
+            let Some(&idx) = ordered.get(list_idx) else {
+                break;
+            };
             let Some(version) = self.browse.versions.get(idx).cloned() else {
                 break;
             };
             let rect = Rect {
-                x: versions_area.x,
-                y: versions_area.y + row as u16,
-                width: versions_area.width,
+                x: inner.x,
+                y: list_y + row as u16,
+                width: inner.width,
                 height: 1,
             };
+            let is_compatible = compatible.contains(&idx);
             let style = if idx == self.browse.version_selected {
                 self.theme.row_selected()
             } else if self.is_hovered(rect) {
                 self.theme.row_hover()
-            } else {
+            } else if is_compatible {
                 self.theme.row()
+            } else {
+                self.theme.card_dim()
             };
             let game = version
                 .game_versions
                 .first()
                 .cloned()
                 .unwrap_or_default();
+            let compat_marker = " ";
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(truncate(&version.version_number, 12), style),
-                    Span::styled(format!("  {game}", ), self.theme.card_dim()),
-                    Span::styled(format!("  {}", version.loaders.join("+")), self.theme.card_comment()),
+                    Span::styled(compat_marker, style),
+                    Span::styled(
+                        truncate(&version.version_number, 12),
+                        style,
+                    ),
+                    Span::styled(
+                        format!("  {game}"),
+                        self.theme.card_dim(),
+                    ),
+                    Span::styled(
+                        format!("  {}", version.loaders.join("+")),
+                        self.theme.card_comment(),
+                    ),
                 ]))
                 .style(self.theme.card()),
                 rect,
@@ -1032,12 +1011,23 @@ impl App {
             frame.render_widget(
                 Paragraph::new(Span::styled("No versions", self.theme.card_dim()))
                     .style(self.theme.card()),
-                versions_area,
+                Rect {
+                    x: inner.x,
+                    y: list_y,
+                    width: inner.width,
+                    height: list_h,
+                },
             );
         }
 
-        // Install button.
-        let install_rect = rows[4];
+        // Install button
+        let install_y = inner.y + inner.height - 1;
+        let install_rect = Rect {
+            x: inner.x,
+            y: install_y,
+            width: inner.width,
+            height: 1,
+        };
         let install_style = if self.is_hovered(install_rect) {
             self.theme.hover()
         } else {
@@ -1223,11 +1213,6 @@ impl App {
             KeyCode::Char('n') | KeyCode::Char('N') => self.browse_next_page(),
             KeyCode::Char('p') | KeyCode::Char('P') => self.browse_prev_page(),
             KeyCode::Char('s') | KeyCode::Char('/') => self.open_browse_search(),
-            KeyCode::Char('1') => self.browse_switch_kind(BrowseKind::Mods),
-            KeyCode::Char('2') => self.browse_switch_kind(BrowseKind::Modpacks),
-            KeyCode::Char('3') => self.browse_switch_kind(BrowseKind::Resourcepacks),
-            KeyCode::Char('4') => self.browse_switch_kind(BrowseKind::Shaders),
-            KeyCode::Char('t') => self.browse_cycle_kind(),
             KeyCode::Char('f') => {
                 self.browse.filter_compat = !self.browse.filter_compat;
                 self.browse_load_first_page();
@@ -1365,19 +1350,4 @@ impl App {
         }
     }
 
-    pub(crate) fn browse_switch_kind(&mut self, kind: BrowseKind) {
-        if self.browse.kind == kind && self.browse.detail.is_none() && !self.browse.results.is_empty() {
-            return;
-        }
-        self.browse.kind = kind;
-        self.browse_close_detail();
-        self.browse_query_reset();
-        self.browse_load_first_page();
-    }
-
-    pub(crate) fn browse_cycle_kind(&mut self) {
-        let kinds = BrowseKind::all();
-        let idx = kinds.iter().position(|k| *k == self.browse.kind).unwrap_or(0);
-        self.browse_switch_kind(kinds[(idx + 1) % kinds.len()]);
-    }
 }

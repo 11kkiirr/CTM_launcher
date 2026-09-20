@@ -87,12 +87,29 @@ pub async fn scan_installed_mods(mods_dir: impl AsRef<Path>) -> Result<Vec<Insta
         }
         let path = entry.path();
         let metadata = entry.metadata().await?;
+
+        // Parse jar manifest for mod name and version.
+        let (mod_name, version) = parse_jar_manifest(&path).await;
+
+        // Format file modification time as install date.
+        let install_date = metadata
+            .modified()
+            .ok()
+            .map(|t| {
+                let dt: chrono::DateTime<chrono::Local> = t.into();
+                dt.format("%Y-%m-%d %H:%M").to_string()
+            })
+            .unwrap_or_default();
+
         out.push(InstalledMod {
             path,
             file_name: file_name.clone(),
             enabled: !is_disabled(&file_name),
             sha1: String::new(),
             size: metadata.len(),
+            mod_name,
+            version,
+            install_date,
         });
     }
     out.sort_by(|a, b| {
@@ -101,6 +118,69 @@ pub async fn scan_installed_mods(mods_dir: impl AsRef<Path>) -> Result<Vec<Insta
             .cmp(&logical_name(&b.file_name).to_lowercase())
     });
     Ok(out)
+}
+
+/// Extract mod name and version from a jar's `META-INF/MANIFEST.MF`.
+///
+/// Looks for `Fabric-Mod` or `Forge-Mod` or `NeoForge-Mod` headers, falling
+/// back to `Implementation-Title` / `Implementation-Version`.
+async fn parse_jar_manifest(path: &std::path::Path) -> (String, String) {
+    let path = path.to_path_buf();
+    let result = tokio::task::spawn_blocking(move || parse_jar_manifest_sync(&path))
+        .await
+        .unwrap_or_else(|_| (String::new(), String::new()));
+    result
+}
+
+fn parse_jar_manifest_sync(path: &std::path::Path) -> (String, String) {
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return (String::new(), String::new()),
+    };
+    let reader = std::io::BufReader::new(file);
+    let mut archive = match zip::ZipArchive::new(reader) {
+        Ok(z) => z,
+        Err(_) => return (String::new(), String::new()),
+    };
+    let mut manifest = match archive.by_name("META-INF/MANIFEST.MF") {
+        Ok(m) => m,
+        Err(_) => return (String::new(), String::new()),
+    };
+    let mut contents = String::new();
+    if std::io::Read::read_to_string(&mut manifest, &mut contents).is_err() {
+        return (String::new(), String::new());
+    }
+
+    let mut name = String::new();
+    let mut version = String::new();
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if let Some(val) = trimmed.strip_prefix("Fabric-Mod:") {
+            let val = val.trim();
+            if !val.is_empty() && name.is_empty() {
+                name = val.to_string();
+            }
+        } else if let Some(val) = trimmed.strip_prefix("Implementation-Title:") {
+            let val = val.trim();
+            if !val.is_empty() && name.is_empty() {
+                name = val.to_string();
+            }
+        }
+        if let Some(val) = trimmed.strip_prefix("Fabric-Version:") {
+            let val = val.trim();
+            if !val.is_empty() && version.is_empty() {
+                version = val.to_string();
+            }
+        } else if let Some(val) = trimmed.strip_prefix("Implementation-Version:") {
+            let val = val.trim();
+            if !val.is_empty() && version.is_empty() {
+                version = val.to_string();
+            }
+        }
+    }
+
+    (name, version)
 }
 
 /// Ensure a mod has its SHA-1 computed, hashing lazily when missing.

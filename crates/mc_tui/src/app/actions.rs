@@ -19,7 +19,7 @@ use crate::engine::{progress_event, EngineEvent};
 use crate::forms::{
     gc_options, parse_gc, ConfirmAction, Form, FormAction, Overlay, PickerTarget, TextAction,
 };
-use crate::views::browse::{BrowseFocus, BrowseKind, SideFilter};
+use crate::views::browse::{BrowseFocus, SideFilter};
 
 use super::{gc_index, rect_contains, split_args, App, CLIENT_ID, HitAction, Hitbox, Toast};
 
@@ -940,10 +940,6 @@ pub(crate) fn run_browse_search(&mut self, query: String) {
     self.browse_load_first_page();
 }
 
-pub(crate) fn browse_query_reset(&mut self) {
-    self.browse.query = String::new();
-}
-
 pub(crate) fn browse_load_first_page(&mut self) {
     self.browse.results.clear();
     self.browse.selected = 0;
@@ -1181,27 +1177,15 @@ pub(crate) fn browse_install(&mut self) {
         self.set_toast("No version selected", true);
         return;
     };
-    let title = project.title.clone();
-    let is_modpack = self.browse.kind == BrowseKind::Modpacks;
-
-    if is_modpack {
-        self.browse_close_detail();
-        self.install_modrinth_modpack(title, version);
-        return;
-    }
 
     let Some(instance) = self.selected_instance().cloned() else {
         self.set_toast("Select an instance in the Instances tab first", true);
         return;
     };
-    let dest_dir = match self.browse.kind {
-        BrowseKind::Mods => instance.mods_dir(),
-        BrowseKind::Resourcepacks => instance.resourcepacks_dir(),
-        _ => instance.shaders_dir(),
-    };
+    let dest_dir = instance.mods_dir();
     let game_version = instance.metadata.game_version.clone();
     let loader = instance.metadata.loader.as_str().to_string();
-    let resolve_deps = self.browse.kind == BrowseKind::Mods;
+    let resolve_deps = true;
 
     let client = self.client.clone();
     let modrinth = self.modrinth.clone();
@@ -1246,16 +1230,7 @@ pub(crate) fn browse_quick_install(&mut self, idx: usize) {
         self.set_toast("Select an instance first", true);
         return;
     };
-    let is_modpack = self.browse.kind == BrowseKind::Modpacks;
-    if is_modpack {
-        self.set_toast("Open a modpack to install it", true);
-        return;
-    }
-    let dest_dir = match self.browse.kind {
-        BrowseKind::Mods => instance.mods_dir(),
-        BrowseKind::Resourcepacks => instance.resourcepacks_dir(),
-        _ => instance.shaders_dir(),
-    };
+    let dest_dir = instance.mods_dir();
     let game_version = instance.metadata.game_version.clone();
     let loader = instance.metadata.loader.as_str().to_string();
     let client = self.client.clone();
