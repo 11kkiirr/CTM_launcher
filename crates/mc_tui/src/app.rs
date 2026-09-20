@@ -65,15 +65,27 @@ pub enum Nav {
     Accounts,
     /// Global launcher settings.
     Launcher,
+    /// Resource pack manager.
+    ResourcePacks,
+    /// Shader pack manager.
+    Shaders,
+    /// World manager.
+    Worlds,
+    /// Screenshot viewer.
+    Screenshots,
 }
 
 impl Nav {
     /// Every page, including ones no longer shown in the sidebar menu.
     #[allow(dead_code)]
-    pub fn all() -> [Nav; 8] {
+    pub fn all() -> [Nav; 12] {
         [
             Nav::Instances,
             Nav::Mods,
+            Nav::ResourcePacks,
+            Nav::Shaders,
+            Nav::Worlds,
+            Nav::Screenshots,
             Nav::Modpacks,
             Nav::Versions,
             Nav::Jvm,
@@ -88,10 +100,14 @@ impl Nav {
     /// `Browse`, `Modpacks` and `Accounts` are intentionally omitted; they are
     /// reached from the instance toolbar, the Mods page and the header account
     /// badge respectively.
-    pub fn menu() -> [Nav; 5] {
+    pub fn menu() -> [Nav; 9] {
         [
             Nav::Instances,
             Nav::Mods,
+            Nav::ResourcePacks,
+            Nav::Shaders,
+            Nav::Worlds,
+            Nav::Screenshots,
             Nav::Versions,
             Nav::Jvm,
             Nav::Logs,
@@ -115,6 +131,10 @@ impl Nav {
             Nav::Logs => "Logs",
             Nav::Accounts => "Accounts",
             Nav::Launcher => "Launcher Settings",
+            Nav::ResourcePacks => "Resource Packs",
+            Nav::Shaders => "Shaders",
+            Nav::Worlds => "Worlds",
+            Nav::Screenshots => "Screenshots",
         }
     }
 
@@ -122,6 +142,7 @@ impl Nav {
     pub fn menu_label(&self) -> &'static str {
         match self {
             Nav::Jvm => "JVM",
+            Nav::ResourcePacks => "Res Packs",
             other => other.label(),
         }
     }
@@ -138,6 +159,10 @@ impl Nav {
             Nav::Logs => "≣",
             Nav::Accounts => "☺",
             Nav::Launcher => "⚒",
+            Nav::ResourcePacks => "◧",
+            Nav::Shaders => "☀",
+            Nav::Worlds => "🌐",
+            Nav::Screenshots => "📷",
         }
     }
 
@@ -146,7 +171,15 @@ impl Nav {
     pub fn is_build_scoped(&self) -> bool {
         matches!(
             self,
-            Nav::Mods | Nav::Modpacks | Nav::Versions | Nav::Jvm | Nav::Logs
+            Nav::Mods
+                | Nav::Modpacks
+                | Nav::Versions
+                | Nav::Jvm
+                | Nav::Logs
+                | Nav::ResourcePacks
+                | Nav::Shaders
+                | Nav::Worlds
+                | Nav::Screenshots
         )
     }
 }
@@ -344,6 +377,15 @@ pub struct App {
     /// A background mod scan is in flight (show a placeholder while empty).
     pub mods_scanning: bool,
 
+    pub resource_packs: Vec<String>,
+    pub resource_packs_state: ListState,
+    pub shaders: Vec<String>,
+    pub shaders_state: ListState,
+    pub worlds: Vec<String>,
+    pub worlds_state: ListState,
+    pub screenshots: Vec<String>,
+    pub screenshots_state: ListState,
+
     pub log_buffer: LogBuffer,
     /// Index of the first visible log line.
     pub log_scroll: usize,
@@ -364,6 +406,11 @@ pub struct App {
     /// Per-URL render state for the negotiated protocol (kitty/sixel/iterm2/
     /// halfblocks). Each entry caches the encoded image data.
     pub browse_protocols: HashMap<String, ratatui_image::protocol::StatefulProtocol>,
+
+    /// Local file images keyed by absolute path (screenshots, world icons).
+    pub local_images: HashMap<String, mc_core::img::RgbaImage>,
+    /// Per-path protocol cache for local images.
+    pub local_protocols: HashMap<String, ratatui_image::protocol::StatefulProtocol>,
 
     pub crash_analysis: Option<CrashAnalysis>,
 
@@ -425,6 +472,15 @@ impl App {
             installed_mods: Vec::new(),
             mods_state: ListState::default(),
             mods_scanning: false,
+
+            resource_packs: Vec::new(),
+            resource_packs_state: ListState::default(),
+            shaders: Vec::new(),
+            shaders_state: ListState::default(),
+            worlds: Vec::new(),
+            worlds_state: ListState::default(),
+            screenshots: Vec::new(),
+            screenshots_state: ListState::default(),
             log_buffer: LogBuffer::new(5000),
             log_scroll: 0,
             log_follow: true,
@@ -435,6 +491,8 @@ impl App {
             browse_return: Nav::Mods,
             picker: ratatui_image::picker::Picker::halfblocks(),
             browse_protocols: HashMap::new(),
+            local_images: HashMap::new(),
+            local_protocols: HashMap::new(),
             crash_analysis: None,
             running: None,
             last_command: None,
@@ -791,6 +849,35 @@ impl App {
             }
             EngineEvent::Toast(message) => self.set_toast(message, false),
             EngineEvent::Error(message) => self.set_toast(message, true),
+            EngineEvent::ResourcePacks(items) => {
+                self.resource_packs = items;
+                if self.resource_packs_state.selected().is_none() && !self.resource_packs.is_empty() {
+                    self.resource_packs_state.select(Some(0));
+                }
+            }
+            EngineEvent::ShaderPacks(items) => {
+                self.shaders = items;
+                if self.shaders_state.selected().is_none() && !self.shaders.is_empty() {
+                    self.shaders_state.select(Some(0));
+                }
+            }
+            EngineEvent::Worlds(items) => {
+                self.worlds = items;
+                if self.worlds_state.selected().is_none() && !self.worlds.is_empty() {
+                    self.worlds_state.select(Some(0));
+                }
+            }
+            EngineEvent::Screenshots(items) => {
+                self.screenshots = items;
+                if self.screenshots_state.selected().is_none() && !self.screenshots.is_empty() {
+                    self.screenshots_state.select(Some(0));
+                }
+            }
+            EngineEvent::LocalImage { path, img } => {
+                if let Some(img) = img {
+                    self.local_images.insert(path, img);
+                }
+            }
         }
     }
 
@@ -848,6 +935,10 @@ impl App {
             Nav::Logs if self.running.is_none() && self.log_buffer.is_empty() => {
                 self.load_latest_log();
             }
+            Nav::ResourcePacks => self.reload_resource_packs(),
+            Nav::Shaders => self.reload_shaders(),
+            Nav::Worlds => self.reload_worlds(),
+            Nav::Screenshots => self.reload_screenshots(),
             _ => {}
         }
     }
@@ -882,6 +973,10 @@ impl App {
             Nav::Logs => self.key_logs(key),
             Nav::Accounts => self.key_accounts(key),
             Nav::Launcher => self.key_settings(key),
+            Nav::ResourcePacks => self.key_resource_packs(key),
+            Nav::Shaders => self.key_shaders(key),
+            Nav::Worlds => self.key_worlds(key),
+            Nav::Screenshots => self.key_screenshots(key),
         }
     }
 
@@ -1093,6 +1188,7 @@ impl App {
                 let next = (self.settings_field as i32 + delta).clamp(0, len as i32 - 1) as usize;
                 self.settings_field = next;
             }
+            Nav::ResourcePacks | Nav::Shaders | Nav::Worlds | Nav::Screenshots => {}
         }
     }
 
@@ -2190,6 +2286,59 @@ impl App {
         });
     }
 
+    pub(crate) fn reload_resource_packs(&self) {
+        let Some(instance) = self.selected_instance().cloned() else { return };
+        let tx = self.engine_tx.clone();
+        let dir = instance.resourcepacks_dir();
+        tokio::spawn(async move {
+            let items = Self::scan_dir_names(&dir).await;
+            let _ = tx.send(EngineEvent::ResourcePacks(items));
+        });
+    }
+
+    pub(crate) fn reload_shaders(&self) {
+        let Some(instance) = self.selected_instance().cloned() else { return };
+        let tx = self.engine_tx.clone();
+        let dir = instance.shaders_dir();
+        tokio::spawn(async move {
+            let items = Self::scan_dir_names(&dir).await;
+            let _ = tx.send(EngineEvent::ShaderPacks(items));
+        });
+    }
+
+    pub(crate) fn reload_worlds(&self) {
+        let Some(instance) = self.selected_instance().cloned() else { return };
+        let tx = self.engine_tx.clone();
+        let dir = instance.saves_dir();
+        tokio::spawn(async move {
+            let items = Self::scan_dir_names(&dir).await;
+            let _ = tx.send(EngineEvent::Worlds(items));
+        });
+    }
+
+    pub(crate) fn reload_screenshots(&self) {
+        let Some(instance) = self.selected_instance().cloned() else { return };
+        let tx = self.engine_tx.clone();
+        let dir = instance.game_dir().join("screenshots");
+        tokio::spawn(async move {
+            let items = Self::scan_dir_names(&dir).await;
+            let _ = tx.send(EngineEvent::Screenshots(items));
+        });
+    }
+
+    async fn scan_dir_names(dir: &std::path::Path) -> Vec<String> {
+        let mut items = Vec::new();
+        if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if let Ok(name) = entry.file_name().into_string() {
+                    items.push(name);
+                }
+            }
+        }
+        items.sort();
+        items
+    }
+
     pub(crate) fn open_mod_search_prompt(&mut self) {
         self.overlay = Some(Overlay::text(
             "Search Mods",
@@ -2451,6 +2600,36 @@ impl App {
             let _ = tx.send(EngineEvent::BrowseImage {
                 url: key,
                 data,
+            });
+        });
+    }
+
+    /// Load a local image file into `local_images` if not already cached.
+    pub(crate) fn load_local_image(&mut self, path: &str) {
+        if self.local_images.contains_key(path) {
+            return;
+        }
+        let key = path.to_string();
+        let path_buf = std::path::PathBuf::from(path);
+        let tx = self.engine_tx.clone();
+        let key_clone = key.clone();
+        tokio::spawn(async move {
+            let result = tokio::fs::read(&path_buf).await;
+            let img = result.ok().and_then(|data| {
+                mc_core::img::decode_image(&data).ok().or_else(|| {
+                    image::load_from_memory(&data).ok().map(|dynamic| {
+                        let rgba = dynamic.to_rgba8();
+                        mc_core::img::RgbaImage {
+                            width: rgba.width(),
+                            height: rgba.height(),
+                            pixels: rgba.into_raw(),
+                        }
+                    })
+                })
+            });
+            let _ = tx.send(EngineEvent::LocalImage {
+                path: key_clone,
+                img,
             });
         });
     }
@@ -3258,6 +3437,10 @@ impl App {
             Nav::Versions => self.render_versions(frame, content),
             Nav::Jvm => self.render_instance_settings(frame, content),
             Nav::Logs => self.render_logs(frame, content),
+            Nav::ResourcePacks => self.render_resource_packs(frame, content),
+            Nav::Shaders => self.render_shaders(frame, content),
+            Nav::Worlds => self.render_worlds(frame, content),
+            Nav::Screenshots => self.render_screenshots(frame, content),
         }
 
         self.render_footer(frame, chunks[2]);
@@ -3998,6 +4181,25 @@ fn footer_hints(nav: Nav) -> &'static [(&'static str, &'static str)] {
             ("j/k", "move"),
             ("s", "save"),
             ("J", "detect Java"),
+        ],
+        Nav::ResourcePacks => &[
+            ("Space", "toggle"),
+            ("d", "delete"),
+            ("Enter", "open folder"),
+        ],
+        Nav::Shaders => &[
+            ("Space", "toggle"),
+            ("d", "delete"),
+            ("Enter", "open folder"),
+        ],
+        Nav::Worlds => &[
+            ("Enter", "open folder"),
+            ("d", "delete"),
+        ],
+        Nav::Screenshots => &[
+            ("Enter", "view"),
+            ("d", "delete"),
+            ("←/→", "prev/next"),
         ],
     }
 }

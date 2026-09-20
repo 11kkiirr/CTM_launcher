@@ -190,12 +190,29 @@ pub async fn resolve_version(paths: &Paths, id: &str) -> Result<VersionDetails> 
         }
     }
 
+    // The root parent's id is used to locate the client jar on disk.
+    // Chain is built child→parent, so last() is the root (vanilla).
+    let root_id = chain.last().map(|d| d.id.clone());
+
     // Fold from the root parent down to the requested child.
     chain.reverse();
     let mut merged = chain.remove(0);
     for child in chain {
         merge_versions(&mut merged, child);
     }
+
+    // Mojang omits `downloads.client.path` for newer versions.  After merge
+    // the id is the loader id (e.g. fabric-loader-0.19.5-26.3) but the jar
+    // lives under the root parent's directory (26.3/26.3.jar).  Infer the
+    // path when it is missing.
+    if let Some(ref mut client) = merged.downloads.client {
+        if client.path.is_none() {
+            if let Some(ref root) = root_id {
+                client.path = Some(format!("{root}/{root}.jar"));
+            }
+        }
+    }
+
     Ok(merged)
 }
 

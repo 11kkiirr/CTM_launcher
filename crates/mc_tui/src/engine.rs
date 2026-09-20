@@ -84,6 +84,19 @@ pub enum EngineEvent {
     Toast(String),
     /// An error message for a toast.
     Error(String),
+    /// Resource packs found in the instance.
+    ResourcePacks(Vec<String>),
+    /// Shader packs found in the instance.
+    ShaderPacks(Vec<String>),
+    /// Worlds found in the instance.
+    Worlds(Vec<String>),
+    /// Screenshots found in the instance.
+    Screenshots(Vec<String>),
+    /// A local image was loaded from disk.
+    LocalImage {
+        path: String,
+        img: Option<mc_core::img::RgbaImage>,
+    },
 }
 
 /// Convenience alias for the sender side.

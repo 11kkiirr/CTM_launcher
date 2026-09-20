@@ -247,12 +247,25 @@ pub fn client_jar_path(paths: &Paths, details: &VersionDetails) -> Option<PathBu
             }
         }
     }
-    // Fallback: `<versions>/<id>/<id>.jar`.
+    // Fallback 1: `<versions>/<id>/<id>.jar`.
     let candidate = paths
         .versions_dir()
         .join(&details.id)
         .join(format!("{}.jar", details.id));
-    candidate.exists().then_some(candidate)
+    if candidate.exists() {
+        return Some(candidate);
+    }
+    // Fallback 2: scan for any .jar in the version directory
+    let dir = paths.versions_dir().join(&details.id);
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) == Some("jar") {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

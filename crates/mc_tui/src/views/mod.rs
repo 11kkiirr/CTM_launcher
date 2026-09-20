@@ -6,9 +6,13 @@ pub mod instances;
 pub mod logs;
 pub mod modpacks;
 pub mod mods;
+pub mod resourcepacks;
+pub mod screenshots;
 pub mod settings;
+pub mod shaders;
 pub mod tiles;
 pub mod versions;
+pub mod worlds;
 
 use ratatui::layout::Rect;
 use ratatui::style::Style;
