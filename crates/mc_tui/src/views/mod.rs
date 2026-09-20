@@ -2,7 +2,7 @@
 
 pub mod accounts;
 pub mod browse;
-pub mod instances;
+pub mod instance_settings;
 pub mod logs;
 pub mod modpacks;
 pub mod mods;
@@ -20,16 +20,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, ListState, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, ButtonId, HitAction};
+use crate::app::{rect_contains, App, ButtonId, HitAction};
 use crate::theme::Theme;
-
-/// Whether `rect` contains the mouse position.
-pub(crate) fn rect_contains(rect: Rect, (x, y): (u16, u16)) -> bool {
-    x >= rect.x
-        && x < rect.x.saturating_add(rect.width)
-        && y >= rect.y
-        && y < rect.y.saturating_add(rect.height)
-}
 
 /// The padded content rectangle of a card (1 column and 1 row of breathing room).
 pub(crate) fn inner(area: Rect) -> Rect {
