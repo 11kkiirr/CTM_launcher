@@ -27,15 +27,15 @@ impl App {
         buttons_row(
             self,
             frame,
-            chunks[0].x,
+            chunks[0].x + 1,
             chunks[0].y,
             area.x + area.width,
             &[
-                ("Offline", ButtonId::OfflineLogin),
-                ("Microsoft", ButtonId::MicrosoftLogin),
-                ("Set Active", ButtonId::SetActiveAccount),
-                ("Skin", ButtonId::ChangeSkin),
-                ("Remove", ButtonId::DeleteAccount),
+                ("Offline", "n", ButtonId::OfflineLogin),
+                ("Microsoft", "m", ButtonId::MicrosoftLogin),
+                ("Set Active", "Enter", ButtonId::SetActiveAccount),
+                ("Skin", "c", ButtonId::ChangeSkin),
+                ("Remove", "d", ButtonId::DeleteAccount),
             ],
         );
 

@@ -27,13 +27,13 @@ impl App {
         buttons_row(
             self,
             frame,
-            chunks[0].x,
+            chunks[0].x + 1,
             chunks[0].y,
             area.x + area.width,
             &[
-                ("Edit", ButtonId::EditSettings),
-                ("Save", ButtonId::SaveSettings),
-                ("Detect Java", ButtonId::DetectJava),
+                ("Edit", "e", ButtonId::EditSettings),
+                ("Save", "s", ButtonId::SaveSettings),
+                ("Detect Java", "J", ButtonId::DetectJava),
             ],
         );
 

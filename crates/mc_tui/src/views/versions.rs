@@ -30,12 +30,12 @@ impl App {
         buttons_row(
             self,
             frame,
-            chunks[0].x,
+            chunks[0].x + 1,
             chunks[0].y,
             area.x + area.width,
             &[
-                ("Change Version", ButtonId::ChangeVersion),
-                ("Reinstall", ButtonId::InstallInstance),
+                ("Change Version", "c", ButtonId::ChangeVersion),
+                ("Reinstall", "r", ButtonId::InstallInstance),
             ],
         );
 

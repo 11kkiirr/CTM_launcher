@@ -310,6 +310,7 @@ pub struct App {
     /// Sidebar rectangle from the last render (for wheel routing).
     pub sidebar_area: Rect,
 
+    pub tick: u64,
     pub status: String,
     pub toast: Option<Toast>,
     pub progress: Option<(Option<f64>, String)>,
@@ -399,6 +400,7 @@ impl App {
             tile_scroll: 0,
             tile_columns: 2,
             sidebar_area: Rect::default(),
+            tick: 0,
             status: "Ready".to_string(),
             toast: None,
             progress: None,
@@ -497,9 +499,8 @@ impl App {
                     }
                 }
                 _ = ticker.tick() => {
-                    if self.on_tick() {
-                        needs_draw = true;
-                    }
+                    self.on_tick();
+                    needs_draw = true;
                 }
             }
         }
@@ -524,16 +525,16 @@ impl App {
         }
     }
 
-    /// Periodic work; returns whether the UI needs a redraw.
+    /// Periodic work; always triggers a redraw for spinner animations.
     pub(crate) fn on_tick(&mut self) -> bool {
-        let mut changed = self.drain_process();
+        self.tick = self.tick.wrapping_add(1);
+        self.drain_process();
         if let Some(toast) = &self.toast {
             if toast.at.elapsed() > Duration::from_secs(6) {
                 self.toast = None;
-                changed = true;
             }
         }
-        changed
+        true
     }
 
     /// Drain process output; returns whether anything changed.
@@ -3271,41 +3272,56 @@ impl App {
         let focused = self.focus == Focus::Sidebar;
         let inner = crate::views::card(self, frame, area, focused);
 
+        // 1-char left indent for all sidebar content.
+        let content = Rect {
+            x: inner.x + 1,
+            y: inner.y,
+            width: inner.width.saturating_sub(1),
+            height: inner.height,
+        };
+
         let menu = Nav::menu();
         let nav_height = menu.len() as u16 * NAV_BUTTON_HEIGHT;
-        let build_height = if self.selected_instance().is_some() {
-            7
-        } else {
-            2
-        };
-        // Navigation at the top, then a flexible spacer, then the build info
-        // pinned strictly to the bottom of the sidebar.
+        let has_build = self.selected_instance().is_some();
+        let build_detail_height = if has_build { 5 } else { 0 };
+
+        // Layout: build name (1) → "Navigation" (1) → nav buttons → spacer → build details
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
-                Constraint::Length(nav_height),
-                Constraint::Min(1),
-                Constraint::Length(1),
-                Constraint::Length(build_height),
+                Constraint::Length(if has_build { 1 } else { 0 }), // build name
+                Constraint::Length(1),                             // "Navigation" header
+                Constraint::Length(nav_height),                   // nav buttons
+                Constraint::Min(1),                               // spacer
+                Constraint::Length(1),                            // "Build Info" header
+                Constraint::Length(build_detail_height),          // build details
             ])
-            .split(inner);
+            .split(content);
 
-        frame.render_widget(
-            Paragraph::new(Span::styled("Navigation", self.theme.card_comment()))
-                .style(self.theme.card()),
-            chunks[0],
-        );
+        // Build name pinned above navigation.
+        if has_build {
+            if let Some(instance) = self.selected_instance() {
+                let name = truncate_str(instance.name(), chunks[0].width as usize);
+                frame.render_widget(
+                    Paragraph::new(Span::styled(name, self.theme.header()))
+                        .alignment(ratatui::layout::Alignment::Center)
+                        .style(self.theme.card()),
+                    chunks[0],
+                );
+            }
+        }
+
+        // Empty space where "Navigation" was.
 
         for (idx, nav) in menu.iter().enumerate() {
-            let y = chunks[1].y + idx as u16 * NAV_BUTTON_HEIGHT;
-            if y + NAV_BUTTON_HEIGHT > chunks[1].y + chunks[1].height {
+            let y = chunks[2].y + idx as u16 * NAV_BUTTON_HEIGHT;
+            if y + NAV_BUTTON_HEIGHT > chunks[2].y + chunks[2].height {
                 break;
             }
             let rect = Rect {
-                x: chunks[1].x,
+                x: chunks[2].x,
                 y,
-                width: chunks[1].width,
+                width: chunks[2].width,
                 height: NAV_BUTTON_HEIGHT,
             };
             self.render_nav_button(frame, rect, *nav, idx + 1);
@@ -3314,9 +3330,9 @@ impl App {
         frame.render_widget(
             Paragraph::new(Span::styled("Build Info", self.theme.card_comment()))
                 .style(self.theme.card()),
-            chunks[3],
+            chunks[4],
         );
-        self.render_build_info(frame, chunks[4]);
+        self.render_build_info(frame, chunks[5]);
     }
 
     /// A chunky, padded navigation block button with an index number. The
@@ -3329,9 +3345,26 @@ impl App {
         } else {
             self.theme.panel_alt
         };
-        // Flat block, no border. Hover uses the same dark-green fill as the
-        // active entry so the interaction is obvious.
         frame.render_widget(Block::default().style(Style::default().bg(bg)), rect);
+
+        // Left accent bar: green for active, muted gray for inactive.
+        let bar_style = if selected {
+            Style::default().fg(self.theme.green).bg(bg)
+        } else {
+            Style::default().fg(self.theme.muted).bg(bg)
+        };
+        if rect.height > 0 {
+            let bar_rect = Rect {
+                x: rect.x,
+                y: rect.y,
+                width: 1,
+                height: rect.height,
+            };
+            let bar_lines: Vec<Line> = (0..rect.height)
+                .map(|_| Line::from(Span::styled("▎", bar_style)))
+                .collect();
+            frame.render_widget(Paragraph::new(bar_lines), bar_rect);
+        }
 
         let surface = Style::default().bg(bg);
         let num_style = if selected {
@@ -3349,9 +3382,9 @@ impl App {
             Style::default().fg(self.theme.fg).bg(bg)
         };
         let row = Rect {
-            x: rect.x,
+            x: rect.x + 1,
             y: rect.y + rect.height / 2,
-            width: rect.width,
+            width: rect.width.saturating_sub(1),
             height: 1,
         };
         if rect.height > 0 {
@@ -3378,12 +3411,7 @@ impl App {
         };
 
         let jvm = &instance.metadata.jvm;
-        let width = area.width as usize;
         let lines = vec![
-            Line::from(Span::styled(
-                truncate_str(instance.name(), width),
-                self.theme.header(),
-            )),
             info_line("Version", &instance.metadata.game_version, &self.theme),
             info_line("Loader", instance.metadata.loader.label(), &self.theme),
             info_line("Memory", &format!("{} MB", jvm.max_memory_mb), &self.theme),
@@ -3526,7 +3554,13 @@ impl App {
             } else {
                 (self.theme.dim(), self.status.clone())
             };
-            let marker = "● ";
+            let busy = self.progress.is_some();
+            let marker = if busy {
+                let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+                format!("{} ", frames[(self.tick as usize) % frames.len()])
+            } else {
+                "● ".to_string()
+            };
             let rect = Rect {
                 x: area.x,
                 y: area.y,

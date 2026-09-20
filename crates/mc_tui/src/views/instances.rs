@@ -29,10 +29,10 @@ impl App {
         buttons_row(
             self,
             frame,
-            chunks[0].x,
+            chunks[0].x + 1,
             chunks[0].y,
             area.x + area.width,
-            &[("Edit Settings", ButtonId::EditInstance)],
+            &[("Edit Settings", "e", ButtonId::EditInstance)],
         );
 
         let jvm = &instance.metadata.jvm;

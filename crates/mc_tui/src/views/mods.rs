@@ -27,15 +27,15 @@ impl App {
         buttons_row(
             self,
             frame,
-            chunks[0].x,
+            chunks[0].x + 1,
             chunks[0].y,
             area.x + area.width,
             &[
-                ("Toggle", ButtonId::ToggleMod),
-                ("Delete", ButtonId::DeleteMod),
-                ("Store", ButtonId::BrowseMods),
-                ("Search", ButtonId::ModSearch),
-                ("Updates", ButtonId::UpdateMods),
+                ("Toggle", "Space", ButtonId::ToggleMod),
+                ("Delete", "d", ButtonId::DeleteMod),
+                ("Store", "s", ButtonId::BrowseMods),
+                ("Search", "/", ButtonId::ModSearch),
+                ("Updates", "u", ButtonId::UpdateMods),
             ],
         );
 

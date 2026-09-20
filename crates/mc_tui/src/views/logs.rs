@@ -43,14 +43,14 @@ impl App {
         tab_row(
             self,
             frame,
-            chunks[0].x,
+            chunks[0].x + 1,
             chunks[0].y,
             area.x + area.width,
             &[
-                (pause_label, ButtonId::PauseLogs, self.log_buffer.paused),
-                (follow_label, ButtonId::FollowLogs, self.log_follow),
-                ("Clear", ButtonId::ClearLogs, false),
-                ("Analyze Crash", ButtonId::AnalyzeCrash, false),
+                (pause_label, "p", ButtonId::PauseLogs, self.log_buffer.paused),
+                (follow_label, "f", ButtonId::FollowLogs, self.log_follow),
+                ("Clear", "c", ButtonId::ClearLogs, false),
+                ("Analyze Crash", "a", ButtonId::AnalyzeCrash, false),
             ],
         );
 

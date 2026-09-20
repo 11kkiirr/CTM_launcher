@@ -110,18 +110,17 @@ pub(crate) fn jump(state: &mut ListState, len: usize, to_end: bool) {
 }
 
 /// Render a horizontal row of clickable action buttons and register their
-/// hitboxes. Buttons are borderless `[ Label ]` chips in the accent colour.
+/// hitboxes. Flat text chips on a dark background, matching pill_row style.
 pub(crate) fn buttons_row(
     app: &mut App,
     frame: &mut Frame,
     mut x: u16,
     y: u16,
     max_width: u16,
-    buttons: &[(&str, ButtonId)],
+    buttons: &[(&str, &str, ButtonId)],
 ) {
-    for (label, id) in buttons {
-        let text = format!("[ {label} ]");
-        let width = text.chars().count() as u16;
+    for (label, key, id) in buttons {
+        let width = label.chars().count() as u16 + key.chars().count() as u16 + 4;
         if x + width > max_width {
             break;
         }
@@ -131,12 +130,23 @@ pub(crate) fn buttons_row(
             width,
             height: 1,
         };
-        let style = if app.is_hovered(rect) {
-            app.theme.hover()
+        let hovered = app.is_hovered(rect);
+        let bg = if hovered {
+            app.theme.selection_bg
         } else {
-            app.theme.accent()
+            app.theme.panel_alt
         };
-        frame.render_widget(Paragraph::new(Span::styled(text, style)), rect);
+        let label_style = if hovered {
+            app.theme.accent_bright()
+        } else {
+            Style::default().fg(app.theme.fg)
+        };
+        let line = Line::from(vec![
+            Span::styled(format!(" {label}  "), label_style),
+            Span::styled(key.to_string(), app.theme.accent()),
+            Span::styled(" ", app.theme.comment_style()),
+        ]);
+        frame.render_widget(Paragraph::new(line).style(Style::default().bg(bg)), rect);
         app.hitboxes.push(crate::app::Hitbox {
             rect,
             action: HitAction::Button(*id),
@@ -152,11 +162,10 @@ pub(crate) fn tab_row(
     mut x: u16,
     y: u16,
     max_width: u16,
-    tabs: &[(&str, ButtonId, bool)],
+    tabs: &[(&str, &str, ButtonId, bool)],
 ) {
-    for (label, id, active) in tabs {
-        let text = format!("[ {label} ]");
-        let width = text.chars().count() as u16;
+    for (label, key, id, active) in tabs {
+        let width = label.chars().count() as u16 + key.chars().count() as u16 + 4;
         if x + width > max_width {
             break;
         }
@@ -166,14 +175,25 @@ pub(crate) fn tab_row(
             width,
             height: 1,
         };
-        let style = if *active {
-            app.theme.accent_bright()
-        } else if app.is_hovered(rect) {
-            app.theme.hover()
+        let hovered = app.is_hovered(rect);
+        let bg = if hovered {
+            app.theme.selection_bg
         } else {
-            app.theme.dim()
+            app.theme.panel_alt
         };
-        frame.render_widget(Paragraph::new(Span::styled(text, style)), rect);
+        let label_style = if *active {
+            app.theme.accent_bright()
+        } else if hovered {
+            app.theme.accent()
+        } else {
+            Style::default().fg(app.theme.muted)
+        };
+        let line = Line::from(vec![
+            Span::styled(format!(" {label}  "), label_style),
+            Span::styled(key.to_string(), app.theme.accent()),
+            Span::styled(" ", app.theme.comment_style()),
+        ]);
+        frame.render_widget(Paragraph::new(line).style(Style::default().bg(bg)), rect);
         app.hitboxes.push(crate::app::Hitbox {
             rect,
             action: HitAction::Button(*id),

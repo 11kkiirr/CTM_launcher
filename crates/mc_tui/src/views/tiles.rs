@@ -35,7 +35,7 @@ impl App {
         pill_row(
             self,
             frame,
-            rows[0].x,
+            rows[0].x + 2,
             rows[0].y,
             area.x + area.width,
             &[
@@ -136,23 +136,22 @@ impl App {
             self.theme.panel_alt
         };
         let surface = Style::default().bg(bg);
-        // Flat block, no border.
         frame.render_widget(Block::default().style(surface), rect);
-        if selected {
-            crate::views::accent_bar(frame, rect, &self.theme);
-        }
-        if rect.width < 6 || rect.height < CONTENT_H {
+        // Left accent bar on every tile.
+        crate::views::accent_bar(frame, rect, &self.theme);
+        // 2-char left indent after the bar.
+        let pad_left: u16 = 3;
+        if rect.width < pad_left + 3 || rect.height < CONTENT_H {
             return;
         }
 
         let top = rect.y + rect.height.saturating_sub(CONTENT_H) / 2;
-        let cx = rect.x;
-        let cw = rect.width;
+        let cw = rect.width - pad_left;
 
         // 1) Centered logo / short-name box. The outline stays.
         let short = short_name(instance.name());
         let box_w = (short.chars().count() as u16 + 4).max(6).min(cw);
-        let box_x = cx + cw.saturating_sub(box_w) / 2;
+        let box_x = rect.x + rect.width.saturating_sub(box_w) / 2;
         let box_rect = Rect {
             x: box_x,
             y: top,
@@ -200,9 +199,9 @@ impl App {
             .alignment(Alignment::Center)
             .style(surface),
             Rect {
-                x: cx,
+                x: rect.x,
                 y: top + 3,
-                width: cw,
+                width: rect.width,
                 height: 1,
             },
         );
@@ -221,9 +220,9 @@ impl App {
             .alignment(Alignment::Center)
             .style(surface),
             Rect {
-                x: cx,
+                x: rect.x,
                 y: top + 4,
-                width: cw,
+                width: rect.width,
                 height: 1,
             },
         );
@@ -241,9 +240,9 @@ impl App {
             .alignment(Alignment::Center)
             .style(surface),
             Rect {
-                x: cx,
+                x: rect.x,
                 y: top + 5,
-                width: cw,
+                width: rect.width,
                 height: 1,
             },
         );
@@ -256,13 +255,13 @@ impl App {
             self.theme.panel_alt
         };
         let surface = Style::default().bg(bg);
-        // Flat block, no border.
         frame.render_widget(Block::default().style(surface), rect);
+        crate::views::accent_bar(frame, rect, &self.theme);
 
         let style = if hovered {
             self.theme.accent_bright()
         } else {
-            self.theme.card_dim()
+            Style::default().fg(self.theme.muted)
         };
         let top = rect.height.saturating_sub(2) / 2;
         let mut lines: Vec<Line> = (0..top).map(|_| Line::from("")).collect();
@@ -270,8 +269,7 @@ impl App {
         lines.push(Line::from(Span::styled("New Build", style)));
         frame.render_widget(
             Paragraph::new(lines)
-                .alignment(Alignment::Center)
-                .style(surface),
+                .alignment(Alignment::Center),
             rect,
         );
     }

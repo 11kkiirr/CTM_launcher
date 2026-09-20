@@ -28,14 +28,14 @@ impl App {
         buttons_row(
             self,
             frame,
-            chunks[0].x,
+            chunks[0].x + 1,
             chunks[0].y,
             area.x + area.width,
             &[
-                ("Search", ButtonId::Search),
-                ("Store", ButtonId::BrowseMods),
-                ("Import .mrpack", ButtonId::ImportModpack),
-                ("Install", ButtonId::InstallProject),
+                ("Search", "/", ButtonId::Search),
+                ("Store", "s", ButtonId::BrowseMods),
+                ("Import .mrpack", "m", ButtonId::ImportModpack),
+                ("Install", "i", ButtonId::InstallProject),
             ],
         );
 
