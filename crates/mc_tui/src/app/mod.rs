@@ -162,7 +162,6 @@ pub enum HitAction {
     SearchRow(usize),
     ProjectVersionRow(usize),
     ModRow(usize),
-    ModSearchRow(usize),
     ModsSearchBar,
     AccountRow(usize),
     SettingsRow(usize),
@@ -212,7 +211,6 @@ pub enum ButtonId {
     InstallProject,
     ToggleMod,
     DeleteMod,
-    ModSearch,
     UpdateMods,
     BrowseMods,
     ShadersBrowse,
@@ -229,6 +227,7 @@ pub enum ButtonId {
     SaveSettings,
     EditSettings,
     DetectJava,
+    OpenAsciiBgFolder,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -295,10 +294,6 @@ pub struct App {
     pub project_versions: Vec<Version>,
     pub project_state: ListState,
 
-    pub mod_search_query: String,
-    pub mod_search_results: Vec<SearchHit>,
-    pub mod_search_state: ListState,
-    pub mods_focus_search: bool,
     /// Inline search bar query for filtering installed mods.
     pub mods_search_query: String,
     /// Whether the installed mods search bar is focused.
@@ -391,10 +386,6 @@ impl App {
             selected_project: None,
             project_versions: Vec::new(),
             project_state: ListState::default(),
-            mod_search_query: String::new(),
-            mod_search_results: Vec::new(),
-            mod_search_state: ListState::default(),
-            mods_focus_search: false,
             mods_search_query: String::new(),
             mods_search_focused: false,
             installed_mods: Vec::new(),
@@ -599,7 +590,7 @@ pub(crate) fn split_args(input: &str) -> Vec<String> {
 }
 
 pub(crate) fn settings_field_count() -> usize {
-    7
+    9
 }
 
 pub(crate) fn truncate_str(input: &str, max: usize) -> String {

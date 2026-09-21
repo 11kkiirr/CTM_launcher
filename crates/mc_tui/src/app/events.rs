@@ -75,16 +75,6 @@ impl App {
                     Some(0)
                 });
             }
-            EngineEvent::ModSearchResults(results) => {
-                self.mod_search_results = results.hits;
-                self.mods_focus_search = true;
-                self.mod_search_state
-                    .select(if self.mod_search_results.is_empty() {
-                        None
-                    } else {
-                        Some(0)
-                    });
-            }
             EngineEvent::BrowseResults(results) => {
                 self.browse.total = results.total_hits;
                 self.browse.results = results.hits;

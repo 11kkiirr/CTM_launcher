@@ -222,6 +222,12 @@ pub fn candidate_version_ids(instance: &Instance) -> Vec<String> {
         (Forge, Some(v)) => vec![format!("{game}-forge-{v}")],
         (NeoForge, Some(v)) if game == "1.20.1" => vec![format!("{game}-forge-{v}")],
         (NeoForge, Some(v)) => vec![format!("neoforge-{v}"), format!("{game}-neoforge-{v}")],
+        // Non-vanilla loader with no version recorded — return the bare game
+        // version *and* let the caller fall through to the directory scan so the
+        // actual installed loader version is discovered.
+        (loader, None) if !matches!(loader, Vanilla | Paper) => {
+            vec![game.clone()]
+        }
         (_, None) => vec![game.clone()],
     }
 }
@@ -241,12 +247,27 @@ pub fn version_json_path(paths: &Paths, id: &str) -> PathBuf {
 
 /// Locate an installed version for `instance`, or `None` when not installed.
 pub async fn installed_version_id(paths: &Paths, instance: &Instance) -> Option<String> {
+    let use_scan = !matches!(
+        instance.metadata.loader,
+        crate::instance::LoaderType::Vanilla | crate::instance::LoaderType::Paper
+    );
+    // For non-vanilla loaders, try the directory scan first so we pick up the
+    // actual loader version instead of the vanilla parent.
+    if use_scan {
+        if let Some(id) = scan_installed_version(paths, instance).await {
+            return Some(id);
+        }
+    }
     for id in candidate_version_ids(instance) {
         if version_json_path(paths, &id).exists() {
             return Some(id);
         }
     }
-    scan_installed_version(paths, instance).await
+    if !use_scan {
+        scan_installed_version(paths, instance).await
+    } else {
+        None
+    }
 }
 
 /// Scan the versions directory for a document that inherits the instance's game

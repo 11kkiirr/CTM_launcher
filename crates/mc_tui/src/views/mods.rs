@@ -48,32 +48,28 @@ impl App {
                 Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Min(5),
-                Constraint::Length(1),
-                Constraint::Length(10),
             ])
             .split(area);
 
         buttons_row(
             self,
             frame,
-            chunks[0].x + 1,
+            chunks[0].x + 2,
             chunks[0].y,
             area.x + area.width,
             &[
                 ("Toggle", "Space", ButtonId::ToggleMod),
                 ("Delete", "d", ButtonId::DeleteMod),
                 ("Browse", "s", ButtonId::BrowseMods),
-                ("Search", "/", ButtonId::ModSearch),
                 ("Updates", "u", ButtonId::UpdateMods),
             ],
         );
 
         self.render_installed_mods(frame, chunks[2]);
-        self.render_mod_search(frame, chunks[4]);
     }
 
     fn render_installed_mods(&mut self, frame: &mut Frame, area: Rect) {
-        let focused = self.focus == Focus::Content && !self.mods_focus_search;
+        let focused = self.focus == Focus::Content;
         let inner = card(self, frame, area, focused);
         if inner.height == 0 {
             return;
@@ -345,93 +341,11 @@ impl App {
         );
     }
 
-    fn render_mod_search(&mut self, frame: &mut Frame, area: Rect) {
-        let focused = self.focus == Focus::Content && self.mods_focus_search;
-        let inner = card(self, frame, area, focused);
-        if inner.height == 0 {
-            return;
-        }
-
-        let suffix = if self.mod_search_query.is_empty() {
-            "press 's' to search".to_string()
-        } else {
-            format!(
-                "{}  ·  {} results",
-                self.mod_search_query,
-                self.mod_search_results.len()
-            )
-        };
-        let title = Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: 1,
-        };
-        frame.render_widget(
-            Paragraph::new(section_title("Modrinth", &suffix, &self.theme))
-                .style(self.theme.card()),
-            title,
-        );
-
-        let list_area = Rect {
-            x: inner.x,
-            y: inner.y + 1,
-            width: inner.width,
-            height: inner.height.saturating_sub(1),
-        };
-
-        let selected = self.mod_search_state.selected();
-        let hovered = hovered_index(
-            self,
-            list_area,
-            self.mod_search_state.offset(),
-            self.mod_search_results.len(),
-        );
-        let items: Vec<ListItem> = self
-            .mod_search_results
-            .iter()
-            .enumerate()
-            .map(|(idx, hit)| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(hit.title.clone(), self.theme.card()),
-                    Span::styled(format!("  by {}", hit.author), self.theme.card_dim()),
-                    Span::styled(format!("  \u{2913} {}", hit.downloads), self.theme.accent()),
-                ]))
-                .style(row_style(self, idx, selected, hovered))
-            })
-            .collect();
-
-        let list = List::new(items)
-            .highlight_symbol("\u{25B8} ")
-            .highlight_style(self.theme.row_selected());
-        frame.render_stateful_widget(list, list_area, &mut self.mod_search_state);
-        register_rows(
-            &mut self.hitboxes,
-            &self.mod_search_state,
-            list_area,
-            self.mod_search_results.len(),
-            HitAction::ModSearchRow,
-        );
-        if self.mod_search_results.is_empty() {
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    "Press 's' to browse Modrinth, then Enter to install.",
-                    self.theme.card_dim(),
-                ))
-                .style(self.theme.card()),
-                list_area,
-            );
-        }
-    }
-
     pub(crate) fn key_mods(&mut self, key: KeyEvent) {
         // When the search bar is focused, handle input directly.
         if self.mods_search_focused {
             match key.code {
-                KeyCode::Esc => {
-                    self.mods_search_focused = false;
-                }
-                KeyCode::Enter => {
+                KeyCode::Esc | KeyCode::Enter => {
                     self.mods_search_focused = false;
                 }
                 KeyCode::Backspace => {
@@ -446,34 +360,27 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char('t') => self.mods_focus_search = !self.mods_focus_search,
-            KeyCode::Char('s') => self.open_mod_search_prompt(),
+            KeyCode::Char('t') => self.mods_search_focused = !self.mods_search_focused,
+            KeyCode::Char('s') => {
+                self.browse.kind = crate::views::browse::BrowseKind::Mods;
+                self.browse.save_cache();
+                self.browse.load_cache(crate::views::browse::BrowseKind::Mods);
+                self.open_nav(crate::app::Nav::Browse);
+            }
             KeyCode::Char('u') => self.check_mod_updates(),
             KeyCode::Char('r') => self.reload_mods(),
             _ => {}
         }
 
-        if self.mods_focus_search {
-            let len = self.mod_search_results.len();
-            match key.code {
-                KeyCode::Down | KeyCode::Char('j') => move_sel(&mut self.mod_search_state, len, 1),
-                KeyCode::Up | KeyCode::Char('k') => move_sel(&mut self.mod_search_state, len, -1),
-                KeyCode::Char('g') => jump(&mut self.mod_search_state, len, false),
-                KeyCode::Char('G') => jump(&mut self.mod_search_state, len, true),
-                KeyCode::Enter | KeyCode::Char('i') => self.install_selected_mod_search(),
-                _ => {}
-            }
-        } else {
-            let len = self.installed_mods.len();
-            match key.code {
-                KeyCode::Down | KeyCode::Char('j') => move_sel(&mut self.mods_state, len, 1),
-                KeyCode::Up | KeyCode::Char('k') => move_sel(&mut self.mods_state, len, -1),
-                KeyCode::Char('g') => jump(&mut self.mods_state, len, false),
-                KeyCode::Char('G') => jump(&mut self.mods_state, len, true),
-                KeyCode::Char(' ') | KeyCode::Enter => self.toggle_selected_mod(),
-                KeyCode::Char('d') => self.confirm_delete_mod(),
-                _ => {}
-            }
+        let len = self.installed_mods.len();
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => move_sel(&mut self.mods_state, len, 1),
+            KeyCode::Up | KeyCode::Char('k') => move_sel(&mut self.mods_state, len, -1),
+            KeyCode::Char('g') => jump(&mut self.mods_state, len, false),
+            KeyCode::Char('G') => jump(&mut self.mods_state, len, true),
+            KeyCode::Char(' ') | KeyCode::Enter => self.toggle_selected_mod(),
+            KeyCode::Char('d') => self.confirm_delete_mod(),
+            _ => {}
         }
     }
 }

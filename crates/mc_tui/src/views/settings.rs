@@ -9,7 +9,7 @@ use ratatui::Frame;
 use crate::app::{App, ButtonId, Focus, HitAction};
 use crate::views::{buttons_row, card, section_title};
 
-const FIELD_COUNT: usize = 7;
+const FIELD_COUNT: usize = 8;
 
 impl App {
     pub(crate) fn render_settings(&mut self, frame: &mut Frame, area: Rect) {
@@ -27,13 +27,14 @@ impl App {
         buttons_row(
             self,
             frame,
-            chunks[0].x + 1,
+            chunks[0].x + 2,
             chunks[0].y,
             area.x + area.width,
             &[
                 ("Edit", "e", ButtonId::EditSettings),
                 ("Save", "s", ButtonId::SaveSettings),
                 ("Detect Java", "J", ButtonId::DetectJava),
+                ("ASCII Folder", "a", ButtonId::OpenAsciiBgFolder),
             ],
         );
 
@@ -82,6 +83,7 @@ impl App {
                 "Auto-scroll Logs",
                 if s.log_auto_scroll { "yes" } else { "no" }.to_string(),
             ),
+            ("ASCII Art Anchor", s.ascii_bg_anchor.label().to_string()),
         ];
 
         for (idx, (label, value)) in values.iter().enumerate() {
@@ -179,10 +181,23 @@ impl App {
             }
             KeyCode::Enter => self.open_settings_form(),
             KeyCode::Char(' ') => self.toggle_setting(self.settings_field),
-            KeyCode::Left => self.cycle_setting_gc(false),
-            KeyCode::Right => self.cycle_setting_gc(true),
+            KeyCode::Left => {
+                if self.settings_field == 3 {
+                    self.cycle_setting_gc(false);
+                } else if self.settings_field == 7 {
+                    self.cycle_ascii_bg_anchor(false);
+                }
+            }
+            KeyCode::Right => {
+                if self.settings_field == 3 {
+                    self.cycle_setting_gc(true);
+                } else if self.settings_field == 7 {
+                    self.cycle_ascii_bg_anchor(true);
+                }
+            }
             KeyCode::Char('s') => self.save_settings(),
             KeyCode::Char('J') => self.spawn_java_discovery(),
+            KeyCode::Char('a') => self.open_ascii_bg_folder(),
             _ => {}
         }
     }

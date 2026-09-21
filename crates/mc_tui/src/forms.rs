@@ -198,7 +198,6 @@ impl Form {
 #[allow(dead_code)]
 pub enum TextAction {
     SearchModrinth,
-    SearchMods,
     BrowseSearch,
     SearchLogs,
     ImportPath,

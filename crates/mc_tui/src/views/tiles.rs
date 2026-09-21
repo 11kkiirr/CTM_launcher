@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, ButtonId, Focus, HitAction};
+use crate::settings::AsciiBgAnchor;
 use crate::views::{pill_row, truncate};
 
 /// Cards are wider than tall, but close to square once cell aspect is taken
@@ -90,6 +91,47 @@ impl App {
         let visible_rows = ((grid.height + GAP_Y) / (TILE_H + GAP_Y)).max(1) as usize;
         self.tile_columns = cols;
         self.ensure_tile_visible(visible_rows);
+
+        // Draw the ASCII-art background behind the tiles.
+        if let Ok(art) = std::fs::read_to_string(self.paths.ascii_bg_file()) {
+            let art = art.trim_end_matches('\n').to_string();
+            if !art.is_empty() {
+                let lines: Vec<&str> = art.split('\n').collect();
+                let art_h = lines.len() as u16;
+                let art_w = lines.iter().map(|l| l.len() as u16).max().unwrap_or(0);
+                let (x_off, y_off) = match self.settings.ascii_bg_anchor {
+                    AsciiBgAnchor::TopLeft => (0, 0),
+                    AsciiBgAnchor::TopRight => (grid.width.saturating_sub(art_w), 0),
+                    AsciiBgAnchor::BottomLeft => (0, grid.height.saturating_sub(art_h)),
+                    AsciiBgAnchor::BottomRight => (
+                        grid.width.saturating_sub(art_w),
+                        grid.height.saturating_sub(art_h),
+                    ),
+                };
+                let dim = Style::default().fg(self.theme.muted);
+                for (i, line) in lines.iter().enumerate() {
+                    let y = grid.y + y_off + i as u16;
+                    if y >= grid.y + grid.height {
+                        break;
+                    }
+                    let x = grid.x + x_off;
+                    let max_w = grid.x + grid.width - x;
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            truncate(line, max_w as usize),
+                            dim,
+                        ))
+                        .style(self.theme.card()),
+                        Rect {
+                            x,
+                            y,
+                            width: line.len().min(max_w.into()) as u16,
+                            height: 1,
+                        },
+                    );
+                }
+            }
+        }
 
         let total = self.instances.len();
         let selected = self.instance_state.selected();

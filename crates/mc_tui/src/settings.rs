@@ -6,6 +6,35 @@ use mc_core::instance::GcPreset;
 use mc_core::util::{read_json_or_default, write_json, Paths};
 use serde::{Deserialize, Serialize};
 
+/// Corner to which the ASCII-art background is anchored.
+#[derive(Debug, Clone, Default, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AsciiBgAnchor {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    #[default]
+    BottomRight,
+}
+
+impl AsciiBgAnchor {
+    pub const ALL: &'static [AsciiBgAnchor] = &[
+        AsciiBgAnchor::TopLeft,
+        AsciiBgAnchor::TopRight,
+        AsciiBgAnchor::BottomLeft,
+        AsciiBgAnchor::BottomRight,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AsciiBgAnchor::TopLeft => "Top-Left",
+            AsciiBgAnchor::TopRight => "Top-Right",
+            AsciiBgAnchor::BottomLeft => "Bottom-Left",
+            AsciiBgAnchor::BottomRight => "Bottom-Right",
+        }
+    }
+}
+
 /// Global defaults applied to newly created instances and the UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LauncherSettings {
@@ -27,6 +56,9 @@ pub struct LauncherSettings {
     /// Whether the console auto-scrolls to the newest line.
     #[serde(default = "default_true")]
     pub log_auto_scroll: bool,
+    /// Which corner the ASCII-art background is anchored to.
+    #[serde(default)]
+    pub ascii_bg_anchor: AsciiBgAnchor,
 }
 
 fn default_min_memory() -> u32 {
@@ -49,6 +81,7 @@ impl Default for LauncherSettings {
             show_progress: true,
             confirm_quit: false,
             log_auto_scroll: true,
+            ascii_bg_anchor: AsciiBgAnchor::BottomRight,
         }
     }
 }

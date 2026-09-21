@@ -698,68 +698,6 @@ pub(crate) fn install_selected_project(&mut self) {
     });
 }
 
-pub(crate) fn install_selected_mod_search(&mut self) {
-    let Some(hit) = self
-        .mod_search_state
-        .selected()
-        .and_then(|idx| self.mod_search_results.get(idx))
-        .cloned()
-    else {
-        self.set_toast("No search result selected", true);
-        return;
-    };
-    let Some(instance) = self.selected_instance().cloned() else {
-        self.set_toast("Select an instance first", true);
-        return;
-    };
-    let modrinth = self.modrinth.clone();
-    let client = self.client.clone();
-    let tx = self.engine_tx.clone();
-    let mods_dir = instance.mods_dir();
-    let game_version = instance.metadata.game_version.clone();
-    let loader = instance.metadata.loader.as_str().to_string();
-    let title = hit.title.clone();
-    self.progress = Some((None, format!("Installing {title}...")));
-
-    tokio::spawn(async move {
-        let result = async {
-            let Some(version) = modrinth
-                .latest_version(&hit.project_id, Some(&game_version), Some(&loader))
-                .await?
-            else {
-                return Err(CoreError::Modrinth(format!(
-                    "no compatible version of {title} for {game_version}/{loader}"
-                )));
-            };
-            install_modrinth_file(
-                &client,
-                &modrinth,
-                &version,
-                &mods_dir,
-                true,
-                Some(&game_version),
-                Some(&loader),
-            )
-            .await
-        }
-        .await;
-
-        let _ = tx.send(EngineEvent::ProgressDone);
-        match result {
-            Ok(files) => {
-                let _ = tx.send(EngineEvent::ModsChanged);
-                let _ = tx.send(EngineEvent::Toast(format!(
-                    "Installed {} file(s) from {title}",
-                    files.len()
-                )));
-            }
-            Err(err) => {
-                let _ = tx.send(EngineEvent::Error(format!("Install failed: {err}")));
-            }
-        }
-    });
-}
-
 pub(crate) fn import_modpack(&mut self, path: PathBuf) {
     if path.as_os_str().is_empty() {
         return;
@@ -868,50 +806,6 @@ async fn scan_dir_names(dir: &std::path::Path) -> Vec<String> {
     }
     items.sort();
     items
-}
-
-pub(crate) fn open_mod_search_prompt(&mut self) {
-    self.overlay = Some(Overlay::text(
-        "Search Mods",
-        "Query: ",
-        TextAction::SearchMods,
-    ));
-}
-
-pub(crate) fn run_mod_search(&mut self, query: String) {
-    self.mod_search_query = query.clone();
-    let Some(instance) = self.selected_instance().cloned() else {
-        self.set_toast("Select an instance first", true);
-        return;
-    };
-    let modrinth = self.modrinth.clone();
-    let tx = self.engine_tx.clone();
-    let loader = instance.metadata.loader.as_str().to_string();
-    let game_version = instance.metadata.game_version.clone();
-    self.progress = Some((None, format!("Searching mods '{query}'...")));
-    tokio::spawn(async move {
-        let result = modrinth
-            .search(
-                &query,
-                Some("mod"),
-                Some(&game_version),
-                Some(&loader),
-                None,
-                30,
-                0,
-                &[],
-            )
-            .await;
-        let _ = tx.send(EngineEvent::ProgressDone);
-        match result {
-            Ok(results) => {
-                let _ = tx.send(EngineEvent::ModSearchResults(results));
-            }
-            Err(err) => {
-                let _ = tx.send(EngineEvent::Error(format!("Search failed: {err}")));
-            }
-        }
-    });
 }
 
 // ---------------------------------------------------------------------
@@ -1646,7 +1540,16 @@ pub(crate) fn save_settings(&mut self) {
 }
 
 pub(crate) fn open_settings_form(&mut self) {
+    use crate::settings::AsciiBgAnchor;
     let s = &self.settings;
+    let anchor_index = AsciiBgAnchor::ALL
+        .iter()
+        .position(|a| *a == s.ascii_bg_anchor)
+        .unwrap_or(0);
+    let anchor_options: Vec<String> = AsciiBgAnchor::ALL
+        .iter()
+        .map(|a| a.label().to_string())
+        .collect();
     let form = Form::new("Launcher Settings", FormAction::EditLauncherSettings)
         .push_text(
             "Java Path",
@@ -1661,11 +1564,13 @@ pub(crate) fn open_settings_form(&mut self) {
         .push_choice("Default GC", gc_options(), gc_index(s.default_gc))
         .push_bool("Show Progress", s.show_progress)
         .push_bool("Confirm Quit", s.confirm_quit)
-        .push_bool("Auto-scroll Logs", s.log_auto_scroll);
+        .push_bool("Auto-scroll Logs", s.log_auto_scroll)
+        .push_choice("ASCII Art Anchor", anchor_options, anchor_index);
     self.overlay = Some(Overlay::Form(form));
 }
 
 pub(crate) fn apply_launcher_settings_form(&mut self, form: &Form) {
+    use crate::settings::AsciiBgAnchor;
     self.settings.java_path = form
         .text_value("Java Path")
         .map(str::trim)
@@ -1679,6 +1584,14 @@ pub(crate) fn apply_launcher_settings_form(&mut self, form: &Form) {
     self.settings.show_progress = form.bool_value("Show Progress").unwrap_or(true);
     self.settings.confirm_quit = form.bool_value("Confirm Quit").unwrap_or(false);
     self.settings.log_auto_scroll = form.bool_value("Auto-scroll Logs").unwrap_or(true);
+    if let Some(anchor_str) = form.choice_value("ASCII Art Anchor") {
+        self.settings.ascii_bg_anchor = match anchor_str {
+            "Top-Left" => AsciiBgAnchor::TopLeft,
+            "Top-Right" => AsciiBgAnchor::TopRight,
+            "Bottom-Left" => AsciiBgAnchor::BottomLeft,
+            _ => AsciiBgAnchor::BottomRight,
+        };
+    }
     self.save_settings_async();
     self.set_toast("Settings saved", false);
 }
@@ -1710,6 +1623,22 @@ pub(crate) fn cycle_setting_gc(&mut self, forward: bool) {
     self.save_settings_async();
 }
 
+pub(crate) fn cycle_ascii_bg_anchor(&mut self, forward: bool) {
+    use crate::settings::AsciiBgAnchor;
+    let options = AsciiBgAnchor::ALL;
+    let current = options
+        .iter()
+        .position(|a| *a == self.settings.ascii_bg_anchor)
+        .unwrap_or(0);
+    let next = if forward {
+        (current + 1) % options.len()
+    } else {
+        (current + options.len() - 1) % options.len()
+    };
+    self.settings.ascii_bg_anchor = options[next];
+    self.save_settings_async();
+}
+
 pub(crate) fn save_settings_async(&self) {
     let settings = self.settings.clone();
     let paths = self.paths.clone();
@@ -1723,6 +1652,40 @@ pub(crate) fn spawn_java_discovery(&self) {
     tokio::spawn(async move {
         let list = java::discover().await;
         let _ = tx.send(EngineEvent::Java(list));
+    });
+}
+
+/// Open the config directory and ensure `ascii_bg.txt` exists inside it.
+pub(crate) fn open_ascii_bg_folder(&self) {
+    let dir = self.paths.config_dir.clone();
+    let file = self.paths.ascii_bg_file();
+    let tx = self.engine_tx.clone();
+    tokio::spawn(async move {
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        if !file.exists() {
+            let sample = concat!(
+                "    /\\_/\\\n",
+                "   ( o.o )\n",
+                "    > ^ <\n",
+            );
+            let _ = tokio::fs::write(&file, sample).await;
+        }
+        // Try platform-specific folder opener.
+        #[cfg(target_os = "linux")]
+        let _ = tokio::process::Command::new("xdg-open")
+            .arg(&dir)
+            .spawn();
+        #[cfg(target_os = "macos")]
+        let _ = tokio::process::Command::new("open")
+            .arg(&dir)
+            .spawn();
+        #[cfg(target_os = "windows")]
+        let _ = tokio::process::Command::new("explorer")
+            .arg(&dir)
+            .spawn();
+        let _ = tx.send(EngineEvent::Toast(format!(
+            "Opened {}", dir.display()
+        )));
     });
 }
 

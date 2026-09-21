@@ -208,10 +208,6 @@ impl App {
                 self.mods_state.select(Some(idx));
                 self.focus = Focus::Content;
             }
-            HitAction::ModSearchRow(idx) => {
-                self.mod_search_state.select(Some(idx));
-                self.focus = Focus::Content;
-            }
             HitAction::ModsSearchBar => {
                 self.mods_search_focused = true;
             }
@@ -262,7 +258,6 @@ impl App {
             ButtonId::InstallProject => self.install_selected_project(),
             ButtonId::ToggleMod => self.toggle_selected_mod(),
             ButtonId::DeleteMod => self.confirm_delete_mod(),
-            ButtonId::ModSearch => self.open_mod_search_prompt(),
             ButtonId::UpdateMods => self.check_mod_updates(),
             ButtonId::BrowseMods => {
                 let kind = crate::views::browse::BrowseKind::Mods;
@@ -294,6 +289,7 @@ impl App {
             ButtonId::SaveSettings => self.save_settings(),
             ButtonId::EditSettings => self.open_settings_form(),
             ButtonId::DetectJava => self.spawn_java_discovery(),
+            ButtonId::OpenAsciiBgFolder => self.open_ascii_bg_folder(),
         }
     }
 
@@ -315,15 +311,7 @@ impl App {
             }
             Nav::Mods => {
                 let step = delta * 4;
-                if self.mods_focus_search {
-                    move_selection(
-                        &mut self.mod_search_state,
-                        self.mod_search_results.len(),
-                        step,
-                    );
-                } else {
-                    move_selection(&mut self.mods_state, self.installed_mods.len(), step);
-                }
+                move_selection(&mut self.mods_state, self.installed_mods.len(), step);
             }
             Nav::Logs => self.scroll_logs(delta * 3),
             Nav::Jvm => {
@@ -575,7 +563,6 @@ impl App {
     pub(crate) fn submit_text(&mut self, action: TextAction, text: String) {
         match action {
             TextAction::SearchModrinth => self.run_search(text),
-            TextAction::SearchMods => self.run_mod_search(text),
             TextAction::BrowseSearch => self.run_browse_search(text),
             TextAction::SearchLogs => {
                 self.log_search = text.clone();

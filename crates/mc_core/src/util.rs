@@ -101,6 +101,11 @@ impl Paths {
         self.config_dir.join("settings.json")
     }
 
+    /// ASCII-art background for the builds grid.
+    pub fn ascii_bg_file(&self) -> PathBuf {
+        self.config_dir.join("ascii_bg.txt")
+    }
+
     pub fn shared_dir(&self) -> PathBuf {
         self.data_dir.join("shared")
     }

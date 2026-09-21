@@ -37,32 +37,26 @@ pub(crate) fn render(&mut self, frame: &mut Frame) {
 
     self.render_header(frame, chunks[0]);
 
-    // The body is inset by one row on top so the cards float below the
-    // header. Content sits on the left, the sidebar on the right, with a
-    // single column of background between them.
-    let body_rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(3)])
-        .split(chunks[1]);
-    let columns = Layout::default()
+    // Split the body horizontally first: content area | gap | sidebar.
+    // The sidebar spans the full body height (including the 1-row gap above content).
+    let body_columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Min(20),
             Constraint::Length(1),
             Constraint::Length(30),
         ])
-        .split(body_rows[1]);
+        .split(chunks[1]);
 
-    let content = columns[0];
-    self.sidebar_area = columns[2];
-    // Align the sidebar card with the content card (which sits below its
-    // toolbar + gap).
-    let sidebar = Rect {
-        y: columns[2].y + 2,
-        height: columns[2].height.saturating_sub(2),
-        ..columns[2]
-    };
-    self.render_nav_panel(frame, sidebar);
+    // Content area gets the 1-row top gap like before.
+    let content_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(3)])
+        .split(body_columns[0]);
+    let content = content_rows[1];
+
+    self.sidebar_area = body_columns[2];
+    self.render_nav_panel(frame, body_columns[2]);
 
     match self.nav {
         Nav::Instances => self.render_instance_grid(frame, content),

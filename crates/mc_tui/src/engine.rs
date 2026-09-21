@@ -34,10 +34,8 @@ pub enum EngineEvent {
     AccountsChanged,
     /// A freshly loaded account store.
     AccountsReloaded(mc_core::auth::AccountStore),
-    /// Modrinth search results.
+    /// Modrinth modpack search results.
     SearchResults(SearchResults),
-    /// Modrinth mod-search results (Mod Manager pane).
-    ModSearchResults(SearchResults),
     /// Modrinth browser page results (popular listing or search).
     BrowseResults(SearchResults),
     /// A project opened in the browser, with its available versions.

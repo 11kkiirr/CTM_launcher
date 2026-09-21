@@ -43,7 +43,7 @@ impl App {
         tab_row(
             self,
             frame,
-            chunks[0].x + 1,
+            chunks[0].x + 2,
             chunks[0].y,
             area.x + area.width,
             &[
