@@ -217,6 +217,8 @@ pub struct InstanceMetadata {
     #[serde(default)]
     pub icon: Option<String>,
     #[serde(default)]
+    pub group: String,
+    #[serde(default)]
     pub modpack: Option<ModpackOrigin>,
 }
 
@@ -238,6 +240,7 @@ impl InstanceMetadata {
             last_played: None,
             jvm: JvmConfig::default(),
             icon: None,
+            group: String::new(),
             modpack: None,
         }
     }
@@ -355,6 +358,39 @@ impl InstanceManager {
 
     pub fn paths(&self) -> &Paths {
         &self.paths
+    }
+
+    /// List every instance whose `group` field matches the given value.
+    /// Pass an empty string to list all ungrouped instances.
+    pub fn list_in_group(&self, group: &str) -> Result<Vec<Instance>> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .filter(|i| i.metadata.group == group)
+            .collect())
+    }
+
+    /// Collect all unique non-empty group names across every instance.
+    pub fn groups(&self) -> Vec<String> {
+        let mut groups: Vec<String> = self
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|i| i.metadata.group)
+            .filter(|g| !g.is_empty())
+            .collect();
+        groups.sort();
+        groups.dedup();
+        groups
+    }
+
+    /// Assign an instance to a group (empty string = ungrouped).
+    pub async fn set_group(&self, id: &str, group: &str) -> Result<()> {
+        let instance = self.get(id)?;
+        let meta_file = instance.metadata_file();
+        let mut metadata = instance.metadata;
+        metadata.group = group.to_string();
+        write_json(meta_file, &metadata).await
     }
 
     /// List every instance that has a readable `instance.json`.
@@ -555,5 +591,47 @@ mod tests {
         for loader in LoaderType::all() {
             assert_eq!(LoaderType::parse(loader.as_str()), Some(*loader));
         }
+    }
+
+    #[tokio::test]
+    async fn group_round_trip() {
+        let dir = std::env::temp_dir().join(format!("ctm-inst-{}", uuid::Uuid::new_v4()));
+        let paths = Paths::rooted_at(&dir);
+        paths.ensure_layout().unwrap();
+        let manager = InstanceManager::new(paths);
+
+        let inst1 = manager
+            .create("A", "1.20.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        let inst2 = manager
+            .create("B", "1.21.1", LoaderType::Vanilla, None)
+            .await
+            .unwrap();
+
+        assert!(manager.groups().is_empty());
+
+        manager.set_group(inst1.id(), "Modded").await.unwrap();
+        manager.set_group(inst2.id(), "Vanilla").await.unwrap();
+        let groups = manager.groups();
+        assert_eq!(groups, vec!["Modded".to_string(), "Vanilla".to_string()]);
+
+        let modded = manager.list_in_group("Modded").unwrap();
+        assert_eq!(modded.len(), 1);
+        assert_eq!(modded[0].name(), "A");
+
+        let all = manager.list().unwrap();
+        assert_eq!(all.len(), 2);
+
+        manager.set_group(inst1.id(), "").await.unwrap();
+        let groups = manager.groups();
+        assert_eq!(groups, vec!["Vanilla".to_string()]);
+
+        manager.set_group(inst2.id(), "").await.unwrap();
+        assert!(manager.groups().is_empty());
+
+        manager.delete(inst1.id()).await.unwrap();
+        manager.delete(inst2.id()).await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

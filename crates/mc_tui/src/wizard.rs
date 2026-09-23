@@ -527,6 +527,7 @@ impl App {
             PickerTarget::WizardGame | PickerTarget::ChangeGameVersion => "Minecraft Version",
             PickerTarget::WizardLoader => "Loader Version",
             PickerTarget::WizardLoaderType => "Mod Loader",
+            PickerTarget::MoveToGroup => "Group",
         };
         self.overlay = Some(Overlay::Picker(crate::forms::VersionPicker::new(
             title, versions, target,
@@ -562,6 +563,7 @@ impl App {
                 }
             }
             PickerTarget::ChangeGameVersion => self.change_instance_version(value),
+            PickerTarget::MoveToGroup => self.move_instance_to_group(&value),
         }
     }
 

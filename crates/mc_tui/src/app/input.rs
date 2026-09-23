@@ -231,6 +231,25 @@ impl App {
             HitAction::BrowseFilter(item) => self.browse_filter_click(item),
             HitAction::BrowsePagePrev => self.browse_prev_page(),
             HitAction::BrowsePageNext => self.browse_next_page(),
+            HitAction::GroupPill(idx) => {
+                let group = if idx == 0 {
+                    String::new()
+                } else {
+                    self.groups.get(idx - 1).cloned().unwrap_or_default()
+                };
+                self.set_selected_group(group);
+            }
+            HitAction::NewGroup => {
+                if self.selected_instance().is_some() {
+                    self.overlay = Some(Overlay::text(
+                        "New Group",
+                        "Group name: ",
+                        TextAction::NewGroup,
+                    ));
+                } else {
+                    self.set_toast("Select an instance first", true);
+                }
+            }
             HitAction::Overlay(action) => self.dispatch_overlay_action(action),
         }
     }
@@ -592,6 +611,13 @@ impl App {
             }
             TextAction::SkinUrl => self.change_skin(text),
             TextAction::RenameInstance => self.rename_instance(text),
+            TextAction::NewGroup => {
+                let trimmed = text.trim().to_string();
+                if trimmed.is_empty() {
+                    return;
+                }
+                self.move_instance_to_group(&trimmed);
+            }
             TextAction::None => {}
         }
     }

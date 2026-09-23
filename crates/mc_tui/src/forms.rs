@@ -206,6 +206,7 @@ pub enum TextAction {
     CustomGameArgs,
     SkinUrl,
     RenameInstance,
+    NewGroup,
     None,
 }
 
@@ -231,6 +232,8 @@ pub enum PickerTarget {
     WizardLoaderType,
     /// Versions page: change the selected build's game version.
     ChangeGameVersion,
+    /// Move the selected instance to a group.
+    MoveToGroup,
 }
 
 /// A searchable, keyboard-driven list of versions.

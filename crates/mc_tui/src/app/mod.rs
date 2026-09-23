@@ -174,6 +174,8 @@ pub enum HitAction {
     BrowseFilter(crate::views::browse::FilterItem),
     BrowsePagePrev,
     BrowsePageNext,
+    GroupPill(usize),
+    NewGroup,
     Overlay(OverlayAction),
 }
 
@@ -283,6 +285,9 @@ pub struct App {
     pub instances: Vec<Instance>,
     pub instance_state: ListState,
 
+    pub groups: Vec<String>,
+    pub selected_group: String,
+
     pub accounts: AccountStore,
     pub account_state: ListState,
 
@@ -378,6 +383,8 @@ impl App {
             instance_manager,
             instances,
             instance_state: ListState::default(),
+            groups: Vec::new(),
+            selected_group: String::new(),
             accounts,
             account_state: ListState::default(),
             search_query: String::new(),
@@ -622,6 +629,7 @@ pub(crate) fn footer_hints(nav: Nav) -> &'static [(&'static str, &'static str)] 
             ("i", "install"),
             ("p", "import"),
             ("v", "versions"),
+            ("g", "group"),
             ("r", "rename"),
             ("d", "delete"),
         ],

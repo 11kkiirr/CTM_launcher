@@ -73,11 +73,89 @@ impl App {
             title_area,
         );
 
+        // Group pill bar (rendered even when empty for discoverability).
+        let pill_y = inner.y + 1;
+        let mut pill_x: u16 = inner.x + 2;
+        let pill_max = inner.x + inner.width;
+        {
+            // "All" pill is always first.
+            let all_active = self.selected_group.is_empty();
+            let label = "All";
+            let width = label.chars().count() as u16 + 2;
+            if pill_x + width <= pill_max {
+                let rect = Rect {
+                    x: pill_x,
+                    y: pill_y,
+                    width,
+                    height: 1,
+                };
+                let style = if all_active {
+                    self.theme.accent_bright()
+                } else {
+                    Style::default().fg(self.theme.muted)
+                };
+                frame.render_widget(
+                    Paragraph::new(Span::styled(format!(" {label} "), style))
+                        .style(self.theme.card()),
+                    rect,
+                );
+                self.push_hitbox(rect, HitAction::GroupPill(0));
+                pill_x += width + 1;
+            }
+
+            // Named groups.
+            let groups = self.groups.clone();
+            for (idx, group) in groups.iter().enumerate() {
+                let active = self.selected_group == *group;
+                let width = group.chars().count() as u16 + 2;
+                if pill_x + width > pill_max {
+                    break;
+                }
+                let rect = Rect {
+                    x: pill_x,
+                    y: pill_y,
+                    width,
+                    height: 1,
+                };
+                let style = if active {
+                    self.theme.accent_bright()
+                } else {
+                    Style::default().fg(self.theme.muted)
+                };
+                frame.render_widget(
+                    Paragraph::new(Span::styled(format!(" {group} "), style))
+                        .style(self.theme.card()),
+                    rect,
+                );
+                self.push_hitbox(rect, HitAction::GroupPill(idx + 1));
+                pill_x += width + 1;
+            }
+
+            // "+" new-group pill (always shown).
+            let plus_label = "+";
+            let plus_w = plus_label.chars().count() as u16 + 2;
+            if pill_x + plus_w <= pill_max {
+                let rect = Rect {
+                    x: pill_x,
+                    y: pill_y,
+                    width: plus_w,
+                    height: 1,
+                };
+                let style = Style::default().fg(self.theme.muted);
+                frame.render_widget(
+                    Paragraph::new(Span::styled(format!(" {plus_label} "), style))
+                        .style(self.theme.card()),
+                    rect,
+                );
+                self.push_hitbox(rect, HitAction::NewGroup);
+            }
+        }
+
         let grid = Rect {
             x: inner.x + 1,
-            y: inner.y + 2,
+            y: inner.y + 3,
             width: inner.width.saturating_sub(1),
-            height: inner.height.saturating_sub(2),
+            height: inner.height.saturating_sub(3),
         };
         if grid.width < TILE_W || grid.height < TILE_H {
             frame.render_widget(
@@ -351,7 +429,10 @@ impl App {
                     select(self, current - 1);
                 }
             }
-            KeyCode::Char('g') => select(self, 0),
+            KeyCode::Char('g') => {
+                self.select_instance(current);
+                self.open_group_picker();
+            }
             KeyCode::Char('G') => select(self, len - 1),
             KeyCode::Enter => {
                 self.select_instance(current);

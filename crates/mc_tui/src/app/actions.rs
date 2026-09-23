@@ -65,7 +65,15 @@ pub fn selected_instance(&self) -> Option<&Instance> {
 }
 
 pub(crate) fn reload_instances(&mut self) {
-    self.instances = self.instance_manager.list().unwrap_or_default();
+    self.groups = self.instance_manager.groups();
+    if self.selected_group.is_empty() {
+        self.instances = self.instance_manager.list().unwrap_or_default();
+    } else {
+        self.instances = self
+            .instance_manager
+            .list_in_group(&self.selected_group)
+            .unwrap_or_default();
+    }
     if self.instances.is_empty() {
         self.instance_state.select(None);
     } else if self.instance_state.selected().unwrap_or(0) >= self.instances.len() {
@@ -353,6 +361,73 @@ pub(crate) fn rename_instance(&mut self, new_name: String) {
             }
             Err(err) => {
                 let _ = tx.send(EngineEvent::Error(format!("Rename failed: {err}")));
+            }
+        }
+    });
+}
+
+pub(crate) fn set_selected_group(&mut self, group: String) {
+    self.selected_group = group;
+    self.reload_instances();
+}
+
+pub(crate) fn open_group_picker(&mut self) {
+    let Some(instance) = self.selected_instance().cloned() else {
+        self.set_toast("No instance selected", true);
+        return;
+    };
+    let mut items: Vec<String> = Vec::new();
+    items.push("All".to_string());
+    for g in &self.groups {
+        items.push(g.clone());
+    }
+    items.push("[New Group]".to_string());
+
+    let current_label = if instance.metadata.group.is_empty() {
+        "All".to_string()
+    } else {
+        instance.metadata.group.clone()
+    };
+    let selected = items.iter().position(|i| *i == current_label).unwrap_or(0);
+
+    let picker = crate::forms::VersionPicker::new(
+        format!("Move '{}' to group", instance.name()),
+        items,
+        crate::forms::PickerTarget::MoveToGroup,
+    );
+    let mut picker = picker;
+    picker.selected = selected;
+    self.overlay = Some(Overlay::Picker(picker));
+}
+
+pub(crate) fn move_instance_to_group(&mut self, group: &str) {
+    let Some(instance) = self.selected_instance().cloned() else {
+        return;
+    };
+    let actual_group = if group == "All" || group == "[New Group]" {
+        ""
+    } else {
+        group
+    };
+    let manager = self.instance_manager.clone();
+    let tx = self.engine_tx.clone();
+    let id = instance.id().to_string();
+    let group_owned = actual_group.to_string();
+    tokio::spawn(async move {
+        match manager.set_group(&id, &group_owned).await {
+            Ok(()) => {
+                let _ = tx.send(EngineEvent::InstancesChanged);
+                let label = if group_owned.is_empty() {
+                    "All".to_string()
+                } else {
+                    group_owned
+                };
+                let _ = tx.send(EngineEvent::Toast(format!(
+                    "Moved to group: {label}"
+                )));
+            }
+            Err(err) => {
+                let _ = tx.send(EngineEvent::Error(format!("Move failed: {err}")));
             }
         }
     });
@@ -1761,7 +1836,7 @@ pub(crate) fn show_help(&mut self) {
         "Instances (main area + toolbar)".to_string(),
         "  arrows/hjkl  move between build cards".to_string(),
         "  Enter        launch the selected build".to_string(),
-        "  n new · e edit · i install · p import · v versions · d delete".to_string(),
+        "  n new · e edit · i install · p import · v versions · g group · d delete".to_string(),
         String::new(),
         "Mods / Modpacks / Versions / JVM".to_string(),
         "  Mods: t pane · Space toggle · s search · u updates · d delete".to_string(),
