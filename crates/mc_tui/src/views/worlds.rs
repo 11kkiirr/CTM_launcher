@@ -35,8 +35,8 @@ impl App {
             chunks[0].y,
             area.x + area.width,
             &[
-                ("Open Folder", "Enter", ButtonId::BrowseMods),
-                ("Delete", "d", ButtonId::DeleteMod),
+                ("Open Folder", "Enter", ButtonId::OpenFolder),
+                ("Delete", "d", ButtonId::DeleteSelected),
             ],
         );
 
@@ -232,6 +232,8 @@ impl App {
     pub(crate) fn key_worlds(&mut self, key: KeyEvent) {
         use crossterm::event::KeyCode;
         match key.code {
+            KeyCode::Enter | KeyCode::Char('o') => self.open_current_folder(),
+            KeyCode::Char('d') => self.confirm_delete_selected(),
             KeyCode::Down | KeyCode::Char('j') => {
                 move_sel_worlds(&mut self.worlds_state, self.worlds.len(), 1);
             }

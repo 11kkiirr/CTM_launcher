@@ -21,7 +21,7 @@ use crate::forms::{
 };
 use crate::views::browse::{BrowseFocus, SideFilter};
 
-use super::{gc_index, rect_contains, split_args, App, CLIENT_ID, HitAction, Hitbox, Toast};
+use super::{gc_index, rect_contains, split_args, App, CLIENT_ID, HitAction, Hitbox, Nav, Toast};
 
     // ---------------------------------------------------------------------
     // Actions: instances
@@ -849,7 +849,7 @@ pub(crate) fn reload_resource_packs(&self) {
     let tx = self.engine_tx.clone();
     let dir = instance.resourcepacks_dir();
     tokio::spawn(async move {
-        let items = Self::scan_dir_names(&dir).await;
+        let items = Self::scan_pack_names(&dir, false).await;
         let _ = tx.send(EngineEvent::ResourcePacks(items));
     });
 }
@@ -859,7 +859,7 @@ pub(crate) fn reload_shaders(&self) {
     let tx = self.engine_tx.clone();
     let dir = instance.shaders_dir();
     tokio::spawn(async move {
-        let items = Self::scan_dir_names(&dir).await;
+        let items = Self::scan_pack_names(&dir, true).await;
         let _ = tx.send(EngineEvent::ShaderPacks(items));
     });
 }
@@ -869,7 +869,7 @@ pub(crate) fn reload_worlds(&self) {
     let tx = self.engine_tx.clone();
     let dir = instance.saves_dir();
     tokio::spawn(async move {
-        let items = Self::scan_dir_names(&dir).await;
+        let items = Self::scan_world_names(&dir).await;
         let _ = tx.send(EngineEvent::Worlds(items));
     });
 }
@@ -879,22 +879,73 @@ pub(crate) fn reload_screenshots(&self) {
     let tx = self.engine_tx.clone();
     let dir = instance.game_dir().join("screenshots");
     tokio::spawn(async move {
-        let items = Self::scan_dir_names(&dir).await;
+        let items = Self::scan_screenshot_names(&dir).await;
         let _ = tx.send(EngineEvent::Screenshots(items));
     });
 }
 
-async fn scan_dir_names(dir: &std::path::Path) -> Vec<String> {
+/// Scan a pack directory: directories always, plus `.zip` files when
+/// `allow_zips` (resource packs). Ignores stray files like `pack.png`.
+async fn scan_pack_names(dir: &std::path::Path, allow_zips: bool) -> Vec<String> {
     let mut items = Vec::new();
     if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
-            if let Ok(name) = entry.file_name().into_string() {
+            let Ok(name) = entry.file_name().into_string() else { continue };
+            let Ok(file_type) = entry.file_type().await else { continue };
+            if file_type.is_dir() {
+                items.push(name);
+            } else if allow_zips {
+                let lower = name.to_ascii_lowercase();
+                if lower.ends_with(".zip") || lower.ends_with(".zip.disabled") {
+                    items.push(name);
+                }
+            }
+        }
+    }
+    items.sort();
+    items
+}
+
+/// Screenshot list: only image files.
+async fn scan_screenshot_names(dir: &std::path::Path) -> Vec<String> {
+    let mut items = Vec::new();
+    if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let Ok(name) = entry.file_name().into_string() else { continue };
+            let lower = name.to_ascii_lowercase();
+            if lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
                 items.push(name);
             }
         }
     }
     items.sort();
     items
+}
+
+/// Worlds list: directories only (ignore stray files in `saves/`).
+async fn scan_world_names(dir: &std::path::Path) -> Vec<String> {
+    let mut items = Vec::new();
+    if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let Ok(name) = entry.file_name().into_string() else { continue };
+            let Ok(file_type) = entry.file_type().await else { continue };
+            if file_type.is_dir() {
+                items.push(name);
+            }
+        }
+    }
+    items.sort();
+    items
+}
+
+/// Remove a file or (recursively) a directory.
+async fn remove_path(path: &std::path::Path) -> std::io::Result<()> {
+    let meta = tokio::fs::symlink_metadata(path).await?;
+    if meta.is_dir() {
+        tokio::fs::remove_dir_all(path).await
+    } else {
+        tokio::fs::remove_file(path).await
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1106,18 +1157,28 @@ pub(crate) fn browse_fetch_image(&mut self, url: &str) {
     });
 }
 
+/// Maximum edge length for cached local thumbnails. Screenshot cards are
+/// ~32 cells wide, so 512px is plenty and keeps 1080p shots from hogging RAM.
+const THUMB_MAX: u32 = 512;
+
 /// Load a local image file into `local_images` if not already cached.
+///
+/// Called every render frame per visible card — the requested set guards
+/// against re-spawning a decode task while one is already in flight, and the
+/// decode runs on the blocking pool downscaling to [`THUMB_MAX`] so full-res
+/// screenshots never sit in the UI thread's cache.
 pub(crate) fn load_local_image(&mut self, path: &str) {
     if self.local_images.contains_key(path) {
         return;
     }
+    if !self.local_image_requested.insert(path.to_string()) {
+        return;
+    }
     let key = path.to_string();
-    let path_buf = std::path::PathBuf::from(path);
+    let path_buf = PathBuf::from(path);
     let tx = self.engine_tx.clone();
-    let key_clone = key.clone();
-    tokio::spawn(async move {
-        let result = tokio::fs::read(&path_buf).await;
-        let img = result.ok().and_then(|data| {
+    tokio::task::spawn_blocking(move || {
+        let img = std::fs::read(&path_buf).ok().and_then(|data| {
             mc_core::img::decode_image(&data).ok().or_else(|| {
                 image::load_from_memory(&data).ok().map(|dynamic| {
                     let rgba = dynamic.to_rgba8();
@@ -1129,10 +1190,8 @@ pub(crate) fn load_local_image(&mut self, path: &str) {
                 })
             })
         });
-        let _ = tx.send(EngineEvent::LocalImage {
-            path: key_clone,
-            img,
-        });
+        let img = img.map(|img| mc_core::img::fit_image(&img, Self::THUMB_MAX, Self::THUMB_MAX));
+        let _ = tx.send(EngineEvent::LocalImage { path: key, img });
     });
 }
 
@@ -1344,6 +1403,112 @@ pub(crate) fn confirm_delete_mod(&mut self) {
         format!("Delete '{}'?", module.file_name),
         ConfirmAction::DeleteMod(module.path),
     ));
+}
+
+/// Delete the selected entry in the current list view.
+pub(crate) fn confirm_delete_selected(&mut self) {
+    match self.nav {
+        Nav::Worlds => self.confirm_delete_world(),
+        Nav::Screenshots => self.confirm_delete_screenshot(),
+        Nav::ResourcePacks => self.confirm_delete_resource_pack(),
+        Nav::Shaders => self.confirm_delete_shader(),
+        Nav::Mods => self.confirm_delete_mod(),
+        _ => {}
+    }
+}
+
+/// Toggle the selected entry in views that support enable/disable.
+pub(crate) fn toggle_selected_entry(&mut self) {
+    match self.nav {
+        Nav::Mods => self.toggle_selected_mod(),
+        Nav::ResourcePacks => self.toggle_selected_resource_pack(),
+        Nav::Shaders => self.toggle_selected_shader(),
+        _ => {}
+    }
+}
+
+fn confirm_delete_world(&mut self) {
+    let Some(idx) = self.worlds_state.selected() else { return };
+    let Some(name) = self.worlds.get(idx).cloned() else { return };
+    let Some(instance) = self.selected_instance().cloned() else { return };
+    let path = instance.saves_dir().join(&name);
+    self.overlay = Some(Overlay::confirm(
+        "Delete World",
+        format!("Delete world '{name}' and all of its saves? This cannot be undone."),
+        ConfirmAction::DeleteWorld(path),
+    ));
+}
+
+fn confirm_delete_screenshot(&mut self) {
+    let Some(idx) = self.screenshots_state.selected() else { return };
+    let Some(name) = self.screenshots.get(idx).cloned() else { return };
+    let Some(instance) = self.selected_instance().cloned() else { return };
+    let path = instance.game_dir().join("screenshots").join(&name);
+    self.overlay = Some(Overlay::confirm(
+        "Delete Screenshot",
+        format!("Delete '{name}'?"),
+        ConfirmAction::DeleteScreenshot(path),
+    ));
+}
+
+fn confirm_delete_resource_pack(&mut self) {
+    let Some(idx) = self.resource_packs_state.selected() else { return };
+    let Some(name) = self.resource_packs.get(idx).cloned() else { return };
+    let Some(instance) = self.selected_instance().cloned() else { return };
+    let path = instance.resourcepacks_dir().join(&name);
+    self.overlay = Some(Overlay::confirm(
+        "Delete Resource Pack",
+        format!("Delete resource pack '{name}'?"),
+        ConfirmAction::DeleteResourcePack(path),
+    ));
+}
+
+fn confirm_delete_shader(&mut self) {
+    let Some(idx) = self.shaders_state.selected() else { return };
+    let Some(name) = self.shaders.get(idx).cloned() else { return };
+    let Some(instance) = self.selected_instance().cloned() else { return };
+    let path = instance.shaders_dir().join(&name);
+    self.overlay = Some(Overlay::confirm(
+        "Delete Shader Pack",
+        format!("Delete shader pack '{name}'?"),
+        ConfirmAction::DeleteShader(path),
+    ));
+}
+
+fn toggle_selected_resource_pack(&mut self) {
+    let Some(idx) = self.resource_packs_state.selected() else { return };
+    let Some(name) = self.resource_packs.get(idx).cloned() else { return };
+    let Some(instance) = self.selected_instance().cloned() else { return };
+    let path = instance.resourcepacks_dir().join(&name);
+    let tx = self.engine_tx.clone();
+    tokio::spawn(async move {
+        match mc_core::modrinth::toggle_mod(&path).await {
+            Ok(_) => {
+                let _ = tx.send(EngineEvent::ReloadList(Nav::ResourcePacks));
+            }
+            Err(err) => {
+                let _ = tx.send(EngineEvent::Error(format!("Toggle failed: {err}")));
+            }
+        }
+    });
+}
+
+fn toggle_selected_shader(&mut self) {
+    let Some(idx) = self.shaders_state.selected() else { return };
+    let Some(name) = self.shaders.get(idx).cloned() else { return };
+    let Some(instance) = self.selected_instance().cloned() else { return };
+    let path = instance.shaders_dir().join(&name);
+    let tx = self.engine_tx.clone();
+    tokio::spawn(async move {
+        match mc_core::modrinth::toggle_mod(&path).await {
+            Ok(_) => {
+                let _ = tx.send(EngineEvent::ReloadList(Nav::Shaders));
+            }
+            Err(err) => {
+                let _ = tx.send(EngineEvent::Error(format!("Toggle failed: {err}")));
+            }
+        }
+    });
 }
 
 pub(crate) fn check_mod_updates(&mut self) {
@@ -1744,6 +1909,43 @@ pub(crate) fn spawn_java_discovery(&self) {
     });
 }
 
+/// Launch the platform file manager for `dir`.
+fn open_dir_in_fm(dir: &std::path::Path) {
+    #[cfg(target_os = "linux")]
+    let _ = tokio::process::Command::new("xdg-open").arg(dir).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = tokio::process::Command::new("open").arg(dir).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = tokio::process::Command::new("explorer").arg(dir).spawn();
+}
+
+/// Open the folder backing the current view in the system file manager.
+///
+/// Worlds → `saves/`, Screenshots → `screenshots/`, ResourcePacks/Shaders/Mods
+/// → their respective game subdirectories. Creates the directory first so
+/// empty instances still open something useful.
+pub(crate) fn open_current_folder(&self) {
+    let Some(instance) = self.selected_instance().cloned() else {
+        let tx = self.engine_tx.clone();
+        let _ = tx.send(EngineEvent::Error("No instance selected".into()));
+        return;
+    };
+    let dir = match self.nav {
+        Nav::Worlds => instance.saves_dir(),
+        Nav::Screenshots => instance.game_dir().join("screenshots"),
+        Nav::ResourcePacks => instance.resourcepacks_dir(),
+        Nav::Shaders => instance.shaders_dir(),
+        Nav::Mods => instance.mods_dir(),
+        _ => instance.game_dir(),
+    };
+    let tx = self.engine_tx.clone();
+    tokio::spawn(async move {
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        Self::open_dir_in_fm(&dir);
+        let _ = tx.send(EngineEvent::Toast(format!("Opened {}", dir.display())));
+    });
+}
+
 /// Open the config directory and ensure `ascii_bg.txt` exists inside it.
 pub(crate) fn open_ascii_bg_folder(&self) {
     let dir = self.paths.config_dir.clone();
@@ -1759,19 +1961,7 @@ pub(crate) fn open_ascii_bg_folder(&self) {
             );
             let _ = tokio::fs::write(&file, sample).await;
         }
-        // Try platform-specific folder opener.
-        #[cfg(target_os = "linux")]
-        let _ = tokio::process::Command::new("xdg-open")
-            .arg(&dir)
-            .spawn();
-        #[cfg(target_os = "macos")]
-        let _ = tokio::process::Command::new("open")
-            .arg(&dir)
-            .spawn();
-        #[cfg(target_os = "windows")]
-        let _ = tokio::process::Command::new("explorer")
-            .arg(&dir)
-            .spawn();
+        Self::open_dir_in_fm(&dir);
         let _ = tx.send(EngineEvent::Toast(format!(
             "Opened {}", dir.display()
         )));
@@ -1816,6 +2006,69 @@ pub(crate) fn confirm(&mut self, action: ConfirmAction) {
                 if let Ok(mut store) = AccountStore::load(&path).await {
                     let _ = store.remove(&id).await;
                     let _ = tx.send(EngineEvent::AccountsChanged);
+                }
+            });
+        }
+        ConfirmAction::DeleteWorld(path) => {
+            let icon_key = path.join("icon.png").to_string_lossy().to_string();
+            self.local_images.remove(&icon_key);
+            self.local_protocols.remove(&icon_key);
+            let tx = self.engine_tx.clone();
+            tokio::spawn(async move {
+                match Self::remove_path(&path).await {
+                    Ok(()) => {
+                        let _ = tx.send(EngineEvent::ReloadList(Nav::Worlds));
+                        let _ = tx.send(EngineEvent::Toast("World deleted".into()));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(EngineEvent::Error(format!("Delete failed: {err}")));
+                    }
+                }
+            });
+        }
+        ConfirmAction::DeleteScreenshot(path) => {
+            let key = path.to_string_lossy().to_string();
+            self.local_images.remove(&key);
+            self.local_protocols.remove(&key);
+            self.local_image_requested.remove(&key);
+            let tx = self.engine_tx.clone();
+            tokio::spawn(async move {
+                match Self::remove_path(&path).await {
+                    Ok(()) => {
+                        let _ = tx.send(EngineEvent::ReloadList(Nav::Screenshots));
+                        let _ = tx.send(EngineEvent::Toast("Screenshot deleted".into()));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(EngineEvent::Error(format!("Delete failed: {err}")));
+                    }
+                }
+            });
+        }
+        ConfirmAction::DeleteResourcePack(path) => {
+            let tx = self.engine_tx.clone();
+            tokio::spawn(async move {
+                match Self::remove_path(&path).await {
+                    Ok(()) => {
+                        let _ = tx.send(EngineEvent::ReloadList(Nav::ResourcePacks));
+                        let _ = tx.send(EngineEvent::Toast("Resource pack deleted".into()));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(EngineEvent::Error(format!("Delete failed: {err}")));
+                    }
+                }
+            });
+        }
+        ConfirmAction::DeleteShader(path) => {
+            let tx = self.engine_tx.clone();
+            tokio::spawn(async move {
+                match Self::remove_path(&path).await {
+                    Ok(()) => {
+                        let _ = tx.send(EngineEvent::ReloadList(Nav::Shaders));
+                        let _ = tx.send(EngineEvent::Toast("Shader pack deleted".into()));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(EngineEvent::Error(format!("Delete failed: {err}")));
+                    }
                 }
             });
         }
@@ -1967,38 +2220,6 @@ pub(crate) fn scan_from_path(&mut self, path: String) {
             }
             Err(err) => {
                 let _ = tx.send(EngineEvent::Error(format!("Scan failed: {err}")));
-            }
-        }
-    });
-}
-
-/// Import a selected external instance into CTMLauncher.
-pub(crate) fn import_selected_external(&mut self) {
-    let Some(external) = self.external_state.selected()
-        .and_then(|idx| self.external_instances.get(idx))
-        .cloned()
-    else {
-        self.set_toast("No external instance selected", true);
-        return;
-    };
-    let manager = self.instance_manager.clone();
-    let paths = self.paths.clone();
-    let tx = self.engine_tx.clone();
-    self.progress = Some((None, format!("Importing '{}'...", external.name)));
-    tokio::spawn(async move {
-        let result = mc_core::import::import_external(&external, &manager, &paths).await;
-        let _ = tx.send(EngineEvent::ProgressDone);
-        match result {
-            Ok(instance) => {
-                let _ = tx.send(EngineEvent::InstancesChanged);
-                let _ = tx.send(EngineEvent::Toast(format!(
-                    "Imported '{}' from {}",
-                    instance.name(),
-                    external.launcher.label()
-                )));
-            }
-            Err(err) => {
-                let _ = tx.send(EngineEvent::Error(format!("Import failed: {err}")));
             }
         }
     });

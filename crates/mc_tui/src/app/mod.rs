@@ -3,7 +3,7 @@ mod events;
 mod input;
 mod render;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use mc_core::auth::AccountStore;
@@ -231,6 +231,9 @@ pub enum ButtonId {
     EditSettings,
     DetectJava,
     OpenAsciiBgFolder,
+    OpenFolder,
+    DeleteSelected,
+    ToggleSelected,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -290,7 +293,6 @@ pub struct App {
     pub selected_group: String,
 
     pub external_instances: Vec<ExternalInstance>,
-    pub external_state: ListState,
 
     pub accounts: AccountStore,
     pub account_state: ListState,
@@ -342,6 +344,7 @@ pub struct App {
 
     pub local_images: HashMap<String, mc_core::img::RgbaImage>,
     pub local_protocols: HashMap<String, ratatui_image::protocol::StatefulProtocol>,
+    pub local_image_requested: HashSet<String>,
 
     pub crash_analysis: Option<CrashAnalysis>,
 
@@ -390,7 +393,6 @@ impl App {
             groups: Vec::new(),
             selected_group: String::new(),
             external_instances: Vec::new(),
-            external_state: ListState::default(),
             accounts,
             account_state: ListState::default(),
             search_query: String::new(),
@@ -430,6 +432,7 @@ impl App {
             browse_protocols: HashMap::new(),
             local_images: HashMap::new(),
             local_protocols: HashMap::new(),
+            local_image_requested: HashSet::new(),
             crash_analysis: None,
             running: None,
             last_command: None,
@@ -694,18 +697,22 @@ pub(crate) fn footer_hints(nav: Nav) -> &'static [(&'static str, &'static str)] 
             ("Space", "toggle"),
             ("d", "delete"),
             ("Enter", "open folder"),
+            ("t", "filter"),
+            ("s", "store"),
         ],
         Nav::Shaders => &[
             ("Space", "toggle"),
             ("d", "delete"),
             ("Enter", "open folder"),
+            ("t", "filter"),
+            ("s", "store"),
         ],
         Nav::Worlds => &[
             ("Enter", "open folder"),
             ("d", "delete"),
         ],
         Nav::Screenshots => &[
-            ("Enter", "view"),
+            ("Enter", "open folder"),
             ("d", "delete"),
             ("\u{2190}/\u{2192}", "prev/next"),
         ],

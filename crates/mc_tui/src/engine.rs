@@ -98,6 +98,8 @@ pub enum EngineEvent {
     },
     /// External instances found by scanning a launcher directory.
     ExternalInstances(Vec<ExternalInstance>),
+    /// A directory-backed list changed on disk; reload it for the given view.
+    ReloadList(crate::app::Nav),
 }
 
 /// Convenience alias for the sender side.

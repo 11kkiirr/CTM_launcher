@@ -30,8 +30,8 @@ impl App {
             chunks[0].y,
             area.x + area.width,
             &[
-                ("Toggle", "Space", ButtonId::ToggleMod),
-                ("Delete", "d", ButtonId::DeleteMod),
+                ("Toggle", "Space", ButtonId::ToggleSelected),
+                ("Delete", "d", ButtonId::DeleteSelected),
                 ("Browse", "s", ButtonId::ShadersBrowse),
             ],
         );
@@ -202,6 +202,9 @@ impl App {
 
         match key.code {
             KeyCode::Char('t') => self.shaders_search_focused = !self.shaders_search_focused,
+            KeyCode::Char(' ') => self.toggle_selected_entry(),
+            KeyCode::Char('d') => self.confirm_delete_selected(),
+            KeyCode::Enter => self.open_current_folder(),
             KeyCode::Char('s') => {
                 let kind = crate::views::browse::BrowseKind::Shaders;
                 self.browse.save_cache();

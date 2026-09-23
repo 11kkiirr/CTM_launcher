@@ -15,7 +15,7 @@ use crate::error::{CoreError, Result};
 /// The old Minecraft Launcher id (`00000000402b5328`) was revoked by
 /// Microsoft (AADSTS700016).  Override with `MicrosoftAuth::with_client_id`
 /// if you register your own Azure application.
-pub const DEFAULT_CLIENT_ID: &str = "54c98a16-3da5-4b5e-b2a3-b7e730c2c4d5";
+pub const DEFAULT_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 
 const DEVICE_CODE_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode";
 const TOKEN_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";

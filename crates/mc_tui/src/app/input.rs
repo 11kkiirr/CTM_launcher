@@ -309,6 +309,9 @@ impl App {
             ButtonId::EditSettings => self.open_settings_form(),
             ButtonId::DetectJava => self.spawn_java_discovery(),
             ButtonId::OpenAsciiBgFolder => self.open_ascii_bg_folder(),
+            ButtonId::OpenFolder => self.open_current_folder(),
+            ButtonId::DeleteSelected => self.confirm_delete_selected(),
+            ButtonId::ToggleSelected => self.toggle_selected_entry(),
         }
     }
 

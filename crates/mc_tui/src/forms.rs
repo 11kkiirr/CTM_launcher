@@ -217,6 +217,10 @@ pub enum ConfirmAction {
     DeleteInstance(String),
     DeleteMod(PathBuf),
     DeleteAccount(String),
+    DeleteWorld(PathBuf),
+    DeleteScreenshot(PathBuf),
+    DeleteResourcePack(PathBuf),
+    DeleteShader(PathBuf),
     Quit,
     None,
 }

@@ -7,6 +7,16 @@ use crate::forms::Overlay;
 
 use super::{App, Nav, RunningProcess};
 
+/// Keep a list selection inside bounds after the list shrinks.
+fn clamp_selection(state: &mut ratatui::widgets::ListState, len: usize) {
+    if len == 0 {
+        state.select(None);
+    } else {
+        let idx = state.selected().unwrap_or(0).min(len - 1);
+        state.select(Some(idx));
+    }
+}
+
 impl App {
     pub(crate) fn handle_engine_event(&mut self, event: EngineEvent) {
         match event {
@@ -149,11 +159,7 @@ impl App {
             EngineEvent::InstalledMods(mods) => {
                 self.installed_mods = mods;
                 self.mods_scanning = false;
-                if self.installed_mods.is_empty() {
-                    self.mods_state.select(None);
-                } else if self.mods_state.selected().is_none() {
-                    self.mods_state.select(Some(0));
-                }
+                clamp_selection(&mut self.mods_state, self.installed_mods.len());
             }
             EngineEvent::Crash(analysis) => {
                 self.crash_analysis = analysis;
@@ -184,40 +190,41 @@ impl App {
             EngineEvent::Error(message) => self.set_toast(message, true),
             EngineEvent::ResourcePacks(items) => {
                 self.resource_packs = items;
-                if self.resource_packs_state.selected().is_none() && !self.resource_packs.is_empty() {
-                    self.resource_packs_state.select(Some(0));
-                }
+                clamp_selection(&mut self.resource_packs_state, self.resource_packs.len());
             }
             EngineEvent::ShaderPacks(items) => {
                 self.shaders = items;
-                if self.shaders_state.selected().is_none() && !self.shaders.is_empty() {
-                    self.shaders_state.select(Some(0));
-                }
+                clamp_selection(&mut self.shaders_state, self.shaders.len());
             }
             EngineEvent::Worlds(items) => {
                 self.worlds = items;
-                if self.worlds_state.selected().is_none() && !self.worlds.is_empty() {
-                    self.worlds_state.select(Some(0));
-                }
+                clamp_selection(&mut self.worlds_state, self.worlds.len());
             }
             EngineEvent::Screenshots(items) => {
                 self.screenshots = items;
-                if self.screenshots_state.selected().is_none() && !self.screenshots.is_empty() {
-                    self.screenshots_state.select(Some(0));
-                }
+                clamp_selection(&mut self.screenshots_state, self.screenshots.len());
             }
+            EngineEvent::ReloadList(nav) => match nav {
+                Nav::Worlds => self.reload_worlds(),
+                Nav::Screenshots => self.reload_screenshots(),
+                Nav::ResourcePacks => self.reload_resource_packs(),
+                Nav::Shaders => self.reload_shaders(),
+                Nav::Mods => self.reload_mods(),
+                _ => {}
+            },
             EngineEvent::LocalImage { path, img } => {
                 if let Some(img) = img {
+                    self.local_image_requested.remove(&path);
                     self.local_images.insert(path, img);
                 }
+                // Failures stay in `local_image_requested` so a missing file
+                // is not re-spawned every render frame.
             }
             EngineEvent::ExternalInstances(instances) => {
                 self.external_instances = instances.clone();
                 if instances.is_empty() {
-                    self.external_state.select(None);
                     self.set_toast("No external instances found", true);
                 } else {
-                    self.external_state.select(Some(0));
                     let names: Vec<String> = instances.iter().map(|i| i.name.clone()).collect();
                     let picker = crate::forms::VersionPicker::new(
                         "Select Instance to Import",

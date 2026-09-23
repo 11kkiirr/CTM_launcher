@@ -43,7 +43,14 @@ pub fn image_lines(img: &RgbaImage, max_w: u32, max_h: u32, bg: Color) -> Vec<Li
         return Vec::new();
     }
     // Every cell stacks two pixel rows (half-block), so fit to `2*max_h` px.
-    let fitted = mc_core::img::fit_image(img, max_w, max_h * 2);
+    // Borrow in place when the image already fits — this runs every frame.
+    let owned;
+    let fitted = if img.width <= max_w && img.height <= max_h * 2 {
+        img
+    } else {
+        owned = mc_core::img::fit_image(img, max_w, max_h * 2);
+        &owned
+    };
     let w = fitted.width;
     let h = fitted.height;
     let rows = (h + 1) / 2;
@@ -51,9 +58,9 @@ pub fn image_lines(img: &RgbaImage, max_w: u32, max_h: u32, bg: Color) -> Vec<Li
     for r in 0..rows {
         let mut spans: Vec<Span> = Vec::new();
         for x in 0..w {
-            let top = pixel(&fitted, r * 2, x, bg);
+            let top = pixel(fitted, r * 2, x, bg);
             let bottom = if r * 2 + 1 < h {
-                pixel(&fitted, r * 2 + 1, x, bg)
+                pixel(fitted, r * 2 + 1, x, bg)
             } else {
                 bg
             };
