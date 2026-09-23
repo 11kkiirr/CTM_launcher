@@ -204,9 +204,12 @@ pub async fn resolve_version(paths: &Paths, id: &str) -> Result<VersionDetails> 
     // Mojang omits `downloads.client.path` for newer versions.  After merge
     // the id is the loader id (e.g. fabric-loader-0.19.5-26.3) but the jar
     // lives under the root parent's directory (26.3/26.3.jar).  Infer the
-    // path when it is missing.
+    // path when it is missing — but only for vanilla, because NeoForge's
+    // bootstrap launcher replaces the client jar with its own SRG-mapped
+    // production jar.  Putting the vanilla jar on the classpath alongside
+    // the SRG jar causes a module conflict (both export the same packages).
     if let Some(ref mut client) = merged.downloads.client {
-        if client.path.is_none() {
+        if client.path.is_none() && merged.main_class == "net.minecraft.client.main.Main" {
             if let Some(ref root) = root_id {
                 client.path = Some(format!("{root}/{root}.jar"));
             }

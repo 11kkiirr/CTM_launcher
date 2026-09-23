@@ -14,17 +14,23 @@ use crate::app::{App, HitAction, OverlayAction};
 use crate::forms::{Overlay, PickerTarget};
 use crate::views::row_style;
 
-/// The three ways to create a build.
+/// The four ways to create a build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildKind {
     Clean,
     Import,
     Modrinth,
+    External,
 }
 
 impl BuildKind {
-    pub fn all() -> [BuildKind; 3] {
-        [BuildKind::Clean, BuildKind::Import, BuildKind::Modrinth]
+    pub fn all() -> [BuildKind; 4] {
+        [
+            BuildKind::Clean,
+            BuildKind::Import,
+            BuildKind::Modrinth,
+            BuildKind::External,
+        ]
     }
 
     pub fn label(&self) -> &'static str {
@@ -32,6 +38,7 @@ impl BuildKind {
             BuildKind::Clean => "Clean Build",
             BuildKind::Import => "Import .mrpack",
             BuildKind::Modrinth => "Modrinth Modpack",
+            BuildKind::External => "External Launcher",
         }
     }
 
@@ -40,6 +47,7 @@ impl BuildKind {
             BuildKind::Clean => "Vanilla or a modloader, configured from scratch.",
             BuildKind::Import => "Import a local Modrinth .mrpack file.",
             BuildKind::Modrinth => "Browse and install a modpack from Modrinth.",
+            BuildKind::External => "Import an instance from Modrinth App or another launcher.",
         }
     }
 }
@@ -128,6 +136,7 @@ impl CreateWizard {
             BuildKind::Clean => 5,
             BuildKind::Import => 2,
             BuildKind::Modrinth => 1,
+            BuildKind::External => 2,
         }
     }
 
@@ -161,6 +170,7 @@ impl App {
             KeyCode::Char('1') => self.wizard_set_kind(BuildKind::Clean),
             KeyCode::Char('2') => self.wizard_set_kind(BuildKind::Import),
             KeyCode::Char('3') => self.wizard_set_kind(BuildKind::Modrinth),
+            KeyCode::Char('4') => self.wizard_set_kind(BuildKind::External),
             _ => {
                 let step = match self.overlay.as_ref() {
                     Some(Overlay::Wizard(wizard)) => wizard.step,
@@ -205,12 +215,16 @@ impl App {
                 (BuildKind::Import, 0) => {
                     wizard.path.pop();
                 }
+                (BuildKind::External, 0) => {
+                    wizard.path.pop();
+                }
                 _ => {}
             },
             KeyCode::Char(c) => match (wizard.kind, wizard.field) {
                 (BuildKind::Clean, 0) => wizard.name.push(c),
                 (BuildKind::Clean, 3) => wizard.loader_version.push(c),
                 (BuildKind::Import, 0) => wizard.path.push(c),
+                (BuildKind::External, 0) => wizard.path.push(c),
                 _ => {}
             },
             KeyCode::Enter => match (wizard.kind, wizard.field) {
@@ -230,6 +244,10 @@ impl App {
                 }
                 (BuildKind::Import, 1) => {
                     self.submit_import(&wizard);
+                    restore = false;
+                }
+                (BuildKind::External, 1) => {
+                    self.submit_external_scan(&wizard);
                     restore = false;
                 }
                 _ => {}
@@ -375,6 +393,7 @@ impl App {
             BuildKind::Clean => self.submit_clean_build(&wizard),
             BuildKind::Import => self.submit_import(&wizard),
             BuildKind::Modrinth => self.wizard_install_selected_version(),
+            BuildKind::External => self.submit_external_scan(&wizard),
         }
     }
 
@@ -507,6 +526,17 @@ impl App {
         self.import_modpack(std::path::PathBuf::from(path));
     }
 
+    fn submit_external_scan(&mut self, wizard: &CreateWizard) {
+        let path = wizard.path.trim().to_string();
+        if path.is_empty() {
+            self.set_toast("Enter a path to the instance directory", true);
+            self.overlay = Some(Overlay::Wizard(wizard.clone()));
+            return;
+        }
+        self.overlay = None;
+        self.scan_from_path(path);
+    }
+
     fn submit_modrinth(&mut self, wizard: &CreateWizard) {
         let Some(version) = wizard.project_versions.get(wizard.selected).cloned() else {
             self.overlay = Some(Overlay::Wizard(wizard.clone()));
@@ -528,6 +558,7 @@ impl App {
             PickerTarget::WizardLoader => "Loader Version",
             PickerTarget::WizardLoaderType => "Mod Loader",
             PickerTarget::MoveToGroup => "Group",
+            PickerTarget::ImportExternal => "External Instance",
         };
         self.overlay = Some(Overlay::Picker(crate::forms::VersionPicker::new(
             title, versions, target,
@@ -564,6 +595,9 @@ impl App {
             }
             PickerTarget::ChangeGameVersion => self.change_instance_version(value),
             PickerTarget::MoveToGroup => self.move_instance_to_group(&value),
+            PickerTarget::ImportExternal => {
+                self.import_external_by_name(&value);
+            }
         }
     }
 
@@ -707,6 +741,10 @@ impl App {
                 ("Archive", wizard.path.clone(), WRowTag::Text),
                 ("", "Import".to_string(), WRowTag::Submit),
             ],
+            BuildKind::External => vec![
+                ("Instance Path", wizard.path.clone(), WRowTag::Text),
+                ("", "Scan & Import".to_string(), WRowTag::Submit),
+            ],
             _ => return,
         };
         let surface = Style::default().fg(self.theme.fg).bg(self.theme.panel_alt);
@@ -747,7 +785,12 @@ impl App {
             };
             self.push_hitbox(rect, HitAction::Overlay(action));
         }
-        if wizard.kind == BuildKind::Import {
+        if wizard.kind == BuildKind::Import || wizard.kind == BuildKind::External {
+            let browse_label = if wizard.kind == BuildKind::External {
+                "   Scan Modrinth App…"
+            } else {
+                "   Browse… (file dialog)"
+            };
             let browse_row = Rect {
                 x: area.x,
                 y: area.y + rows.len() as u16 + 1,
@@ -756,7 +799,7 @@ impl App {
             };
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "   Browse… (file dialog)",
+                    browse_label,
                     self.theme.accent(),
                 ))
                 .style(surface),

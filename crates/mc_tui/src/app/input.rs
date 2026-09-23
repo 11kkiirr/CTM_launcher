@@ -526,7 +526,18 @@ impl App {
             OverlayAction::WizardField(idx) => self.wizard_focus_field(idx),
             OverlayAction::WizardPick(idx) => self.wizard_pick_field(idx),
             OverlayAction::WizardSubmit => self.wizard_submit_clicked(),
-            OverlayAction::WizardBrowseImport => self.browse_for_mrpack(),
+            OverlayAction::WizardBrowseImport => {
+                // For External kind, scan Modrinth App instead of opening file dialog.
+                let is_external = matches!(
+                    self.overlay,
+                    Some(Overlay::Wizard(ref w)) if w.kind == crate::wizard::BuildKind::External
+                );
+                if is_external {
+                    self.scan_modrinth_app_instances();
+                } else {
+                    self.browse_for_mrpack();
+                }
+            }
             OverlayAction::WizardResult(idx) => self.wizard_click_result(idx),
             OverlayAction::WizardResultOpen => self.wizard_open_selected_project(),
             OverlayAction::WizardVersion(idx) => self.wizard_select_version(idx),

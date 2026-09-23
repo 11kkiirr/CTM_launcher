@@ -220,6 +220,8 @@ pub struct InstanceMetadata {
     pub group: String,
     #[serde(default)]
     pub modpack: Option<ModpackOrigin>,
+    #[serde(default)]
+    pub linked_source: Option<PathBuf>,
 }
 
 impl InstanceMetadata {
@@ -242,6 +244,7 @@ impl InstanceMetadata {
             icon: None,
             group: String::new(),
             modpack: None,
+            linked_source: None,
         }
     }
 
@@ -315,6 +318,16 @@ impl Instance {
 
     pub fn metadata_file(&self) -> PathBuf {
         self.root.join("instance.json")
+    }
+
+    /// Whether this instance is a symlink to an external launcher's directory.
+    pub fn is_linked(&self) -> bool {
+        self.metadata.linked_source.is_some()
+    }
+
+    /// The original source path if this instance is linked.
+    pub fn linked_source(&self) -> Option<&std::path::Path> {
+        self.metadata.linked_source.as_deref()
     }
 
     /// Create the standard instance subdirectory tree.
@@ -457,8 +470,23 @@ impl InstanceManager {
         if !root.exists() {
             return Err(CoreError::NotFound(format!("instance '{id}'")));
         }
+        // For linked instances, remove the .minecraft symlink itself so we
+        // don't accidentally follow it and delete the original game files.
+        let game_dir = root.join(".minecraft");
+        if game_dir.is_symlink() {
+            tokio::fs::remove_file(&game_dir).await?;
+        }
         tokio::fs::remove_dir_all(&root).await?;
         Ok(())
+    }
+
+    /// Remove a linked instance from the library without deleting the original files.
+    ///
+    /// This is the safe way to remove an instance that points at an external
+    /// launcher's directory.  It removes the CTMLauncher metadata and symlink
+    /// but leaves the source directory untouched.
+    pub async fn unlink(&self, id: &str) -> Result<()> {
+        self.delete(id).await
     }
 
     /// Rename an instance's display name, persisting `instance.json`.

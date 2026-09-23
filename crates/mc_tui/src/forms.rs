@@ -234,6 +234,8 @@ pub enum PickerTarget {
     ChangeGameVersion,
     /// Move the selected instance to a group.
     MoveToGroup,
+    /// Import an external launcher instance.
+    ImportExternal,
 }
 
 /// A searchable, keyboard-driven list of versions.

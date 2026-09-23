@@ -1,6 +1,7 @@
 //! Messages sent from background engine tasks to the UI thread.
 
 use mc_core::auth::{Account, DeviceCodePrompt};
+use mc_core::import::ExternalInstance;
 use mc_core::launch::{JavaInstallation, LogReceiver, ProcessHandle};
 use mc_core::logs::CrashAnalysis;
 use mc_core::modrinth::{InstalledMod, Project, SearchResults, Version};
@@ -95,6 +96,8 @@ pub enum EngineEvent {
         path: String,
         img: Option<mc_core::img::RgbaImage>,
     },
+    /// External instances found by scanning a launcher directory.
+    ExternalInstances(Vec<ExternalInstance>),
 }
 
 /// Convenience alias for the sender side.

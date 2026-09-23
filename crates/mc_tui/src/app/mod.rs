@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use mc_core::auth::AccountStore;
+use mc_core::import::ExternalInstance;
 use mc_core::instance::{Instance, InstanceManager};
 use mc_core::launch::{JavaInstallation, LogReceiver, ProcessHandle};
 use mc_core::logs::{self, CrashAnalysis, LogBuffer};
@@ -288,6 +289,9 @@ pub struct App {
     pub groups: Vec<String>,
     pub selected_group: String,
 
+    pub external_instances: Vec<ExternalInstance>,
+    pub external_state: ListState,
+
     pub accounts: AccountStore,
     pub account_state: ListState,
 
@@ -385,6 +389,8 @@ impl App {
             instance_state: ListState::default(),
             groups: Vec::new(),
             selected_group: String::new(),
+            external_instances: Vec::new(),
+            external_state: ListState::default(),
             accounts,
             account_state: ListState::default(),
             search_query: String::new(),

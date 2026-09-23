@@ -483,12 +483,26 @@ pub(crate) fn confirm_delete_instance(&mut self) {
     let Some(instance) = self.selected_instance().cloned() else {
         return;
     };
+    let (title, message) = if instance.is_linked() {
+        (
+            "Unlink Instance",
+            format!(
+                "Remove '{}' from the library without deleting the original files?",
+                instance.name()
+            ),
+        )
+    } else {
+        (
+            "Delete Instance",
+            format!(
+                "Delete '{}' and all of its files? This cannot be undone.",
+                instance.name()
+            ),
+        )
+    };
     self.overlay = Some(Overlay::confirm(
-        "Delete Instance",
-        format!(
-            "Delete '{}' and all of its files? This cannot be undone.",
-            instance.name()
-        ),
+        title,
+        message,
         ConfirmAction::DeleteInstance(instance.id().to_string()),
     ));
 }
@@ -1882,6 +1896,141 @@ pub(crate) fn is_hovered(&self, rect: Rect) -> bool {
     self.mouse_pos
         .map(|pos| rect_contains(rect, pos))
         .unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------
+// Actions: external launcher import
+// ---------------------------------------------------------------------
+
+/// Scan for Modrinth App instances in the default location.
+pub(crate) fn scan_modrinth_app_instances(&mut self) {
+    let tx = self.engine_tx.clone();
+    self.progress = Some((None, "Scanning Modrinth App...".into()));
+    tokio::spawn(async move {
+        let result = async {
+            let dir = mc_core::import::modrinth_app::modrinth_app_dir()
+                .ok_or_else(|| CoreError::other("Modrinth App not found"))?;
+            let profiles = dir.join("profiles");
+            let instances = if dir.join("app.db").exists() {
+                mc_core::import::modrinth_app::list_instances(&dir)?
+            } else {
+                mc_core::import::modrinth_app::list_from_profile_json(&profiles)?
+            };
+            Ok::<_, CoreError>(instances)
+        }
+        .await;
+        let _ = tx.send(EngineEvent::ProgressDone);
+        match result {
+            Ok(instances) => {
+                let _ = tx.send(EngineEvent::ExternalInstances(instances));
+            }
+            Err(err) => {
+                let _ = tx.send(EngineEvent::Error(format!("Scan failed: {err}")));
+            }
+        }
+    });
+}
+
+/// Import an external instance by scanning from a user-provided path.
+pub(crate) fn scan_from_path(&mut self, path: String) {
+    let path = std::path::PathBuf::from(path.trim());
+    if !path.exists() {
+        self.set_toast("Path does not exist", true);
+        return;
+    }
+    let tx = self.engine_tx.clone();
+    self.progress = Some((None, "Scanning directory...".into()));
+    tokio::spawn(async move {
+        let result = async {
+            let detected = mc_core::import::detect::detect_metadata(&path);
+            let launcher = mc_core::import::detect_launcher(&path);
+            let name = detected
+                .name
+                .unwrap_or_else(|| path.file_name().unwrap_or_default().to_string_lossy().to_string());
+            let game_version = detected.game_version.unwrap_or_else(|| "1.20.1".to_string());
+            let loader = detected.loader.unwrap_or(mc_core::instance::LoaderType::Vanilla);
+            Ok::<_, CoreError>(vec![mc_core::import::ExternalInstance {
+                name,
+                game_version,
+                loader,
+                loader_version: detected.loader_version,
+                source_path: path,
+                icon_path: detected.icon_path,
+                launcher,
+            }])
+        }
+        .await;
+        let _ = tx.send(EngineEvent::ProgressDone);
+        match result {
+            Ok(instances) => {
+                let _ = tx.send(EngineEvent::ExternalInstances(instances));
+            }
+            Err(err) => {
+                let _ = tx.send(EngineEvent::Error(format!("Scan failed: {err}")));
+            }
+        }
+    });
+}
+
+/// Import a selected external instance into CTMLauncher.
+pub(crate) fn import_selected_external(&mut self) {
+    let Some(external) = self.external_state.selected()
+        .and_then(|idx| self.external_instances.get(idx))
+        .cloned()
+    else {
+        self.set_toast("No external instance selected", true);
+        return;
+    };
+    let manager = self.instance_manager.clone();
+    let paths = self.paths.clone();
+    let tx = self.engine_tx.clone();
+    self.progress = Some((None, format!("Importing '{}'...", external.name)));
+    tokio::spawn(async move {
+        let result = mc_core::import::import_external(&external, &manager, &paths).await;
+        let _ = tx.send(EngineEvent::ProgressDone);
+        match result {
+            Ok(instance) => {
+                let _ = tx.send(EngineEvent::InstancesChanged);
+                let _ = tx.send(EngineEvent::Toast(format!(
+                    "Imported '{}' from {}",
+                    instance.name(),
+                    external.launcher.label()
+                )));
+            }
+            Err(err) => {
+                let _ = tx.send(EngineEvent::Error(format!("Import failed: {err}")));
+            }
+        }
+    });
+}
+
+/// Import an external instance by name lookup (used by picker).
+pub(crate) fn import_external_by_name(&mut self, name: &str) {
+    let Some(external) = self.external_instances.iter().find(|e| e.name == name).cloned() else {
+        self.set_toast(&format!("Instance '{}' not found", name), true);
+        return;
+    };
+    let manager = self.instance_manager.clone();
+    let paths = self.paths.clone();
+    let tx = self.engine_tx.clone();
+    self.progress = Some((None, format!("Importing '{}'...", external.name)));
+    tokio::spawn(async move {
+        let result = mc_core::import::import_external(&external, &manager, &paths).await;
+        let _ = tx.send(EngineEvent::ProgressDone);
+        match result {
+            Ok(instance) => {
+                let _ = tx.send(EngineEvent::InstancesChanged);
+                let _ = tx.send(EngineEvent::Toast(format!(
+                    "Imported '{}' from {}",
+                    instance.name(),
+                    external.launcher.label()
+                )));
+            }
+            Err(err) => {
+                let _ = tx.send(EngineEvent::Error(format!("Import failed: {err}")));
+            }
+        }
+    });
 }
 
 }

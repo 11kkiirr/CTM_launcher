@@ -211,6 +211,22 @@ impl App {
                     self.local_images.insert(path, img);
                 }
             }
+            EngineEvent::ExternalInstances(instances) => {
+                self.external_instances = instances.clone();
+                if instances.is_empty() {
+                    self.external_state.select(None);
+                    self.set_toast("No external instances found", true);
+                } else {
+                    self.external_state.select(Some(0));
+                    let names: Vec<String> = instances.iter().map(|i| i.name.clone()).collect();
+                    let picker = crate::forms::VersionPicker::new(
+                        "Select Instance to Import",
+                        names,
+                        crate::forms::PickerTarget::ImportExternal,
+                    );
+                    self.overlay = Some(Overlay::Picker(picker));
+                }
+            }
         }
     }
 }

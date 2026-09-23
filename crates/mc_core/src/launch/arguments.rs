@@ -108,7 +108,11 @@ pub fn build(ctx: &ArgContext<'_>) -> Vec<String> {
         for argument in &arguments.game {
             append_argument(&mut argv, argument, ctx.rule_ctx, &substitutions);
         }
-    } else if let Some(legacy) = &ctx.details.minecraft_arguments {
+    }
+    // NeoForge puts FML args (--launchTarget, --fml.neoforgeVersion, etc.)
+    // in `minecraftArguments` even when the vanilla parent uses the modern
+    // `arguments` format.  Always append them so they are never lost.
+    if let Some(legacy) = &ctx.details.minecraft_arguments {
         for token in legacy.split_whitespace() {
             argv.push(substitute(token, &substitutions));
         }

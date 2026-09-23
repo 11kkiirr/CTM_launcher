@@ -348,9 +348,16 @@ impl App {
         );
 
         // 4) Game status.
-        let status = match &instance.metadata.modpack {
-            Some(pack) => format!("⛁ {}", pack.name),
-            None => "Ready to play".to_string(),
+        let status = if instance.is_linked() {
+            match &instance.metadata.modpack {
+                Some(pack) => format!("🔗 {} (linked)", pack.name),
+                None => "🔗 Linked instance".to_string(),
+            }
+        } else {
+            match &instance.metadata.modpack {
+                Some(pack) => format!("⛁ {}", pack.name),
+                None => "Ready to play".to_string(),
+            }
         };
         frame.render_widget(
             Paragraph::new(Span::styled(

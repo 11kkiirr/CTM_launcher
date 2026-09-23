@@ -26,6 +26,7 @@ chrono.workspace = true
 bytes.workspace = true
 urlencoding.workspace = true
 regex.workspace = true
+rusqlite.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
