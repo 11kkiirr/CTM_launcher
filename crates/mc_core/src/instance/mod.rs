@@ -296,8 +296,10 @@ impl Instance {
         self.game_dir().join("resourcepacks")
     }
 
+    /// Shader packs live in `shaderpacks/` (Iris, OptiFine, Modrinth App).
+    /// Note: `shaders/` is a different directory used for core shaders.
     pub fn shaders_dir(&self) -> PathBuf {
-        self.game_dir().join("shaders")
+        self.game_dir().join("shaderpacks")
     }
 
     pub fn saves_dir(&self) -> PathBuf {
@@ -337,6 +339,7 @@ impl Instance {
             self.mods_dir(),
             self.config_dir(),
             self.resourcepacks_dir(),
+            self.shaders_dir(),
             self.saves_dir(),
             self.logs_dir(),
             self.crash_reports_dir(),
@@ -383,27 +386,164 @@ impl InstanceManager {
             .collect())
     }
 
-    /// Collect all unique non-empty group names across every instance.
+    /// Known group names: the registry (`groups.json`) merged with any
+    /// group still referenced by an instance (migration), sorted + deduped.
+    /// Empty groups are preserved so they can exist before instances move in.
     pub fn groups(&self) -> Vec<String> {
-        let mut groups: Vec<String> = self
-            .list()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|i| i.metadata.group)
-            .filter(|g| !g.is_empty())
-            .collect();
-        groups.sort();
-        groups.dedup();
-        groups
+        let mut names = self.load_stored_groups();
+        names.extend(
+            self.list()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|i| i.metadata.group)
+                .filter(|g| !g.is_empty()),
+        );
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Number of instances in each group; key `""` holds the ungrouped count.
+    pub fn group_counts(&self) -> std::collections::HashMap<String, usize> {
+        let mut counts = std::collections::HashMap::new();
+        for instance in self.list().unwrap_or_default() {
+            *counts.entry(instance.metadata.group).or_insert(0) += 1;
+        }
+        counts
     }
 
     /// Assign an instance to a group (empty string = ungrouped).
+    /// Non-empty groups are ensured in the registry so empty groups persist.
     pub async fn set_group(&self, id: &str, group: &str) -> Result<()> {
         let instance = self.get(id)?;
         let meta_file = instance.metadata_file();
         let mut metadata = instance.metadata;
         metadata.group = group.to_string();
-        write_json(meta_file, &metadata).await
+        write_json(meta_file, &metadata).await?;
+        if !group.is_empty() {
+            self.ensure_group_in_registry(group).await?;
+        }
+        Ok(())
+    }
+
+    /// Create a named group (no-op if the name already exists).
+    pub async fn create_group(&self, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(CoreError::other("group name cannot be empty"));
+        }
+        let mut groups = self.load_stored_groups();
+        if groups.iter().any(|g| g == name) {
+            return Ok(());
+        }
+        groups.push(name.to_string());
+        self.save_stored_groups(groups).await
+    }
+
+    /// Rename a group across the registry and every member instance.
+    pub async fn rename_group(&self, old: &str, new: &str) -> Result<()> {
+        let old = old.trim();
+        let new = new.trim();
+        if old.is_empty() || new.is_empty() {
+            return Err(CoreError::other("group name cannot be empty"));
+        }
+        if old == new {
+            return Ok(());
+        }
+
+        let mut groups = self.load_stored_groups();
+        // Also pull any derived-only names so rename works pre-registry.
+        for instance in self.list().unwrap_or_default() {
+            let g = instance.metadata.group;
+            if !g.is_empty() && !groups.contains(&g) {
+                groups.push(g);
+            }
+        }
+        if let Some(pos) = groups.iter().position(|g| g == old) {
+            groups[pos] = new.to_string();
+        } else {
+            groups.push(new.to_string());
+        }
+        // Drop the old name if it remains (shouldn't after replace).
+        groups.retain(|g| g != old);
+        groups.sort();
+        groups.dedup();
+        self.save_stored_groups(groups).await?;
+
+        for instance in self.list().unwrap_or_default() {
+            if instance.metadata.group == old {
+                let meta_file = instance.metadata_file();
+                let mut metadata = instance.metadata;
+                metadata.group = new.to_string();
+                write_json(meta_file, &metadata).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Delete a group: remove it from the registry and ungroup its members.
+    pub async fn delete_group(&self, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(CoreError::other("group name cannot be empty"));
+        }
+
+        let mut groups = self.load_stored_groups();
+        for instance in self.list().unwrap_or_default() {
+            let g = instance.metadata.group;
+            if !g.is_empty() && !groups.contains(&g) {
+                groups.push(g);
+            }
+        }
+        groups.retain(|g| g != name);
+        self.save_stored_groups(groups).await?;
+
+        for instance in self.list().unwrap_or_default() {
+            if instance.metadata.group == name {
+                let meta_file = instance.metadata_file();
+                let mut metadata = instance.metadata;
+                metadata.group = String::new();
+                write_json(meta_file, &metadata).await?;
+            }
+        }
+        Ok(())
+    }
+
+    fn load_stored_groups(&self) -> Vec<String> {
+        let path = self.paths.groups_file();
+        if !path.exists() {
+            return Vec::new();
+        }
+        let raw = std::fs::read_to_string(&path).unwrap_or_default();
+        #[derive(serde::Deserialize)]
+        struct File {
+            #[serde(default)]
+            groups: Vec<String>,
+        }
+        serde_json::from_str::<File>(&raw)
+            .map(|f| f.groups)
+            .unwrap_or_default()
+    }
+
+    async fn save_stored_groups(&self, groups: Vec<String>) -> Result<()> {
+        #[derive(serde::Serialize)]
+        struct File {
+            groups: Vec<String>,
+        }
+        let path = self.paths.groups_file();
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        write_json(path, &File { groups }).await
+    }
+
+    async fn ensure_group_in_registry(&self, name: &str) -> Result<()> {
+        let mut groups = self.load_stored_groups();
+        if groups.iter().any(|g| g == name) {
+            return Ok(());
+        }
+        groups.push(name.to_string());
+        self.save_stored_groups(groups).await
     }
 
     /// List every instance that has a readable `instance.json`.
@@ -621,6 +761,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn shaders_dir_is_shaderpacks_not_shaders() {
+        let root = std::path::PathBuf::from("/tmp/instance-root");
+        let meta = InstanceMetadata::new("id", "Test", "1.21.1", LoaderType::Fabric, None);
+        let instance = Instance::new(root, meta);
+        // Minecraft/Iris/OptiFine/Modrinth App use `shaderpacks/`,
+        // not `shaders/` (that's for core shaders inside resource packs).
+        assert_eq!(
+            instance.shaders_dir(),
+            instance.game_dir().join("shaderpacks")
+        );
+        assert!(!instance.shaders_dir().ends_with("shaders"));
+    }
+
     #[tokio::test]
     async fn group_round_trip() {
         let dir = std::env::temp_dir().join(format!("ctm-inst-{}", uuid::Uuid::new_v4()));
@@ -648,18 +802,57 @@ mod tests {
         assert_eq!(modded.len(), 1);
         assert_eq!(modded[0].name(), "A");
 
-        let all = manager.list().unwrap();
-        assert_eq!(all.len(), 2);
+        let counts = manager.group_counts();
+        assert_eq!(counts.get("Modded"), Some(&1));
+        assert_eq!(counts.get("Vanilla"), Some(&1));
+        // No ungrouped instances yet — key may be absent.
+        assert_ne!(counts.get(""), Some(&1));
 
+        // Ungrouping keeps the name in the registry (empty groups persist).
         manager.set_group(inst1.id(), "").await.unwrap();
         let groups = manager.groups();
-        assert_eq!(groups, vec!["Vanilla".to_string()]);
+        assert_eq!(groups, vec!["Modded".to_string(), "Vanilla".to_string()]);
+        assert_eq!(manager.list_in_group("").unwrap().len(), 1);
 
-        manager.set_group(inst2.id(), "").await.unwrap();
+        // Rename rewrites registry + members.
+        manager.rename_group("Modded", "Pack").await.unwrap();
+        assert!(manager.groups().contains(&"Pack".to_string()));
+        assert!(!manager.groups().contains(&"Modded".to_string()));
+
+        // Delete removes from registry and ungroups members.
+        manager.delete_group("Pack").await.unwrap();
+        manager.delete_group("Vanilla").await.unwrap();
         assert!(manager.groups().is_empty());
+        assert!(manager
+            .list()
+            .unwrap()
+            .iter()
+            .all(|i| i.metadata.group.is_empty()));
 
         manager.delete(inst1.id()).await.unwrap();
         manager.delete(inst2.id()).await.unwrap();
+        assert!(manager.list().unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn create_empty_group_persists() {
+        let dir = std::env::temp_dir().join(format!("ctm-inst-{}", uuid::Uuid::new_v4()));
+        let paths = Paths::rooted_at(&dir);
+        paths.ensure_layout().unwrap();
+        let manager = InstanceManager::new(paths);
+
+        manager.create_group("Empty").await.unwrap();
+        assert_eq!(manager.groups(), vec!["Empty".to_string()]);
+
+        // Duplicate create is a no-op.
+        manager.create_group("Empty").await.unwrap();
+        assert_eq!(manager.groups().len(), 1);
+
+        manager.delete_group("Empty").await.unwrap();
+        assert!(manager.groups().is_empty());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

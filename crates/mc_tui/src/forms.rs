@@ -206,7 +206,10 @@ pub enum TextAction {
     CustomGameArgs,
     SkinUrl,
     RenameInstance,
+    /// Create a new standalone group by name.
     NewGroup,
+    /// Rename an existing group; payload is the old name.
+    RenameGroup(String),
     None,
 }
 
@@ -221,6 +224,8 @@ pub enum ConfirmAction {
     DeleteScreenshot(PathBuf),
     DeleteResourcePack(PathBuf),
     DeleteShader(PathBuf),
+    /// Delete a group by name (ungroups its members); payload is the name.
+    DeleteGroup(String),
     Quit,
     None,
 }

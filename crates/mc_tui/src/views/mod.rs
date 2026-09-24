@@ -91,7 +91,14 @@ pub(crate) fn move_sel(state: &mut ListState, len: usize, delta: i32) {
         state.select(None);
         return;
     }
-    let current = state.selected().unwrap_or(0) as i32;
+    let current = match state.selected() {
+        Some(i) => i as i32,
+        None => {
+            let start = if delta < 0 { len as i32 - 1 } else { 0 };
+            state.select(Some(start as usize));
+            return;
+        }
+    };
     let next = (current + delta).clamp(0, len as i32 - 1) as usize;
     state.select(Some(next));
 }

@@ -33,22 +33,44 @@ impl BuildKind {
         ]
     }
 
+    #[allow(dead_code)]
     pub fn label(&self) -> &'static str {
         match self {
-            BuildKind::Clean => "Clean Build",
-            BuildKind::Import => "Import .mrpack",
-            BuildKind::Modrinth => "Modrinth Modpack",
-            BuildKind::External => "External Launcher",
+            BuildKind::Clean => crate::i18n::en_static("wizard.clean"),
+            BuildKind::Import => crate::i18n::en_static("wizard.import_mrpack"),
+            BuildKind::Modrinth => crate::i18n::en_static("wizard.modrinth_pack"),
+            BuildKind::External => crate::i18n::en_static("wizard.external"),
         }
     }
 
+    pub fn label_lang(&self, lang: crate::i18n::Lang) -> String {
+        let key = match self {
+            BuildKind::Clean => "wizard.clean",
+            BuildKind::Import => "wizard.import_mrpack",
+            BuildKind::Modrinth => "wizard.modrinth_pack",
+            BuildKind::External => "wizard.external",
+        };
+        crate::i18n::tr_string(lang, key)
+    }
+
+    #[allow(dead_code)]
     pub fn description(&self) -> &'static str {
         match self {
-            BuildKind::Clean => "Vanilla or a modloader, configured from scratch.",
-            BuildKind::Import => "Import a local Modrinth .mrpack file.",
-            BuildKind::Modrinth => "Browse and install a modpack from Modrinth.",
-            BuildKind::External => "Import an instance from Modrinth App or another launcher.",
+            BuildKind::Clean => crate::i18n::en_static("wizard.desc_clean"),
+            BuildKind::Import => crate::i18n::en_static("wizard.desc_import"),
+            BuildKind::Modrinth => crate::i18n::en_static("wizard.desc_modrinth"),
+            BuildKind::External => crate::i18n::en_static("wizard.desc_external"),
         }
+    }
+
+    pub fn description_lang(&self, lang: crate::i18n::Lang) -> String {
+        let key = match self {
+            BuildKind::Clean => "wizard.desc_clean",
+            BuildKind::Import => "wizard.desc_import",
+            BuildKind::Modrinth => "wizard.desc_modrinth",
+            BuildKind::External => "wizard.desc_external",
+        };
+        crate::i18n::tr_string(lang, key)
     }
 }
 
@@ -501,7 +523,7 @@ impl App {
     fn submit_clean_build(&mut self, wizard: &CreateWizard) {
         let name = wizard.name.trim().to_string();
         if name.is_empty() {
-            self.set_toast("Build name cannot be empty", true);
+            self.set_toast(self.tr("toast.name_required"), true);
             self.overlay = Some(Overlay::Wizard(wizard.clone()));
             return;
         }
@@ -518,7 +540,7 @@ impl App {
     fn submit_import(&mut self, wizard: &CreateWizard) {
         let path = wizard.path.trim().to_string();
         if path.is_empty() {
-            self.set_toast("Enter a path to a .mrpack file", true);
+            self.set_toast(self.tr("toast.mrpack_path_required"), true);
             self.overlay = Some(Overlay::Wizard(wizard.clone()));
             return;
         }
@@ -529,7 +551,7 @@ impl App {
     fn submit_external_scan(&mut self, wizard: &CreateWizard) {
         let path = wizard.path.trim().to_string();
         if path.is_empty() {
-            self.set_toast("Enter a path to the instance directory", true);
+            self.set_toast(self.tr("toast.instance_path_required"), true);
             self.overlay = Some(Overlay::Wizard(wizard.clone()));
             return;
         }
@@ -594,7 +616,7 @@ impl App {
                 }
             }
             PickerTarget::ChangeGameVersion => self.change_instance_version(value),
-            PickerTarget::MoveToGroup => self.move_instance_to_group(&value),
+            PickerTarget::MoveToGroup => self.apply_group_picker(&value),
             PickerTarget::ImportExternal => {
                 self.import_external_by_name(&value);
             }
@@ -642,7 +664,8 @@ impl App {
             .split(content);
 
         frame.render_widget(
-            Paragraph::new(Span::styled("New Build", self.theme.header())).style(surface),
+            Paragraph::new(Span::styled(self.tr("wizard.new_build"), self.theme.header()))
+                .style(surface),
             chunks[0],
         );
 
@@ -650,7 +673,7 @@ impl App {
 
         frame.render_widget(
             Paragraph::new(Span::styled(
-                wizard.kind.description().to_string(),
+                wizard.kind.description_lang(self.lang()),
                 self.theme.card_dim(),
             ))
             .style(surface),
@@ -670,13 +693,13 @@ impl App {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("1-3", self.theme.accent()),
-                Span::styled(" tab", self.theme.card_dim()),
+                Span::styled(self.tr("wizard.tab"), self.theme.card_dim()),
                 Span::styled("   ↑↓/Tab", self.theme.accent()),
-                Span::styled(" move", self.theme.card_dim()),
+                Span::styled(self.tr("wizard.move"), self.theme.card_dim()),
                 Span::styled("   Enter", self.theme.accent()),
-                Span::styled(" continue", self.theme.card_dim()),
+                Span::styled(self.tr("wizard.continue"), self.theme.card_dim()),
                 Span::styled("   Esc", self.theme.accent()),
-                Span::styled(" back", self.theme.card_dim()),
+                Span::styled(self.tr("wizard.back"), self.theme.card_dim()),
             ]))
             .style(surface),
             chunks[4],
@@ -689,7 +712,7 @@ impl App {
         };
         let mut x = area.x;
         for kind in BuildKind::all() {
-            let label = format!(" {} ", kind.label());
+            let label = format!(" {} ", kind.label_lang(self.lang()));
             let width = label.chars().count() as u16;
             let rect = Rect {
                 x,
@@ -721,29 +744,42 @@ impl App {
         let Some(Overlay::Wizard(wizard)) = self.overlay.clone() else {
             return;
         };
+        let lang = self.lang();
         let rows: Vec<(&str, String, WRowTag)> = match wizard.kind {
             BuildKind::Clean => vec![
-                ("Name", wizard.name.clone(), WRowTag::Text),
-                ("Minecraft", wizard.game_version.clone(), WRowTag::Pick),
-                ("Loader", wizard.loader().label().to_string(), WRowTag::Pick),
+                (self.tr("wizard.name"), wizard.name.clone(), WRowTag::Text),
                 (
-                    "Loader Version",
+                    self.tr("wizard.minecraft"),
+                    wizard.game_version.clone(),
+                    WRowTag::Pick,
+                ),
+                (
+                    self.tr("wizard.loader"),
+                    wizard.loader().label().to_string(),
+                    WRowTag::Pick,
+                ),
+                (
+                    self.tr("wizard.loader_version"),
                     if wizard.loader_version.is_empty() {
-                        "latest".to_string()
+                        crate::i18n::tr_string(lang, "wizard.latest")
                     } else {
                         wizard.loader_version.clone()
                     },
                     WRowTag::Pick,
                 ),
-                ("", "Create".to_string(), WRowTag::Submit),
+                ("", self.tr("btn.create").to_string(), WRowTag::Submit),
             ],
             BuildKind::Import => vec![
-                ("Archive", wizard.path.clone(), WRowTag::Text),
-                ("", "Import".to_string(), WRowTag::Submit),
+                (self.tr("wizard.archive"), wizard.path.clone(), WRowTag::Text),
+                ("", self.tr("btn.import").to_string(), WRowTag::Submit),
             ],
             BuildKind::External => vec![
-                ("Instance Path", wizard.path.clone(), WRowTag::Text),
-                ("", "Scan & Import".to_string(), WRowTag::Submit),
+                (
+                    self.tr("wizard.instance_path"),
+                    wizard.path.clone(),
+                    WRowTag::Text,
+                ),
+                ("", self.tr("btn.scan_import").to_string(), WRowTag::Submit),
             ],
             _ => return,
         };
@@ -773,7 +809,7 @@ impl App {
                     Span::styled(value.clone(), style),
                 ];
                 if *tag == WRowTag::Pick {
-                    spans.push(Span::styled("   ▾ pick", self.theme.accent()));
+                    spans.push(Span::styled(self.tr("wizard.pick"), self.theme.accent()));
                 }
                 Line::from(spans)
             };
@@ -787,9 +823,9 @@ impl App {
         }
         if wizard.kind == BuildKind::Import || wizard.kind == BuildKind::External {
             let browse_label = if wizard.kind == BuildKind::External {
-                "   Scan Modrinth App…"
+                self.tr("wizard.scan_modrinth")
             } else {
-                "   Browse… (file dialog)"
+                self.tr("wizard.browse_file")
             };
             let browse_row = Rect {
                 x: area.x,
@@ -824,7 +860,7 @@ impl App {
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("Search  ", self.theme.card_dim()),
+                Span::styled(self.tr("wizard.search"), self.theme.card_dim()),
                 Span::styled(format!("{}█", wizard.query), self.theme.accent()),
             ]))
             .style(surface),

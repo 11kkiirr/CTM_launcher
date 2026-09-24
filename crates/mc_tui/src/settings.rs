@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use crate::i18n::Lang;
 use mc_core::instance::GcPreset;
 use mc_core::util::{read_json_or_default, write_json, Paths};
 use serde::{Deserialize, Serialize};
@@ -33,6 +34,24 @@ impl AsciiBgAnchor {
             AsciiBgAnchor::BottomRight => "Bottom-Right",
         }
     }
+
+    /// Localized label for `lang`.
+    pub fn label_lang(self, lang: Lang) -> String {
+        let key = match self {
+            AsciiBgAnchor::TopLeft => "anchor.top_left",
+            AsciiBgAnchor::TopRight => "anchor.top_right",
+            AsciiBgAnchor::BottomLeft => "anchor.bottom_left",
+            AsciiBgAnchor::BottomRight => "anchor.bottom_right",
+        };
+        crate::i18n::tr_string(lang, key)
+    }
+
+    /// Match a (possibly localized) label back to the variant.
+    pub fn from_any_label(s: &str) -> Option<AsciiBgAnchor> {
+        AsciiBgAnchor::ALL.iter().copied().find(|a| {
+            a.label() == s || Lang::ALL.iter().any(|l| a.label_lang(*l) == s)
+        })
+    }
 }
 
 /// Global defaults applied to newly created instances and the UI.
@@ -59,6 +78,9 @@ pub struct LauncherSettings {
     /// Which corner the ASCII-art background is anchored to.
     #[serde(default)]
     pub ascii_bg_anchor: AsciiBgAnchor,
+    /// UI language.
+    #[serde(default)]
+    pub language: Lang,
 }
 
 fn default_min_memory() -> u32 {
@@ -82,6 +104,7 @@ impl Default for LauncherSettings {
             confirm_quit: false,
             log_auto_scroll: true,
             ascii_bg_anchor: AsciiBgAnchor::BottomRight,
+            language: Lang::default(),
         }
     }
 }

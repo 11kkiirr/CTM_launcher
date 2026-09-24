@@ -25,6 +25,10 @@ impl App {
             ])
             .split(area);
 
+        let search = self.tr("btn.search");
+        let store = self.tr("btn.store");
+        let import = self.tr("btn.import_mrpack");
+        let install = self.tr("btn.install");
         buttons_row(
             self,
             frame,
@@ -32,10 +36,10 @@ impl App {
             chunks[0].y,
             area.x + area.width,
             &[
-                ("Search", "/", ButtonId::Search),
-                ("Store", "s", ButtonId::BrowseMods),
-                ("Import .mrpack", "m", ButtonId::ImportModpack),
-                ("Install", "i", ButtonId::InstallProject),
+                (search, "/", ButtonId::Search),
+                (store, "s", ButtonId::BrowseMods),
+                (import, "m", ButtonId::ImportModpack),
+                (install, "i", ButtonId::InstallProject),
             ],
         );
 
@@ -65,8 +69,12 @@ impl App {
             )
         };
         frame.render_widget(
-            Paragraph::new(section_title("Modpacks", &suffix, &self.theme))
-                .style(self.theme.card()),
+            Paragraph::new(section_title(
+                self.tr("nav.modpacks"),
+                &suffix,
+                &self.theme,
+            ))
+            .style(self.theme.card()),
             Rect {
                 x: inner.x,
                 y: inner.y,
@@ -120,7 +128,7 @@ impl App {
         if self.search_results.is_empty() {
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "Press '/' to search Modrinth modpacks, or 'm' to import a local .mrpack.",
+                    self.tr("empty.modpacks_hint"),
                     self.theme.card_dim(),
                 ))
                 .style(self.theme.card()),
@@ -140,9 +148,10 @@ impl App {
             .selected_project
             .as_ref()
             .map(|p| p.title.clone())
-            .unwrap_or_else(|| "Versions".to_string());
+            .unwrap_or_else(|| self.tr("modpacks.versions").to_string());
         frame.render_widget(
-            Paragraph::new(section_title("Versions", &title, &self.theme)).style(self.theme.card()),
+            Paragraph::new(section_title(self.tr("modpacks.versions"), &title, &self.theme))
+                .style(self.theme.card()),
             Rect {
                 x: inner.x,
                 y: inner.y,
@@ -205,7 +214,7 @@ impl App {
         else {
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "Press '/' to search Modrinth modpacks, or 'm' to import a local .mrpack file.",
+                    self.tr("empty.modpacks_hint"),
                     self.theme.card_dim(),
                 ))
                 .style(self.theme.card()),
@@ -218,13 +227,13 @@ impl App {
             Line::from(Span::styled(hit.description.clone(), self.theme.card())),
             Line::from(""),
             Line::from(vec![
-                Span::styled("Downloads  ", self.theme.card_dim()),
+                Span::styled(self.tr("common.downloads"), self.theme.card_dim()),
                 Span::styled(format_count(hit.downloads), self.theme.accent()),
-                Span::styled("    Followers  ", self.theme.card_dim()),
+                Span::styled(self.tr("common.followers"), self.theme.card_dim()),
                 Span::styled(format_count(hit.follows), self.theme.accent()),
             ]),
             Line::from(vec![
-                Span::styled("Categories  ", self.theme.card_dim()),
+                Span::styled(self.tr("common.categories"), self.theme.card_dim()),
                 Span::styled(hit.categories.join(", "), self.theme.info_style()),
             ]),
         ];
@@ -249,13 +258,13 @@ impl App {
             Line::from(Span::styled(project.description.clone(), self.theme.card())),
             Line::from(""),
             Line::from(vec![
-                Span::styled("Downloads  ", self.theme.card_dim()),
+                Span::styled(self.tr("common.downloads"), self.theme.card_dim()),
                 Span::styled(format_count(project.downloads), self.theme.accent()),
-                Span::styled("    Versions  ", self.theme.card_dim()),
+                Span::styled(self.tr("modpacks.versions_col"), self.theme.card_dim()),
                 Span::styled(project.versions.len().to_string(), self.theme.accent()),
             ]),
             Line::from(Span::styled(
-                "Enter/i installs the selected version into the current instance. Esc goes back.",
+                self.tr("modpacks.install_hint"),
                 self.theme.card_dim(),
             )),
         ];
@@ -277,6 +286,8 @@ impl App {
                 }
                 KeyCode::Down | KeyCode::Char('j') => move_sel(&mut self.project_state, len, 1),
                 KeyCode::Up | KeyCode::Char('k') => move_sel(&mut self.project_state, len, -1),
+                KeyCode::PageDown => move_sel(&mut self.project_state, len, 10),
+                KeyCode::PageUp => move_sel(&mut self.project_state, len, -10),
                 KeyCode::Char('g') => jump(&mut self.project_state, len, false),
                 KeyCode::Char('G') => jump(&mut self.project_state, len, true),
                 KeyCode::Enter | KeyCode::Char('i') => self.install_selected_project(),
@@ -289,6 +300,8 @@ impl App {
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => move_sel(&mut self.search_state, len, 1),
             KeyCode::Up | KeyCode::Char('k') => move_sel(&mut self.search_state, len, -1),
+            KeyCode::PageDown => move_sel(&mut self.search_state, len, 10),
+            KeyCode::PageUp => move_sel(&mut self.search_state, len, -10),
             KeyCode::Char('g') => jump(&mut self.search_state, len, false),
             KeyCode::Char('G') => jump(&mut self.search_state, len, true),
             KeyCode::Char('/') => self.open_search_prompt(),

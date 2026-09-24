@@ -32,10 +32,19 @@ pub enum BrowseKind {
 impl BrowseKind {
     pub fn label(&self) -> &'static str {
         match self {
-            BrowseKind::Mods => "Mods",
-            BrowseKind::ResourcePacks => "Resource Packs",
-            BrowseKind::Shaders => "Shaders",
+            BrowseKind::Mods => crate::i18n::en_static("browse.kind_mods"),
+            BrowseKind::ResourcePacks => crate::i18n::en_static("browse.kind_rp"),
+            BrowseKind::Shaders => crate::i18n::en_static("browse.kind_shaders"),
         }
+    }
+
+    pub fn label_lang(&self, lang: crate::i18n::Lang) -> String {
+        let key = match self {
+            BrowseKind::Mods => "browse.kind_mods",
+            BrowseKind::ResourcePacks => "browse.kind_rp",
+            BrowseKind::Shaders => "browse.kind_shaders",
+        };
+        crate::i18n::tr_string(lang, key)
     }
 
     /// The Modrinth `project_type` facet value.
@@ -372,6 +381,68 @@ impl Browse {
 }
 
 impl App {
+    /// Whether the selected instance already has this Modrinth project
+    /// installed (mods by jar id/slug, RP/shaders by folder/file name).
+    pub(crate) fn is_hit_installed(&self, hit: &SearchHit) -> bool {
+        self.is_modrinth_installed(&hit.project_id, &hit.slug, &hit.title)
+    }
+
+    /// Shared installed check for a Modrinth project (id / slug / title).
+    pub(crate) fn is_modrinth_installed(
+        &self,
+        project_id: &str,
+        slug: &str,
+        title: &str,
+    ) -> bool {
+        let slug = slug.to_lowercase();
+        let title = title.to_lowercase();
+        let project_id = project_id.to_lowercase();
+        match self.browse.kind {
+            BrowseKind::Mods => self.installed_mods.iter().any(|m| {
+                let mid = m.mod_id.to_lowercase();
+                if !mid.is_empty() && (mid == slug || mid == project_id) {
+                    return true;
+                }
+                let stem = mc_core::modrinth::logical_name(&m.file_name)
+                    .trim_end_matches(".jar")
+                    .to_lowercase();
+                if stem == slug
+                    || stem.starts_with(&format!("{slug}-"))
+                    || stem.starts_with(&format!("{slug}."))
+                {
+                    return true;
+                }
+                let name = m.mod_name.to_lowercase();
+                !name.is_empty() && (name == title || name == slug)
+            }),
+            BrowseKind::ResourcePacks => self
+                .resource_packs
+                .iter()
+                .any(|p| Self::name_matches_project(p, &slug, &title)),
+            BrowseKind::Shaders => self
+                .shaders
+                .iter()
+                .any(|s| Self::name_matches_project(s, &slug, &title)),
+        }
+    }
+
+    /// Loose match of an installed pack/shader file name against a Modrinth
+    /// slug/title (ignores case, separators and `.zip` / `.disabled`).
+    fn name_matches_project(name: &str, slug: &str, title: &str) -> bool {
+        let norm = |s: &str| -> String {
+            s.to_lowercase()
+                .trim_end_matches(".disabled")
+                .trim_end_matches(".zip")
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect()
+        };
+        let n = norm(name);
+        let s = norm(slug);
+        let t = norm(title);
+        !n.is_empty() && ((s.len() > 2 && n.contains(&s)) || (!t.is_empty() && n.contains(&t)))
+    }
+
     // ---------------------------------------------------------------------
     // Rendering
     // ---------------------------------------------------------------------
@@ -416,10 +487,10 @@ impl App {
                 bar,
             );
         }
-        let search_label = " Search  ";
+        let search_label = self.tr("dialog.filter");
         let query_part = if self.browse.search_input.is_empty() && self.browse.query.is_empty() {
             Span::styled(
-                "type to search Modrinth...",
+                self.tr("browse.search_placeholder"),
                 Style::default().fg(self.theme.muted).bg(search_bg),
             )
         } else if search_focused {
@@ -520,9 +591,9 @@ impl App {
             let prev_style = if has_prev { self.theme.accent() } else { self.theme.dim() };
             let next_style = if has_next { self.theme.accent() } else { self.theme.dim() };
             let nav_line = Line::from(vec![
-                Span::styled(" « prev ", prev_style),
+                Span::styled(self.tr("browse.prev_only"), prev_style),
                 Span::styled("│", self.theme.card_dim()),
-                Span::styled(" next »", next_style),
+                Span::styled(self.tr("browse.next_only"), next_style),
             ]);
             frame.render_widget(Paragraph::new(nav_line).style(self.theme.card()), nav_rect);
             // Hit areas for the two halves.
@@ -560,7 +631,7 @@ impl App {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(" \u{258e}", self.theme.accent()),
-                Span::styled(" General", self.theme.header()),
+                Span::styled(self.tr("browse.general"), self.theme.header()),
             ])).style(self.theme.card()),
             general_header,
         );
@@ -575,7 +646,7 @@ impl App {
             };
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled("   Sort  ", self.theme.card_dim()),
+                    Span::styled(self.tr("browse.sort"), self.theme.card_dim()),
                     Span::styled(self.browse.sort.label().to_string(), style),
                 ]))
                 .style(self.theme.card()),
@@ -599,7 +670,7 @@ impl App {
             };
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled("   Side  ", self.theme.card_dim()),
+                    Span::styled(self.tr("browse.side"), self.theme.card_dim()),
                     Span::styled(side_label.to_string(), style),
                 ]))
                 .style(self.theme.card()),
@@ -619,7 +690,7 @@ impl App {
             };
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled("   Compat", self.theme.card_dim()),
+                    Span::styled(self.tr("browse.compat"), self.theme.card_dim()),
                     Span::styled(format!("  {compat_text}"), style),
                 ]))
                 .style(self.theme.card()),
@@ -636,8 +707,8 @@ impl App {
             let loader_header = Rect { x: inner.x, y, width: inner.width, height: 1 };
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(" \u{258e}", self.theme.accent()),
-                    Span::styled(" Loaders", self.theme.header()),
+                Span::styled(" \u{258e}", self.theme.accent()),
+                Span::styled(self.tr("browse.loaders"), self.theme.header()),
                 ])).style(self.theme.card()),
                 loader_header,
             );
@@ -671,8 +742,8 @@ impl App {
             let cat_header = Rect { x: inner.x, y, width: inner.width, height: 1 };
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(" \u{258e}", self.theme.accent()),
-                    Span::styled(" Categories", self.theme.header()),
+                Span::styled(" \u{258e}", self.theme.accent()),
+                Span::styled(self.tr("browse.categories"), self.theme.header()),
                 ])).style(self.theme.card()),
                 cat_header,
             );
@@ -779,7 +850,7 @@ impl App {
 
             // Text content (right of icon + bar)
             let bar_w: u16 = if is_selected && card_rect.width > ICON_W { 1 } else { 0 };
-            let install_w: u16 = 14; // width reserved for install button
+            let install_w: u16 = 12; // width reserved for the Install/Installed label
             let text_x = inner.x + ICON_W + bar_w;
             let text_w = card_rect.width.saturating_sub(ICON_W + bar_w + install_w);
 
@@ -816,7 +887,7 @@ impl App {
 
             // Row 2: description
             let desc = if hit.description.is_empty() {
-                "No description".to_string()
+                self.tr("empty.no_description").to_string()
             } else {
                 truncate(&hit.description, text_w as usize)
             };
@@ -872,12 +943,12 @@ impl App {
 
             // Row 4: client/server side
             let side_label = match (hit.client_side.as_str(), hit.server_side.as_str()) {
-                ("required", "required") => "Client + Server",
-                ("required", _) => "Client",
-                (_, "required") => "Server",
-                ("optional", "optional") => "Client + Server (optional)",
-                ("optional", _) => "Client (optional)",
-                (_, "optional") => "Server (optional)",
+                ("required", "required") => self.tr("browse.both"),
+                ("required", _) => self.tr("browse.client_only"),
+                (_, "required") => self.tr("browse.server_only"),
+                ("optional", "optional") => self.tr("browse.both_opt"),
+                ("optional", _) => self.tr("browse.client_opt"),
+                (_, "optional") => self.tr("browse.server_opt"),
                 _ => "",
             };
             if !side_label.is_empty() {
@@ -896,50 +967,35 @@ impl App {
                 );
             }
 
-            // Install button on the right side of the card (3 lines tall)
+            // Minimal install affordance on the right of the middle row.
+            let installed = self.is_hit_installed(&hit);
             let install_rect = Rect {
                 x: inner.x + ICON_W + bar_w + text_w,
-                y: card_y + 1,
+                y: card_y + 2,
                 width: install_w,
-                height: 3,
+                height: 1,
             };
-            let install_bg = if self.is_hovered(install_rect) || is_selected {
-                self.theme.green
+            let label = if installed {
+                self.tr("browse.installed")
             } else {
-                bg
+                self.tr("browse.install")
             };
-            let install_surface = Style::default().bg(install_bg);
-            // Fill the install button background
-            for row in 0..3u16 {
-                let row_rect = Rect { x: install_rect.x, y: install_rect.y + row, width: install_w, height: 1 };
-                frame.render_widget(
-                    Paragraph::new(" ".repeat(install_w as usize)).style(install_surface),
-                    row_rect,
-                );
-            }
-            // Border lines
-            let border_top = format!("\u{250c}{}\u{2510}", "\u{2500}".repeat((install_w as usize).saturating_sub(2)));
-            let border_bot = format!("\u{2514}{}\u{2518}", "\u{2500}".repeat((install_w as usize).saturating_sub(2)));
-            let border_top_rect = Rect { x: install_rect.x, y: install_rect.y, width: install_w, height: 1 };
-            let border_bot_rect = Rect { x: install_rect.x, y: install_rect.y + 2, width: install_w, height: 1 };
-            let border_style = if self.is_hovered(install_rect) || is_selected {
-                Style::default().fg(self.theme.bg).bg(install_bg)
-            } else {
-                Style::default().fg(self.theme.green).bg(bg)
-            };
-            frame.render_widget(Paragraph::new(Span::styled(border_top, border_style)).style(install_surface), border_top_rect);
-            frame.render_widget(Paragraph::new(Span::styled(border_bot, border_style)).style(install_surface), border_bot_rect);
-            // Label in center
-            let label = " Install ";
-            let label_x = install_rect.x + (install_w.saturating_sub(label.len() as u16)) / 2;
-            let label_style = if self.is_hovered(install_rect) || is_selected {
-                Style::default().fg(self.theme.bg).bg(install_bg).add_modifier(ratatui::style::Modifier::BOLD)
+            let install_hover = self.is_hovered(install_rect);
+            let label_style = if installed {
+                Style::default().fg(self.theme.muted).bg(bg)
+            } else if install_hover {
+                Style::default()
+                    .fg(self.theme.green_bright)
+                    .bg(bg)
+                    .add_modifier(ratatui::style::Modifier::BOLD)
             } else {
                 Style::default().fg(self.theme.green).bg(bg)
             };
             frame.render_widget(
-                Paragraph::new(Span::styled(label, label_style)).style(install_surface),
-                Rect { x: label_x, y: install_rect.y + 1, width: label.len() as u16, height: 1 },
+                Paragraph::new(Span::styled(label, label_style))
+                    .style(surface)
+                    .alignment(ratatui::layout::Alignment::Right),
+                install_rect,
             );
             self.push_hitbox(install_rect, HitAction::BrowseQuickInstall(idx));
 
@@ -948,14 +1004,12 @@ impl App {
 
         if hits.is_empty() {
             let hint = if self.browse.loading {
-                "Loading...".to_string()
+                self.tr("browse.loading").to_string()
             } else if self.browse.query.is_empty() {
-                "No projects found.".to_string()
+                self.tr("empty.no_projects").to_string()
             } else {
-                format!(
-                    "No results for '{}'. Press 's' to change the query.",
-                    self.browse.query
-                )
+                crate::i18n::tr_string(self.lang(), "browse.no_results")
+                    .replace("{}", &self.browse.query)
             };
             frame.render_widget(
                 Paragraph::new(Span::styled(hint, self.theme.card_dim())).style(self.theme.card()),
@@ -1074,7 +1128,7 @@ impl App {
 
     fn render_browse_detail_header(&mut self, frame: &mut Frame, area: Rect, project: &Project) {
         let line = Line::from(vec![
-            Span::styled(" \u{25C0} back  ", self.theme.accent()),
+            Span::styled(self.tr("browse.back"), self.theme.accent()),
             Span::styled(truncate(&project.title, 28), self.theme.header()),
             Span::styled(format!("  {}  ", project.project_type), self.theme.card_comment()),
             Span::styled(format!("\u{2913} {}", project.downloads), self.theme.accent()),
@@ -1153,13 +1207,11 @@ impl App {
         };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("Versions", self.theme.header()),
+                Span::styled(self.tr("browse.versions"), self.theme.header()),
                 Span::styled(
-                    format!(
-                        "   {}/{} compatible",
-                        compatible.len(),
-                        self.browse.versions.len()
-                    ),
+                    crate::i18n::tr_string(self.lang(), "browse.compatible")
+                        .replace("{}", &compatible.len().to_string())
+                        .replace("{}", &self.browse.versions.len().to_string()),
                     self.theme.card_dim(),
                 ),
             ]))
@@ -1233,7 +1285,7 @@ impl App {
         }
         if self.browse.versions.is_empty() {
             frame.render_widget(
-                Paragraph::new(Span::styled("No versions", self.theme.card_dim()))
+                Paragraph::new(Span::styled(self.tr("empty.no_versions"), self.theme.card_dim()))
                     .style(self.theme.card()),
                 Rect {
                     x: inner.x,
@@ -1244,7 +1296,8 @@ impl App {
             );
         }
 
-        // Install button
+        // Install button — shows Installed when the project is already present.
+        let installed = self.is_modrinth_installed(&project.id, &project.slug, &project.title);
         let install_y = inner.y + inner.height - 1;
         let install_rect = Rect {
             x: inner.x,
@@ -1252,13 +1305,20 @@ impl App {
             width: inner.width,
             height: 1,
         };
-        let install_style = if self.is_hovered(install_rect) {
+        let install_style = if installed {
+            self.theme.dim()
+        } else if self.is_hovered(install_rect) {
             self.theme.hover()
         } else {
             self.theme.accent()
         };
+        let install_label = if installed {
+            "  [ Installed — Install anyway ]"
+        } else {
+            "  [ Install selected version ]"
+        };
         frame.render_widget(
-            Paragraph::new(Span::styled("  [ Install selected version ]", install_style))
+            Paragraph::new(Span::styled(install_label, install_style))
                 .style(self.theme.card()),
             install_rect,
         );
@@ -1343,8 +1403,8 @@ impl App {
         };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("Description", self.theme.header()),
-                Span::styled("   j/k scroll · v versions", self.theme.card_dim()),
+                Span::styled(self.tr("browse.description"), self.theme.header()),
+                Span::styled(self.tr("browse.scroll_hint"), self.theme.card_dim()),
             ]))
             .style(self.theme.card()),
             header,
@@ -1377,7 +1437,7 @@ impl App {
         if self.browse.body.is_empty() {
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "No description provided.",
+                    self.tr("empty.no_description_long"),
                     self.theme.card_dim(),
                 ))
                 .style(self.theme.card()),

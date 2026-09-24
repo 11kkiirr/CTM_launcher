@@ -23,6 +23,9 @@ impl App {
             ])
             .split(area);
 
+        let toggle = self.tr("btn.toggle");
+        let delete = self.tr("btn.delete");
+        let browse = self.tr("btn.browse");
         buttons_row(
             self,
             frame,
@@ -30,9 +33,9 @@ impl App {
             chunks[0].y,
             area.x + area.width,
             &[
-                ("Toggle", "Space", ButtonId::ToggleSelected),
-                ("Delete", "d", ButtonId::DeleteSelected),
-                ("Browse", "s", ButtonId::ShadersBrowse),
+                (toggle, "Space", ButtonId::ToggleSelected),
+                (delete, "d", ButtonId::DeleteSelected),
+                (browse, "s", ButtonId::ShadersBrowse),
             ],
         );
 
@@ -67,7 +70,7 @@ impl App {
                 bar,
             );
         }
-        let search_label = " Filter  ";
+        let search_label = self.tr("dialog.filter");
         let query_text = if self.shaders_inline_query.is_empty() && !search_focused {
             String::new()
         } else if search_focused {
@@ -131,7 +134,7 @@ impl App {
         };
         frame.render_widget(
             Paragraph::new(section_title(
-                "Shader Packs",
+                self.tr("shaders.title"),
                 &format!("{instance_name}  ·  {count_text}"),
                 &self.theme,
             ))
@@ -149,9 +152,9 @@ impl App {
 
         if filtered.is_empty() {
             let hint = if !query_lower.is_empty() {
-                "No shaders match the filter.".to_string()
+                self.tr("empty.no_shaders_filter").to_string()
             } else {
-                "No shader packs found. Press 's' to browse Modrinth.".to_string()
+                self.tr("empty.no_shaders").to_string()
             };
             frame.render_widget(
                 Paragraph::new(Span::styled(hint, self.theme.card_dim())).style(self.theme.card()),
@@ -218,6 +221,14 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => {
                 let len = self.shaders.len();
                 move_sel(&mut self.shaders_state, len, -1);
+            }
+            KeyCode::PageDown => {
+                let len = self.shaders.len();
+                move_sel(&mut self.shaders_state, len, 10);
+            }
+            KeyCode::PageUp => {
+                let len = self.shaders.len();
+                move_sel(&mut self.shaders_state, len, -10);
             }
             KeyCode::Char('g') => jump(&mut self.shaders_state, self.shaders.len(), false),
             KeyCode::Char('G') => jump(&mut self.shaders_state, self.shaders.len(), true),

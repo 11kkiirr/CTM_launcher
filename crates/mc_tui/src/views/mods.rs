@@ -51,6 +51,10 @@ impl App {
             ])
             .split(area);
 
+        let toggle = self.tr("btn.toggle");
+        let delete = self.tr("btn.delete");
+        let browse = self.tr("btn.browse");
+        let updates = self.tr("btn.updates");
         buttons_row(
             self,
             frame,
@@ -58,10 +62,10 @@ impl App {
             chunks[0].y,
             area.x + area.width,
             &[
-                ("Toggle", "Space", ButtonId::ToggleMod),
-                ("Delete", "d", ButtonId::DeleteMod),
-                ("Browse", "s", ButtonId::BrowseMods),
-                ("Updates", "u", ButtonId::UpdateMods),
+                (toggle, "Space", ButtonId::ToggleMod),
+                (delete, "d", ButtonId::DeleteMod),
+                (browse, "s", ButtonId::BrowseMods),
+                (updates, "u", ButtonId::UpdateMods),
             ],
         );
 
@@ -96,7 +100,7 @@ impl App {
                 bar,
             );
         }
-        let search_label = " Filter  ";
+        let search_label = self.tr("dialog.filter");
         let query_text = if self.mods_search_query.is_empty() && !search_focused {
             String::new()
         } else if search_focused {
@@ -169,7 +173,7 @@ impl App {
         };
         frame.render_widget(
             Paragraph::new(section_title(
-                "Installed mods",
+                self.tr("mods.installed"),
                 &format!("{instance_name}  ·  {count_text}"),
                 &self.theme,
             ))
@@ -187,11 +191,11 @@ impl App {
 
         if filtered_indices.is_empty() {
             let hint = if self.mods_scanning {
-                "Scanning mods...".to_string()
+                self.tr("empty.scanning_mods").to_string()
             } else if !query_lower.is_empty() {
-                "No mods match the filter.".to_string()
+                self.tr("empty.no_mods_filter").to_string()
             } else {
-                "No mods installed. Press 's' to browse Modrinth.".to_string()
+                self.tr("empty.no_mods").to_string()
             };
             frame.render_widget(
                 Paragraph::new(Span::styled(hint, self.theme.card_dim())).style(self.theme.card()),
@@ -376,6 +380,8 @@ impl App {
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => move_sel(&mut self.mods_state, len, 1),
             KeyCode::Up | KeyCode::Char('k') => move_sel(&mut self.mods_state, len, -1),
+            KeyCode::PageDown => move_sel(&mut self.mods_state, len, 10),
+            KeyCode::PageUp => move_sel(&mut self.mods_state, len, -10),
             KeyCode::Char('g') => jump(&mut self.mods_state, len, false),
             KeyCode::Char('G') => jump(&mut self.mods_state, len, true),
             KeyCode::Char(' ') | KeyCode::Enter => self.toggle_selected_mod(),

@@ -3,6 +3,7 @@
 mod app;
 mod engine;
 mod forms;
+mod i18n;
 mod images;
 mod md;
 mod settings;

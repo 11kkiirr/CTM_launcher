@@ -143,7 +143,7 @@ pub(crate) fn render_nav_panel(&mut self, frame: &mut Frame, area: Rect) {
     }
 
     frame.render_widget(
-        Paragraph::new(Span::styled("Build Info", self.theme.card_comment()))
+        Paragraph::new(Span::styled(self.tr("info.build_info"), self.theme.card_comment()))
             .style(self.theme.card()),
         chunks[4],
     );
@@ -206,7 +206,7 @@ fn render_nav_button(&mut self, frame: &mut Frame, rect: Rect, nav: Nav, number:
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(format!(" {number}   "), num_style),
-                Span::styled(nav.menu_label().to_string(), label_style),
+                Span::styled(nav.menu_label_lang(self.lang()), label_style),
             ]))
             .style(surface),
             row,
@@ -218,7 +218,7 @@ fn render_nav_button(&mut self, frame: &mut Frame, rect: Rect, nav: Nav, number:
 fn render_build_info(&mut self, frame: &mut Frame, area: Rect) {
     let Some(instance) = self.selected_instance().cloned() else {
         frame.render_widget(
-            Paragraph::new(Span::styled("No build selected.", self.theme.card_dim()))
+            Paragraph::new(Span::styled(self.tr("empty.no_build_dot"), self.theme.card_dim()))
                 .style(self.theme.card()),
             area,
         );
@@ -227,11 +227,19 @@ fn render_build_info(&mut self, frame: &mut Frame, area: Rect) {
 
     let jvm = &instance.metadata.jvm;
     let lines = vec![
-        info_line("Version", &instance.metadata.game_version, &self.theme),
-        info_line("Loader", instance.metadata.loader.label(), &self.theme),
-        info_line("Memory", &format!("{} MB", jvm.max_memory_mb), &self.theme),
-        info_line("GC", jvm.gc.label(), &self.theme),
-        info_line("Mods", &self.installed_mods.len().to_string(), &self.theme),
+        info_line(self.tr("info.version"), &instance.metadata.game_version, &self.theme),
+        info_line(self.tr("info.loader"), instance.metadata.loader.label(), &self.theme),
+        info_line(
+            self.tr("info.memory"),
+            &format!("{} MB", jvm.max_memory_mb),
+            &self.theme,
+        ),
+        info_line(self.tr("info.gc"), jvm.gc.label(), &self.theme),
+        info_line(
+            self.tr("info.mods"),
+            &self.installed_mods.len().to_string(),
+            &self.theme,
+        ),
     ];
     frame.render_widget(Paragraph::new(lines).style(self.theme.card()), area);
 }
@@ -241,16 +249,10 @@ pub(crate) fn render_empty_state(&mut self, frame: &mut Frame, area: Rect) {
 
     let lines = vec![
         Line::from(""),
-        Line::from(Span::styled("No build selected", self.theme.header())),
-        Line::from(Span::styled(
-            "Pick a build from the Instances page, or create a new one.",
-            self.theme.card_dim(),
-        )),
+        Line::from(Span::styled(self.tr("empty.no_build"), self.theme.header())),
+        Line::from(Span::styled(self.tr("empty.no_build_line"), self.theme.card_dim())),
         Line::from(""),
-        Line::from(Span::styled(
-            "Press 'n' or click [+ New Build].",
-            self.theme.accent(),
-        )),
+        Line::from(Span::styled(self.tr("empty.press_n_create"), self.theme.accent())),
     ];
     frame.render_widget(Paragraph::new(lines).style(self.theme.card()), inner);
 }
@@ -262,17 +264,17 @@ pub(crate) fn render_header(&mut self, frame: &mut Frame, area: Rect) {
         .accounts
         .active()
         .map(|a| a.username.clone())
-        .unwrap_or_else(|| "no account".to_string());
+        .unwrap_or_else(|| self.tr("info.no_account").to_string());
 
     let subtitle = match self.nav {
-        Nav::Instances => "Instances".to_string(),
-        Nav::Browse => format!("Browse {}", self.browse.kind.label()),
-        Nav::Accounts => "Accounts".to_string(),
-        Nav::Launcher => "Launcher Settings".to_string(),
+        Nav::Instances => self.tr("nav.instances").to_string(),
+        Nav::Browse => format!("{} {}", self.tr("nav.browse"), self.browse.kind.label_lang(self.lang())),
+        Nav::Accounts => self.tr("nav.accounts").to_string(),
+        Nav::Launcher => self.tr("nav.launcher").to_string(),
         _ => self
             .selected_instance()
             .map(|i| i.name().to_string())
-            .unwrap_or_else(|| "no build".to_string()),
+            .unwrap_or_else(|| self.tr("info.no_build").to_string()),
     };
     let left = Line::from(vec![
         Span::styled(" CTMLauncher", self.theme.accent_bright()),
@@ -285,8 +287,8 @@ pub(crate) fn render_header(&mut self, frame: &mut Frame, area: Rect) {
     // side. Both remain reachable now that they are out of the nav menu.
     let account = format!("@ {active}");
     let account_w = account.chars().count() as u16;
-    let settings = "⚙ Settings";
-    let settings_w = settings.chars().count() as u16;
+        let settings = self.tr("btn.settings");
+        let settings_w = settings.chars().count() as u16;
     let total = account_w + 2 + settings_w;
     if total + 2 < area.width {
         let start = area.x + area.width - total - 1;
@@ -338,12 +340,15 @@ pub(crate) fn render_footer(&mut self, frame: &mut Frame, area: Rect) {
 
     let hints = footer_hints(self.nav);
     let mut spans: Vec<Span> = Vec::new();
-    for (idx, (key, label)) in hints.iter().enumerate() {
+    for (idx, (key, label_key)) in hints.iter().enumerate() {
         if idx > 0 {
             spans.push(Span::styled("  ", self.theme.comment_style()));
         }
         spans.push(Span::styled(key.to_string(), self.theme.accent()));
-        spans.push(Span::styled(format!(" {label}"), self.theme.dim()));
+        spans.push(Span::styled(
+            format!(" {}", self.tr(label_key)),
+            self.theme.dim(),
+        ));
     }
     let hint_width: u16 = spans.iter().map(|s| s.width() as u16).sum();
     let hint_rect = Rect {
@@ -426,7 +431,7 @@ pub(crate) fn render_overlay(&mut self, frame: &mut Frame, area: Rect) {
                 Line::from(Span::styled(prompt, self.theme.dim())),
                 Line::from(Span::styled(format!("{value}█"), self.theme.accent())),
                 Line::from(""),
-                Line::from(Span::styled("Enter confirm · Esc cancel", self.theme.dim())),
+                Line::from(Span::styled(self.tr("dialog.enter_confirm"), self.theme.dim())),
             ];
             crate::widgets::render_popup(frame, popup, &title, lines, &self.theme);
             self.push_hitbox(popup, HitAction::Overlay(OverlayAction::TextDone));
@@ -531,7 +536,7 @@ pub(crate) fn render_overlay(&mut self, frame: &mut Frame, area: Rect) {
             }
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "Tab/↑↓ field · ←→ change · Space toggle · Enter submit · Esc cancel",
+                    self.tr("dialog.form_keys"),
                     self.theme.dim(),
                 ))
                 .style(surface),
@@ -557,7 +562,7 @@ pub(crate) fn render_overlay(&mut self, frame: &mut Frame, area: Rect) {
             let lines = vec![
                 Line::from(Span::styled(message, self.theme.warning_style())),
                 Line::from(""),
-                Line::from(Span::styled("[Y]es   [N]o", self.theme.accent())),
+                Line::from(Span::styled(self.tr("dialog.yes_no"), self.theme.accent())),
             ];
             crate::widgets::render_popup(frame, popup, &title, lines, &self.theme);
             let mid = popup.width / 2;
@@ -585,7 +590,7 @@ pub(crate) fn render_overlay(&mut self, frame: &mut Frame, area: Rect) {
             let mut rendered: Vec<Line> = lines.into_iter().map(Line::from).collect();
             rendered.push(Line::from(""));
             rendered.push(Line::from(Span::styled(
-                "Enter/Esc to close",
+                self.tr("dialog.close"),
                 self.theme.dim(),
             )));
             crate::widgets::render_popup(frame, popup, &title, rendered, &self.theme);
@@ -595,7 +600,7 @@ pub(crate) fn render_overlay(&mut self, frame: &mut Frame, area: Rect) {
             let popup = crate::widgets::centered_rect(64, 40, area);
             let lines = vec![
                 Line::from(Span::styled(
-                    "1. Open the URL below in a browser:",
+                    self.tr("dialog.ms_url"),
                     self.theme.dim(),
                 )),
                 Line::from(Span::styled(
@@ -603,17 +608,23 @@ pub(crate) fn render_overlay(&mut self, frame: &mut Frame, area: Rect) {
                     self.theme.info_style(),
                 )),
                 Line::from(""),
-                Line::from(Span::styled("2. Enter this code:", self.theme.dim())),
+                Line::from(Span::styled(self.tr("dialog.ms_code"), self.theme.dim())),
                 Line::from(Span::styled(prompt.user_code.clone(), self.theme.header())),
                 Line::from(""),
                 Line::from(Span::styled(prompt.message.clone(), self.theme.dim())),
                 Line::from(""),
                 Line::from(Span::styled(
-                    "Waiting for sign-in... Esc to dismiss",
+                    self.tr("dialog.ms_waiting"),
                     self.theme.accent(),
                 )),
             ];
-            crate::widgets::render_popup(frame, popup, "Microsoft Sign-in", lines, &self.theme);
+            crate::widgets::render_popup(
+                frame,
+                popup,
+                self.tr("dialog.ms_signin"),
+                lines,
+                &self.theme,
+            );
         }
         Overlay::Wizard(_) => self.render_wizard(frame, area),
         Overlay::Picker(picker) => {
@@ -644,7 +655,7 @@ pub(crate) fn render_overlay(&mut self, frame: &mut Frame, area: Rect) {
             );
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled("Filter  ", self.theme.comment_style()),
+                    Span::styled(self.tr("dialog.filter"), self.theme.comment_style()),
                     Span::styled(format!("{}█", picker.query), self.theme.accent()),
                 ]))
                 .style(surface),
@@ -682,7 +693,7 @@ pub(crate) fn render_overlay(&mut self, frame: &mut Frame, area: Rect) {
             }
             if picker.filtered.is_empty() {
                 frame.render_widget(
-                    Paragraph::new(Span::styled("No matches.", self.theme.dim()))
+                    Paragraph::new(Span::styled(self.tr("empty.no_matches"), self.theme.dim()))
                         .style(surface),
                     list_area,
                 );

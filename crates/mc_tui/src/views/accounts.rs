@@ -24,6 +24,11 @@ impl App {
             ])
             .split(area);
 
+        let offline = self.tr("btn.offline");
+        let microsoft = self.tr("btn.microsoft");
+        let set_active = self.tr("btn.set_active");
+        let skin = self.tr("btn.skin");
+        let remove = self.tr("btn.remove");
         buttons_row(
             self,
             frame,
@@ -31,11 +36,11 @@ impl App {
             chunks[0].y,
             area.x + area.width,
             &[
-                ("Offline", "n", ButtonId::OfflineLogin),
-                ("Microsoft", "m", ButtonId::MicrosoftLogin),
-                ("Set Active", "Enter", ButtonId::SetActiveAccount),
-                ("Skin", "c", ButtonId::ChangeSkin),
-                ("Remove", "d", ButtonId::DeleteAccount),
+                (offline, "n", ButtonId::OfflineLogin),
+                (microsoft, "m", ButtonId::MicrosoftLogin),
+                (set_active, "Enter", ButtonId::SetActiveAccount),
+                (skin, "c", ButtonId::ChangeSkin),
+                (remove, "d", ButtonId::DeleteAccount),
             ],
         );
 
@@ -51,13 +56,10 @@ impl App {
         }
 
         let account_count = self.accounts.accounts().len();
+        let title = self.tr("accounts.title").to_string();
         frame.render_widget(
-            Paragraph::new(section_title(
-                "Accounts",
-                &account_count.to_string(),
-                &self.theme,
-            ))
-            .style(self.theme.card()),
+            Paragraph::new(section_title(&title, &account_count.to_string(), &self.theme))
+                .style(self.theme.card()),
             Rect {
                 x: inner.x,
                 y: inner.y,
@@ -111,7 +113,7 @@ impl App {
         if account_count == 0 {
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "No accounts. Press 'n' for offline or 'm' for Microsoft.",
+                    self.tr("empty.no_accounts"),
                     self.theme.card_dim(),
                 ))
                 .style(self.theme.card()),
@@ -135,7 +137,7 @@ impl App {
         let Some(account) = account else {
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "Press 'n' for an offline account or 'm' to sign in with Microsoft.",
+                    self.tr("empty.accounts_hint"),
                     self.theme.card_dim(),
                 ))
                 .style(self.theme.card()),
@@ -151,12 +153,12 @@ impl App {
         let token_state = match account.kind {
             mc_core::auth::AccountKind::Microsoft => {
                 if account.token_valid(60) {
-                    "valid".to_string()
+                    self.tr("accounts.valid").to_string()
                 } else {
-                    "expired (will refresh on launch)".to_string()
+                    self.tr("accounts.expired").to_string()
                 }
             }
-            mc_core::auth::AccountKind::Offline => "n/a".to_string(),
+            mc_core::auth::AccountKind::Offline => self.tr("accounts.na").to_string(),
         };
         let head = mc_core::skins::head_render_url(&account.id, 128);
         let body = mc_core::skins::body_render_url(&account.id);
@@ -165,28 +167,35 @@ impl App {
         let lines = vec![
             Line::from(vec![
                 Span::styled(account.username.clone(), self.theme.header()),
-                Span::styled(if active { "   active" } else { "" }, self.theme.accent()),
+                Span::styled(
+                    if active {
+                        self.tr("accounts.active").to_string()
+                    } else {
+                        String::new()
+                    },
+                    self.theme.accent(),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("Type   ", self.theme.card_dim()),
+                Span::styled(self.tr("accounts.type"), self.theme.card_dim()),
                 Span::styled(kind.to_string(), self.theme.card()),
-                Span::styled("    Token   ", self.theme.card_dim()),
+                Span::styled(self.tr("accounts.token"), self.theme.card_dim()),
                 Span::styled(token_state, self.theme.card()),
             ]),
             Line::from(vec![
-                Span::styled("UUID   ", self.theme.card_dim()),
+                Span::styled(self.tr("accounts.uuid"), self.theme.card_dim()),
                 Span::styled(account.id.clone(), self.theme.card()),
             ]),
             Line::from(vec![
-                Span::styled("Head   ", self.theme.card_dim()),
+                Span::styled(self.tr("accounts.head"), self.theme.card_dim()),
                 Span::styled(head, self.theme.info_style()),
             ]),
             Line::from(vec![
-                Span::styled("Body   ", self.theme.card_dim()),
+                Span::styled(self.tr("accounts.body"), self.theme.card_dim()),
                 Span::styled(body, self.theme.info_style()),
             ]),
             Line::from(Span::styled(
-                "Press 'c' to set a skin from a URL or local .png (Microsoft accounts only).",
+                self.tr("empty.skin_hint"),
                 self.theme.card_dim(),
             )),
         ];
@@ -203,6 +212,8 @@ impl App {
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => move_sel(&mut self.account_state, len, 1),
             KeyCode::Up | KeyCode::Char('k') => move_sel(&mut self.account_state, len, -1),
+            KeyCode::PageDown => move_sel(&mut self.account_state, len, 10),
+            KeyCode::PageUp => move_sel(&mut self.account_state, len, -10),
             KeyCode::Char('g') => jump(&mut self.account_state, len, false),
             KeyCode::Char('G') => jump(&mut self.account_state, len, true),
             KeyCode::Char('n') => self.open_offline_login(),

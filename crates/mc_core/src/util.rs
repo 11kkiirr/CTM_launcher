@@ -101,6 +101,11 @@ impl Paths {
         self.config_dir.join("settings.json")
     }
 
+    /// First-class instance group names (allows empty groups).
+    pub fn groups_file(&self) -> PathBuf {
+        self.config_dir.join("groups.json")
+    }
+
     /// ASCII-art background for the builds grid.
     pub fn ascii_bg_file(&self) -> PathBuf {
         self.config_dir.join("ascii_bg.txt")

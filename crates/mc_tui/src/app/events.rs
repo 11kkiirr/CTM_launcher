@@ -45,12 +45,16 @@ impl App {
                     version: version.clone(),
                     started: Instant::now(),
                 });
-                self.set_toast(format!("Launched {version}"), false);
+                self.set_toast(crate::i18n::tr_string(self.lang(), "toast.launched").replace("{}", &version), false);
                 self.nav = Nav::Logs;
             }
             EngineEvent::InstancesChanged => {
                 self.reload_instances();
                 self.reload_mods();
+                self.reload_resource_packs();
+                self.reload_shaders();
+                self.reload_worlds();
+                self.reload_screenshots();
             }
             EngineEvent::ImportPathPicked(Some(path)) => {
                 self.import_modpack(std::path::PathBuf::from(path.trim()));
@@ -223,7 +227,7 @@ impl App {
             EngineEvent::ExternalInstances(instances) => {
                 self.external_instances = instances.clone();
                 if instances.is_empty() {
-                    self.set_toast("No external instances found", true);
+                    self.set_toast(self.tr("toast.no_external"), true);
                 } else {
                     let names: Vec<String> = instances.iter().map(|i| i.name.clone()).collect();
                     let picker = crate::forms::VersionPicker::new(

@@ -31,15 +31,17 @@ impl App {
             .split(area);
 
         let pause_label = if self.log_buffer.paused {
-            "Resume"
+            self.tr("btn.resume")
         } else {
-            "Pause"
+            self.tr("btn.pause")
         };
         let follow_label = if self.log_follow {
-            "Unfollow"
+            self.tr("btn.unfollow")
         } else {
-            "Follow"
+            self.tr("btn.follow")
         };
+        let clear = self.tr("btn.clear");
+        let crash = self.tr("btn.analyze_crash");
         tab_row(
             self,
             frame,
@@ -49,8 +51,8 @@ impl App {
             &[
                 (pause_label, "p", ButtonId::PauseLogs, self.log_buffer.paused),
                 (follow_label, "f", ButtonId::FollowLogs, self.log_follow),
-                ("Clear", "c", ButtonId::ClearLogs, false),
-                ("Analyze Crash", "a", ButtonId::AnalyzeCrash, false),
+                (clear, "c", ButtonId::ClearLogs, false),
+                (crash, "a", ButtonId::AnalyzeCrash, false),
             ],
         );
 
@@ -67,16 +69,16 @@ impl App {
         }
 
         let running = if self.running.is_some() {
-            ("● live", self.theme.accent())
+            (self.tr("logs.live"), self.theme.accent())
         } else {
-            ("○ idle", self.theme.card_dim())
+            (self.tr("logs.idle"), self.theme.card_dim())
         };
         let state = if self.log_buffer.paused {
-            ("PAUSED", self.theme.warning_style())
+            (self.tr("logs.paused"), self.theme.warning_style())
         } else if self.log_follow {
-            ("FOLLOW", self.theme.accent())
+            (self.tr("logs.following"), self.theme.accent())
         } else {
-            ("UNFOLLOW", self.theme.card_dim())
+            (self.tr("logs.unfollow"), self.theme.card_dim())
         };
 
         let rows = Layout::default()
@@ -110,21 +112,30 @@ impl App {
         let end = (start + visible).min(total_height.max(1));
 
         let range = if total == 0 {
-            "no output".to_string()
+            self.tr("logs.no_output").to_string()
         } else {
-            format!("lines {}-{} / {total_height}", start + 1, end)
+            crate::i18n::tr_string(self.lang(), "logs.lines")
+                .replace("{}", &(start + 1).to_string())
+                .replace("{}", &end.to_string())
+                .replace("{}", &total_height.to_string())
         };
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("Console", self.theme.header()),
+                Span::styled(self.tr("logs.console"), self.theme.header()),
                 Span::styled("   ", self.theme.card()),
                 Span::styled(running.0, running.1),
                 Span::styled("   ", self.theme.card()),
                 Span::styled(state.0, state.1),
                 Span::styled(format!("   {range}"), self.theme.card_dim()),
                 Span::styled(
-                    format!("   min {}", self.log_buffer.filter.min_level.label()),
+                    format!(
+                        "   {}",
+                        crate::i18n::tr_string(self.lang(), "logs.min_level").replace(
+                            "{}",
+                            self.log_buffer.filter.min_level.label()
+                        )
+                    ),
                     self.theme.card_comment(),
                 ),
             ]))
@@ -136,7 +147,7 @@ impl App {
             frame.render_widget(Clear, viewport);
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "No log output yet. Launch a build or open a saved latest.log.",
+                    self.tr("empty.no_logs"),
                     self.theme.card_dim(),
                 ))
                 .style(self.theme.card()),
@@ -195,28 +206,28 @@ impl App {
     fn render_log_status(&mut self, frame: &mut Frame, area: Rect) {
         let errors = self.log_buffer.error_count();
         let filter = if self.log_search.is_empty() {
-            "no filter".to_string()
+            self.tr("logs.no_filter").to_string()
         } else {
-            format!("filter '{}'", self.log_search)
+            crate::i18n::tr_string(self.lang(), "logs.filter_label")
+                .replace("{}", &self.log_search)
         };
         let ready = if self.log_buffer.paused {
-            ("Paused", self.theme.warning_style())
+            (self.tr("logs.paused"), self.theme.warning_style())
         } else if self.running.is_some() {
-            ("Running", self.theme.accent())
+            (self.tr("logs.running"), self.theme.accent())
         } else {
-            ("Ready", self.theme.accent())
+            (self.tr("logs.ready"), self.theme.accent())
         };
 
-        let runtime = self
-            .running
-            .as_ref()
-            .map(|r| format!("    running {:.0}s", r.started.elapsed().as_secs()))
-            .unwrap_or_default();
+        let runtime = self.running.as_ref().map(|r| {
+            crate::i18n::tr_string(self.lang(), "logs.running_s")
+                .replace("{}", &r.started.elapsed().as_secs().to_string())
+        }).unwrap_or_default();
         let line = Line::from(vec![
             Span::styled("● ", ready.1),
             Span::styled(ready.0, ready.1),
             Span::styled(runtime, self.theme.dim()),
-            Span::styled("    errors ", self.theme.dim()),
+            Span::styled(self.tr("logs.errors"), self.theme.dim()),
             Span::styled(
                 errors.to_string(),
                 if errors > 0 {
@@ -227,7 +238,11 @@ impl App {
             ),
             Span::styled(format!("    {filter}"), self.theme.dim()),
             Span::styled(
-                format!("    buffered {}", self.log_buffer.len()),
+                format!(
+                    "    {}",
+                    crate::i18n::tr_string(self.lang(), "logs.buffered")
+                        .replace("{}", &self.log_buffer.len().to_string())
+                ),
                 self.theme.comment_style(),
             ),
         ]);
@@ -252,8 +267,8 @@ impl App {
             }
             KeyCode::Char('/') => {
                 self.overlay = Some(crate::forms::Overlay::text(
-                    "Filter Logs",
-                    "Substring: ",
+                    self.tr("dialog.filter_logs"),
+                    self.tr("dialog.substring"),
                     crate::forms::TextAction::SearchLogs,
                 ));
             }

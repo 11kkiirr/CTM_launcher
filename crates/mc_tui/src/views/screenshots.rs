@@ -28,6 +28,8 @@ impl App {
             ])
             .split(area);
 
+        let open = self.tr("btn.open_folder");
+        let delete = self.tr("btn.delete");
         buttons_row(
             self,
             frame,
@@ -35,14 +37,15 @@ impl App {
             chunks[0].y,
             area.x + area.width,
             &[
-                ("Open Folder", "Enter", ButtonId::OpenFolder),
-                ("Delete", "d", ButtonId::DeleteSelected),
+                (open, "Enter", ButtonId::OpenFolder),
+                (delete, "d", ButtonId::DeleteSelected),
             ],
         );
 
+        let title = self.tr("nav.screenshots").to_string();
         frame.render_widget(
             Paragraph::new(section_title(
-                "Screenshots",
+                &title,
                 &format!("{}", self.screenshots.len()),
                 &self.theme,
             ))
@@ -59,9 +62,12 @@ impl App {
         if self.screenshots.is_empty() {
             let lines = vec![
                 Line::from(""),
-                Line::from(Span::styled("No screenshots found.", self.theme.header())),
                 Line::from(Span::styled(
-                    "Screenshots are stored in the screenshots folder.",
+                    self.tr("empty.no_screenshots"),
+                    self.theme.header(),
+                )),
+                Line::from(Span::styled(
+                    self.tr("empty.screenshots_hint"),
                     self.theme.card_dim(),
                 )),
             ];
@@ -72,6 +78,10 @@ impl App {
         let total = self.screenshots.len();
         let cols = ((inner.width + GAP_X) / (CARD_W + GAP_X)).max(1) as usize;
         let visible_rows = ((inner.height + GAP_Y) / (CARD_H + GAP_Y)).max(1) as usize;
+        self.screenshot_cols = cols;
+        self.screenshot_visible_rows = visible_rows;
+        self.ensure_screenshot_visible();
+        let start_row = self.screenshot_scroll;
         let grid_w = cols as u16 * CARD_W + (cols as u16).saturating_sub(1) * GAP_X;
         let offset_x = inner.width.saturating_sub(grid_w) / 2;
 
@@ -80,7 +90,7 @@ impl App {
 
         for row in 0..visible_rows {
             for col in 0..cols {
-                let idx = row * cols + col;
+                let idx = (start_row + row) * cols + col;
                 if idx >= total {
                     break;
                 }
@@ -94,7 +104,7 @@ impl App {
                 let is_selected = self.screenshots_state.selected() == Some(idx);
                 let hovered = self.is_hovered(rect);
                 self.render_screenshot_card(frame, rect, &name, game_dir.as_deref(), is_selected, hovered);
-                self.push_hitbox(rect, HitAction::InstanceTile(idx));
+                self.push_hitbox(rect, HitAction::ScreenshotTile(idx));
             }
         }
     }
@@ -213,35 +223,28 @@ impl App {
 
     pub(crate) fn key_screenshots(&mut self, key: KeyEvent) {
         use crossterm::event::KeyCode;
+        let len = self.screenshots.len();
+        let cols = self.screenshot_cols.max(1);
+        let page = (self.screenshot_visible_rows.max(1) * cols) as i32;
         match key.code {
             KeyCode::Enter | KeyCode::Char('o') => self.open_current_folder(),
             KeyCode::Char('d') => self.confirm_delete_selected(),
             KeyCode::Down | KeyCode::Char('j') => {
-                self.screenshots_state
-                    .select(self.screenshots_state.selected().map(|i| (i + 1).min(self.screenshots.len().saturating_sub(1))));
+                crate::views::move_sel(&mut self.screenshots_state, len, cols as i32);
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.screenshots_state
-                    .select(self.screenshots_state.selected().map(|i| i.saturating_sub(1)));
+                crate::views::move_sel(&mut self.screenshots_state, len, -(cols as i32));
             }
             KeyCode::Left | KeyCode::Char('h') => {
-                if let Some(i) = self.screenshots_state.selected() {
-                    let cols = ((self.sidebar_area.width + GAP_X) / (CARD_W + GAP_X)).max(1) as usize;
-                    self.screenshots_state.select(Some(i.saturating_sub(cols)));
-                }
+                crate::views::move_sel(&mut self.screenshots_state, len, -1);
             }
             KeyCode::Right | KeyCode::Char('l') => {
-                if let Some(i) = self.screenshots_state.selected() {
-                    let cols = ((self.sidebar_area.width + GAP_X) / (CARD_W + GAP_X)).max(1) as usize;
-                    let next = (i + cols).min(self.screenshots.len().saturating_sub(1));
-                    self.screenshots_state.select(Some(next));
-                }
+                crate::views::move_sel(&mut self.screenshots_state, len, 1);
             }
-            KeyCode::Char('g') => self.screenshots_state.select(Some(0)),
-            KeyCode::Char('G') => {
-                let last = self.screenshots.len().saturating_sub(1);
-                self.screenshots_state.select(Some(last));
-            }
+            KeyCode::PageDown => crate::views::move_sel(&mut self.screenshots_state, len, page),
+            KeyCode::PageUp => crate::views::move_sel(&mut self.screenshots_state, len, -page),
+            KeyCode::Char('g') => crate::views::jump(&mut self.screenshots_state, len, false),
+            KeyCode::Char('G') => crate::views::jump(&mut self.screenshots_state, len, true),
             _ => {}
         }
     }

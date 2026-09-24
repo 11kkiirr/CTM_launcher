@@ -19,7 +19,8 @@ use crate::engine::{progress_event, EngineEvent};
 use crate::forms::{
     gc_options, parse_gc, ConfirmAction, Form, FormAction, Overlay, PickerTarget, TextAction,
 };
-use crate::views::browse::{BrowseFocus, SideFilter};
+use crate::i18n::Lang;
+use crate::views::browse::{BrowseFocus, BrowseKind, SideFilter};
 
 use super::{gc_index, rect_contains, split_args, App, CLIENT_ID, HitAction, Hitbox, Nav, Toast};
 
@@ -66,13 +67,18 @@ pub fn selected_instance(&self) -> Option<&Instance> {
 
 pub(crate) fn reload_instances(&mut self) {
     self.groups = self.instance_manager.groups();
-    if self.selected_group.is_empty() {
-        self.instances = self.instance_manager.list().unwrap_or_default();
-    } else {
-        self.instances = self
-            .instance_manager
-            .list_in_group(&self.selected_group)
-            .unwrap_or_default();
+    let mut all = self.instance_manager.list().unwrap_or_default();
+    self.group_counts = self.instance_manager.group_counts();
+    // Stable section order: ungrouped first, then by group name, then by instance name.
+    all.sort_by(|a, b| {
+        let ga = a.metadata.group.as_str();
+        let gb = b.metadata.group.as_str();
+        ga.cmp(gb)
+            .then_with(|| a.name().to_lowercase().cmp(&b.name().to_lowercase()))
+    });
+    self.instances = all;
+    if !self.selected_group.is_empty() && !self.groups.contains(&self.selected_group) {
+        self.selected_group.clear();
     }
     if self.instances.is_empty() {
         self.instance_state.select(None);
@@ -264,7 +270,7 @@ pub(crate) fn install_modrinth_modpack(
     version: mc_core::modrinth::Version,
 ) {
     let Some(file) = version.primary_file().cloned() else {
-        self.set_toast("This modpack version has no downloadable file", true);
+        self.set_toast(self.tr("toast.no_file"), true);
         return;
     };
     let installer = Installer::new(
@@ -303,7 +309,7 @@ pub(crate) fn install_modrinth_modpack(
 
 pub(crate) fn open_edit_instance_form(&mut self) {
     let Some(instance) = self.selected_instance().cloned() else {
-        self.set_toast("No instance selected", true);
+        self.set_toast(self.tr("toast.no_instance"), true);
         return;
     };
     let jvm = &instance.metadata.jvm;
@@ -331,7 +337,7 @@ pub(crate) fn open_edit_instance_form(&mut self) {
 /// Prompt for a new display name for the selected build.
 pub(crate) fn open_rename_instance_form(&mut self) {
     let Some(instance) = self.selected_instance().cloned() else {
-        self.set_toast("No instance selected", true);
+        self.set_toast(self.tr("toast.no_instance"), true);
         return;
     };
     self.overlay = Some(Overlay::text_with(
@@ -348,7 +354,7 @@ pub(crate) fn rename_instance(&mut self, new_name: String) {
     };
     let trimmed = new_name.trim().to_string();
     if trimmed.is_empty() {
-        self.set_toast("Name cannot be empty", true);
+        self.set_toast(self.tr("toast.name_empty"), true);
         return;
     }
     let manager = self.instance_manager.clone();
@@ -366,14 +372,164 @@ pub(crate) fn rename_instance(&mut self, new_name: String) {
     });
 }
 
+/// Mark the active group section (for rename/delete + header highlight).
+/// Does not filter the instance list — all builds stay visible.
 pub(crate) fn set_selected_group(&mut self, group: String) {
     self.selected_group = group;
-    self.reload_instances();
+}
+
+/// Collapse/expand a group panel by name (`""` = Ungrouped).
+pub(crate) fn toggle_group_collapsed(&mut self, name: &str) {
+    if !self.collapsed_groups.remove(name) {
+        self.collapsed_groups.insert(name.to_string());
+    }
+}
+
+/// Collapse/expand the panel that owns the current selection (or the
+/// explicitly selected group header).
+pub(crate) fn toggle_selected_group_collapsed(&mut self) {
+    let name = if !self.selected_group.is_empty() {
+        self.selected_group.clone()
+    } else if let Some(idx) = self.instance_state.selected() {
+        self.instances
+            .get(idx)
+            .map(|i| i.metadata.group.clone())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    // Ungrouped with no selection: nothing to toggle unless explicitly set.
+    if name.is_empty() && self.selected_group.is_empty() {
+        // Allow toggling Ungrouped when it is the active header.
+        if self.instance_state.selected().is_none() {
+            return;
+        }
+    }
+    self.toggle_group_collapsed(&name);
+}
+
+/// Open a prompt to create a standalone group (does not move an instance).
+pub(crate) fn open_new_group_form(&mut self) {
+    self.pending_move_on_new_group = false;
+    self.overlay = Some(Overlay::text(
+        "New Group",
+        "Group name: ",
+        TextAction::NewGroup,
+    ));
+}
+
+/// Create a named group in the registry.
+pub(crate) fn create_group(&mut self, name: String) {
+    let trimmed = name.trim().to_string();
+    if trimmed.is_empty() {
+        self.set_toast(self.tr("toast.group_empty"), true);
+        return;
+    }
+    let manager = self.instance_manager.clone();
+    let tx = self.engine_tx.clone();
+    tokio::spawn(async move {
+        match manager.create_group(&trimmed).await {
+            Ok(()) => {
+                let _ = tx.send(EngineEvent::InstancesChanged);
+                let _ = tx.send(EngineEvent::Toast(format!("Created group: {trimmed}")));
+            }
+            Err(err) => {
+                let _ = tx.send(EngineEvent::Error(format!("Create group failed: {err}")));
+            }
+        }
+    });
+}
+
+/// Prompt to rename the active group section (falls back to the selected
+/// instance's group).
+pub(crate) fn open_rename_group_form(&mut self) {
+    let old = if !self.selected_group.is_empty() {
+        self.selected_group.clone()
+    } else {
+        self.selected_instance()
+            .map(|i| i.metadata.group.clone())
+            .unwrap_or_default()
+    };
+    if old.is_empty() {
+        self.set_toast(self.tr("toast.select_group"), true);
+        return;
+    }
+    self.overlay = Some(Overlay::text_with(
+        "Rename Group",
+        "New name: ",
+        old.clone(),
+        TextAction::RenameGroup(old),
+    ));
+}
+
+/// Rename a group across the registry and all member instances.
+pub(crate) fn rename_group(&mut self, old: String, new: String) {
+    let new = new.trim().to_string();
+    if new.is_empty() {
+        self.set_toast(self.tr("toast.group_empty"), true);
+        return;
+    }
+    if new == old {
+        return;
+    }
+    if self.groups.contains(&new) {
+        self.set_toast(self.tr("toast.group_exists"), true);
+        return;
+    }
+    let manager = self.instance_manager.clone();
+    let tx = self.engine_tx.clone();
+    let old_for_spawn = old.clone();
+    let new_for_spawn = new.clone();
+    if self.collapsed_groups.remove(&old) {
+        self.collapsed_groups.insert(new.clone());
+    }
+    tokio::spawn(async move {
+        match manager.rename_group(&old_for_spawn, &new_for_spawn).await {
+            Ok(()) => {
+                let _ = tx.send(EngineEvent::InstancesChanged);
+                let _ = tx.send(EngineEvent::Toast(format!("Renamed to: {new_for_spawn}")));
+            }
+            Err(err) => {
+                let _ = tx.send(EngineEvent::Error(format!("Rename failed: {err}")));
+            }
+        }
+    });
+    // Optimistically follow the rename so the filter stays valid.
+    if self.selected_group == old {
+        self.selected_group = new;
+    }
+}
+
+/// Confirm deleting the active group section (falls back to the selected
+/// instance's group).
+pub(crate) fn confirm_delete_group(&mut self) {
+    let name = if !self.selected_group.is_empty() {
+        self.selected_group.clone()
+    } else {
+        self.selected_instance()
+            .map(|i| i.metadata.group.clone())
+            .unwrap_or_default()
+    };
+    if name.is_empty() {
+        self.set_toast(self.tr("toast.select_group"), true);
+        return;
+    }
+    let count = self.group_counts.get(&name).copied().unwrap_or(0);
+    let message = if count == 0 {
+        format!("Delete empty group '{name}'?")
+    } else {
+        format!("Delete group '{name}'?\n{count} instance(s) will move to Ungrouped.")
+    };
+    self.overlay = Some(Overlay::confirm(
+        "Delete Group",
+        message,
+        ConfirmAction::DeleteGroup(name),
+    ));
 }
 
 pub(crate) fn open_group_picker(&mut self) {
     let Some(instance) = self.selected_instance().cloned() else {
-        self.set_toast("No instance selected", true);
+        self.set_toast(self.tr("toast.no_instance"), true);
         return;
     };
     let mut items: Vec<String> = Vec::new();
@@ -400,11 +556,27 @@ pub(crate) fn open_group_picker(&mut self) {
     self.overlay = Some(Overlay::Picker(picker));
 }
 
+/// Apply a group-picker choice for the selected instance.
+/// `"[New Group]"` opens a name prompt that creates + moves.
+pub(crate) fn apply_group_picker(&mut self, group: &str) {
+    if group == "[New Group]" {
+        self.pending_move_on_new_group = true;
+        self.overlay = Some(Overlay::text(
+            "New Group",
+            "Group name: ",
+            TextAction::NewGroup,
+        ));
+        return;
+    }
+    self.pending_move_on_new_group = false;
+    self.move_instance_to_group(group);
+}
+
 pub(crate) fn move_instance_to_group(&mut self, group: &str) {
     let Some(instance) = self.selected_instance().cloned() else {
         return;
     };
-    let actual_group = if group == "All" || group == "[New Group]" {
+    let actual_group = if group == "All" {
         ""
     } else {
         group
@@ -509,7 +681,7 @@ pub(crate) fn confirm_delete_instance(&mut self) {
 
 pub(crate) fn install_selected_instance(&mut self) {
     let Some(instance) = self.selected_instance().cloned() else {
-        self.set_toast("No instance selected", true);
+        self.set_toast(self.tr("toast.no_instance"), true);
         return;
     };
     let installer = Installer::new(
@@ -541,15 +713,15 @@ pub(crate) fn install_selected_instance(&mut self) {
 
 pub(crate) fn launch_selected(&mut self) {
     let Some(instance) = self.selected_instance().cloned() else {
-        self.set_toast("No instance selected", true);
+        self.set_toast(self.tr("toast.no_instance"), true);
         return;
     };
     let Some(account) = self.accounts.active().cloned() else {
-        self.set_toast("No account selected — add one in Accounts", true);
+        self.set_toast(self.tr("toast.no_account"), true);
         return;
     };
     if self.running.is_some() {
-        self.set_toast("A game is already running", true);
+        self.set_toast(self.tr("toast.game_running"), true);
         return;
     }
 
@@ -733,11 +905,11 @@ pub(crate) fn open_project(&mut self, hit: &SearchHit) {
 
 pub(crate) fn install_selected_project(&mut self) {
     let Some(project) = self.selected_project.clone() else {
-        self.set_toast("Open a project first", true);
+        self.set_toast(self.tr("toast.open_project_first"), true);
         return;
     };
     let Some(instance) = self.selected_instance().cloned() else {
-        self.set_toast("Select an instance in the Instances tab first", true);
+        self.set_toast(self.tr("toast.select_instance_first"), true);
         return;
     };
     let version = self
@@ -746,7 +918,7 @@ pub(crate) fn install_selected_project(&mut self) {
         .and_then(|idx| self.project_versions.get(idx))
         .cloned();
     let Some(version) = version else {
-        self.set_toast("No version selected", true);
+        self.set_toast(self.tr("toast.no_version"), true);
         return;
     };
 
@@ -849,7 +1021,8 @@ pub(crate) fn reload_resource_packs(&self) {
     let tx = self.engine_tx.clone();
     let dir = instance.resourcepacks_dir();
     tokio::spawn(async move {
-        let items = Self::scan_pack_names(&dir, false).await;
+        // Resource packs are commonly zips (or unpacked folders).
+        let items = Self::scan_pack_names(&dir, true).await;
         let _ = tx.send(EngineEvent::ResourcePacks(items));
     });
 }
@@ -859,6 +1032,7 @@ pub(crate) fn reload_shaders(&self) {
     let tx = self.engine_tx.clone();
     let dir = instance.shaders_dir();
     tokio::spawn(async move {
+        // Shader packs are commonly zips (or unpacked folders).
         let items = Self::scan_pack_names(&dir, true).await;
         let _ = tx.send(EngineEvent::ShaderPacks(items));
     });
@@ -953,8 +1127,14 @@ async fn remove_path(path: &std::path::Path) -> std::io::Result<()> {
 // ---------------------------------------------------------------------
 
 /// Navigate to the browser, loading the first page of popular projects for
-/// the active content type when nothing is loaded yet.
+/// the active content type when nothing is loaded yet. Also refreshes the
+/// installed list for the current kind so Browse can show Installed state.
 pub(crate) fn open_browse(&mut self) {
+    match self.browse.kind {
+        BrowseKind::Mods => self.reload_mods(),
+        BrowseKind::ResourcePacks => self.reload_resource_packs(),
+        BrowseKind::Shaders => self.reload_shaders(),
+    }
     if self.browse.results.is_empty() && !self.browse.loading {
         self.browse_load_first_page();
     }
@@ -1199,7 +1379,7 @@ pub(crate) fn load_local_image(&mut self, path: &str) {
 /// else installs a file into the selected instance's folder.
 pub(crate) fn browse_install(&mut self) {
     let Some(project) = self.browse.detail.clone() else {
-        self.set_toast("Open a project first", true);
+        self.set_toast(self.tr("toast.open_project_first"), true);
         return;
     };
     let Some(version) = self
@@ -1208,18 +1388,23 @@ pub(crate) fn browse_install(&mut self) {
         .get(self.browse.version_selected)
         .cloned()
     else {
-        self.set_toast("No version selected", true);
+        self.set_toast(self.tr("toast.no_version"), true);
         return;
     };
 
     let Some(instance) = self.selected_instance().cloned() else {
-        self.set_toast("Select an instance in the Instances tab first", true);
+        self.set_toast(self.tr("toast.select_instance_first"), true);
         return;
     };
     let dest_dir = match self.browse.kind {
         crate::views::browse::BrowseKind::Mods => instance.mods_dir(),
         crate::views::browse::BrowseKind::ResourcePacks => instance.resourcepacks_dir(),
         crate::views::browse::BrowseKind::Shaders => instance.shaders_dir(),
+    };
+    let reload_evt = match self.browse.kind {
+        BrowseKind::Mods => EngineEvent::ModsChanged,
+        BrowseKind::ResourcePacks => EngineEvent::ReloadList(Nav::ResourcePacks),
+        BrowseKind::Shaders => EngineEvent::ReloadList(Nav::Shaders),
     };
     let game_version = instance.metadata.game_version.clone();
     let loader = instance.metadata.loader.as_str().to_string();
@@ -1244,7 +1429,7 @@ pub(crate) fn browse_install(&mut self) {
         let _ = tx.send(EngineEvent::ProgressDone);
         match result {
             Ok(files) => {
-                let _ = tx.send(EngineEvent::ModsChanged);
+                let _ = tx.send(reload_evt);
                 let _ = tx.send(EngineEvent::Toast(format!(
                     "Installed {} file(s) from {}",
                     files.len(),
@@ -1265,7 +1450,7 @@ pub(crate) fn browse_quick_install(&mut self, idx: usize) {
         return;
     };
     let Some(instance) = self.selected_instance().cloned() else {
-        self.set_toast("Select an instance first", true);
+        self.set_toast(self.tr("toast.select_instance"), true);
         return;
     };
     let dest_dir = match self.browse.kind {
@@ -1273,9 +1458,14 @@ pub(crate) fn browse_quick_install(&mut self, idx: usize) {
         crate::views::browse::BrowseKind::ResourcePacks => instance.resourcepacks_dir(),
         crate::views::browse::BrowseKind::Shaders => instance.shaders_dir(),
     };
+    let reload_evt = match self.browse.kind {
+        BrowseKind::Mods => EngineEvent::ModsChanged,
+        BrowseKind::ResourcePacks => EngineEvent::ReloadList(Nav::ResourcePacks),
+        BrowseKind::Shaders => EngineEvent::ReloadList(Nav::Shaders),
+    };
     let game_version = instance.metadata.game_version.clone();
     let loader = instance.metadata.loader.as_str().to_string();
-    let compat = matches!(self.browse.kind, crate::views::browse::BrowseKind::Mods);
+    let compat = matches!(self.browse.kind, BrowseKind::Mods);
     let client = self.client.clone();
     let modrinth = self.modrinth.clone();
     let tx = self.engine_tx.clone();
@@ -1309,7 +1499,7 @@ pub(crate) fn browse_quick_install(&mut self, idx: usize) {
         let _ = tx.send(EngineEvent::ProgressDone);
         match result {
             Ok(files) => {
-                let _ = tx.send(EngineEvent::ModsChanged);
+                let _ = tx.send(reload_evt);
                 let _ = tx.send(EngineEvent::Toast(format!(
                     "Installed {} file(s) from {}",
                     files.len(),
@@ -1513,11 +1703,11 @@ fn toggle_selected_shader(&mut self) {
 
 pub(crate) fn check_mod_updates(&mut self) {
     let Some(instance) = self.selected_instance().cloned() else {
-        self.set_toast("Select an instance first", true);
+        self.set_toast(self.tr("toast.select_instance"), true);
         return;
     };
     if self.installed_mods.is_empty() {
-        self.set_toast("No installed mods to check", true);
+        self.set_toast(self.tr("toast.no_updates_needed"), true);
         return;
     }
     let modrinth = self.modrinth.clone();
@@ -1580,7 +1770,7 @@ pub(crate) fn open_offline_login(&mut self) {
 
 pub(crate) fn offline_login(&mut self, name: &str) {
     if !mc_core::auth::offline::valid_username(name) {
-        self.set_toast("Invalid username (3-16 chars, A-Z 0-9 _)", true);
+        self.set_toast(self.tr("toast.invalid_username"), true);
         return;
     }
     let account = Account::offline(name);
@@ -1682,11 +1872,11 @@ pub(crate) fn change_skin(&mut self, input: String) {
         return;
     }
     let Some(account) = self.accounts.active().cloned() else {
-        self.set_toast("No active account", true);
+        self.set_toast(self.tr("toast.no_active_account"), true);
         return;
     };
     let Some(token) = account.access_token.clone() else {
-        self.set_toast("Skin changes require a Microsoft account", true);
+        self.set_toast(self.tr("toast.skin_ms_only"), true);
         return;
     };
     let client = self.client.clone();
@@ -1790,64 +1980,95 @@ pub(crate) fn analyze_crash(&mut self) {
 
 pub(crate) fn save_settings(&mut self) {
     self.save_settings_async();
-    self.set_toast("Settings saved", false);
+    self.set_toast(self.tr("toast.settings_saved"), false);
 }
 
 pub(crate) fn open_settings_form(&mut self) {
     use crate::settings::AsciiBgAnchor;
     let s = &self.settings;
+    let lang = s.language;
     let anchor_index = AsciiBgAnchor::ALL
         .iter()
         .position(|a| *a == s.ascii_bg_anchor)
         .unwrap_or(0);
     let anchor_options: Vec<String> = AsciiBgAnchor::ALL
         .iter()
-        .map(|a| a.label().to_string())
+        .map(|a| a.label_lang(lang).to_string())
         .collect();
-    let form = Form::new("Launcher Settings", FormAction::EditLauncherSettings)
+    let lang_index = Lang::ALL
+        .iter()
+        .position(|l| *l == s.language)
+        .unwrap_or(0);
+    let lang_options: Vec<String> = Lang::ALL
+        .iter()
+        .map(|l| l.native_label().to_string())
+        .collect();
+    let tr = |k: &str| crate::i18n::tr(lang, k).to_string();
+    let form = Form::new(tr("settings.title"), FormAction::EditLauncherSettings)
         .push_text(
-            "Java Path",
+            tr("settings.java_path"),
             s.java_path
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default(),
         )
-        .with_hint("blank = auto-detect")
-        .push_number("Default Min RAM (MB)", s.default_min_memory_mb)
-        .push_number("Default Max RAM (MB)", s.default_max_memory_mb)
-        .push_choice("Default GC", gc_options(), gc_index(s.default_gc))
-        .push_bool("Show Progress", s.show_progress)
-        .push_bool("Confirm Quit", s.confirm_quit)
-        .push_bool("Auto-scroll Logs", s.log_auto_scroll)
-        .push_choice("ASCII Art Anchor", anchor_options, anchor_index);
+        .with_hint(tr("settings.blank_auto"))
+        .push_number(
+            format!("{} ({})", tr("settings.min_ram"), tr("settings.mb")),
+            s.default_min_memory_mb,
+        )
+        .push_number(
+            format!("{} ({})", tr("settings.max_ram"), tr("settings.mb")),
+            s.default_max_memory_mb,
+        )
+        .push_choice(tr("settings.gc"), gc_options(), gc_index(s.default_gc))
+        .push_bool(tr("settings.show_progress"), s.show_progress)
+        .push_bool(tr("settings.confirm_quit"), s.confirm_quit)
+        .push_bool(tr("settings.auto_scroll"), s.log_auto_scroll)
+        .push_choice(tr("settings.ascii_anchor"), anchor_options, anchor_index)
+        .push_choice(tr("settings.language"), lang_options, lang_index);
     self.overlay = Some(Overlay::Form(form));
 }
 
 pub(crate) fn apply_launcher_settings_form(&mut self, form: &Form) {
     use crate::settings::AsciiBgAnchor;
-    self.settings.java_path = form
-        .text_value("Java Path")
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from);
-    self.settings.default_min_memory_mb =
-        form.number_value("Default Min RAM (MB)").unwrap_or(512);
-    self.settings.default_max_memory_mb =
-        form.number_value("Default Max RAM (MB)").unwrap_or(4096);
-    self.settings.default_gc = parse_gc(form.choice_value("Default GC").unwrap_or("G1GC"));
-    self.settings.show_progress = form.bool_value("Show Progress").unwrap_or(true);
-    self.settings.confirm_quit = form.bool_value("Confirm Quit").unwrap_or(false);
-    self.settings.log_auto_scroll = form.bool_value("Auto-scroll Logs").unwrap_or(true);
-    if let Some(anchor_str) = form.choice_value("ASCII Art Anchor") {
-        self.settings.ascii_bg_anchor = match anchor_str {
-            "Top-Left" => AsciiBgAnchor::TopLeft,
-            "Top-Right" => AsciiBgAnchor::TopRight,
-            "Bottom-Left" => AsciiBgAnchor::BottomLeft,
-            _ => AsciiBgAnchor::BottomRight,
+    // Field order must match `open_settings_form`.
+    let f = &form.fields;
+    if f.len() >= 9 {
+        let path = f[0].value.trim();
+        self.settings.java_path = if path.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(path))
         };
+        self.settings.default_min_memory_mb =
+            f[1].value.trim().parse().unwrap_or(512);
+        self.settings.default_max_memory_mb =
+            f[2].value.trim().parse().unwrap_or(4096);
+        if let crate::forms::FieldKind::Choice { selected, .. } = f[3].kind {
+            let opts = mc_core::instance::GcPreset::all();
+            if let Some(gc) = opts.get(selected) {
+                self.settings.default_gc = *gc;
+            }
+        }
+        if let crate::forms::FieldKind::Bool(v) = f[4].kind {
+            self.settings.show_progress = v;
+        }
+        if let crate::forms::FieldKind::Bool(v) = f[5].kind {
+            self.settings.confirm_quit = v;
+        }
+        if let crate::forms::FieldKind::Bool(v) = f[6].kind {
+            self.settings.log_auto_scroll = v;
+        }
+        if let Some(a) = AsciiBgAnchor::from_any_label(&f[7].value) {
+            self.settings.ascii_bg_anchor = a;
+        }
+        if let Some(l) = Lang::from_native_label(&f[8].value) {
+            self.settings.language = l;
+        }
     }
     self.save_settings_async();
-    self.set_toast("Settings saved", false);
+    self.set_toast(self.tr("toast.settings_saved"), false);
 }
 
 /// Toggle a boolean launcher setting by field index.
@@ -1890,6 +2111,11 @@ pub(crate) fn cycle_ascii_bg_anchor(&mut self, forward: bool) {
         (current + options.len() - 1) % options.len()
     };
     self.settings.ascii_bg_anchor = options[next];
+    self.save_settings_async();
+}
+
+pub(crate) fn cycle_setting_language(&mut self, forward: bool) {
+    self.settings.language = self.settings.language.cycle(forward);
     self.save_settings_async();
 }
 
@@ -2072,6 +2298,25 @@ pub(crate) fn confirm(&mut self, action: ConfirmAction) {
                 }
             });
         }
+        ConfirmAction::DeleteGroup(name) => {
+            let manager = self.instance_manager.clone();
+            let tx = self.engine_tx.clone();
+            if self.selected_group == name {
+                self.selected_group.clear();
+            }
+            self.collapsed_groups.remove(&name);
+            tokio::spawn(async move {
+                match manager.delete_group(&name).await {
+                    Ok(()) => {
+                        let _ = tx.send(EngineEvent::InstancesChanged);
+                        let _ = tx.send(EngineEvent::Toast(format!("Deleted group: {name}")));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(EngineEvent::Error(format!("Delete failed: {err}")));
+                    }
+                }
+            });
+        }
         ConfirmAction::Quit => self.should_quit = true,
         ConfirmAction::None => {}
     }
@@ -2093,17 +2338,19 @@ pub(crate) fn show_help(&mut self) {
     let lines = vec![
         "Navigation (right panel)".to_string(),
         "  ↑↓ / jk      move through the navigation menu".to_string(),
-        "  1-5          Instances/Mods/Versions/JVM/Logs".to_string(),
-        "  F2 / F3      Accounts / Launcher Settings".to_string(),
+        "  1-9          Instances/Mods/Packs/Shaders/Worlds/Screenshots/Versions/JVM/Logs".to_string(),
+        "  F2 / F3 / F4 Accounts / Launcher Settings / Modpacks".to_string(),
         "  Esc          back to the Instances page".to_string(),
         "  Tab          toggle panel/content focus".to_string(),
         "  Enter        primary action".to_string(),
         "  q / Ctrl-C   quit".to_string(),
         String::new(),
         "Instances (main area + toolbar)".to_string(),
-        "  arrows/hjkl  move between build cards".to_string(),
+        "  arrows/hjkl  move between build cards (section-aware)".to_string(),
         "  Enter        launch the selected build".to_string(),
-        "  n new · e edit · i install · p import · v versions · g group · d delete".to_string(),
+        "  n new · e edit · i install · p import · v versions · g move group".to_string(),
+        "  c collapse/expand group panel · click header to toggle".to_string(),
+        "  y new group · Y rename group · D delete group · r rename · d delete".to_string(),
         String::new(),
         "Mods / Modpacks / Versions / JVM".to_string(),
         "  Mods: t pane · Space toggle · s search · u updates · d delete".to_string(),
@@ -2188,7 +2435,7 @@ pub(crate) fn scan_modrinth_app_instances(&mut self) {
 pub(crate) fn scan_from_path(&mut self, path: String) {
     let path = std::path::PathBuf::from(path.trim());
     if !path.exists() {
-        self.set_toast("Path does not exist", true);
+        self.set_toast(self.tr("toast.path_missing"), true);
         return;
     }
     let tx = self.engine_tx.clone();
@@ -2228,7 +2475,7 @@ pub(crate) fn scan_from_path(&mut self, path: String) {
 /// Import an external instance by name lookup (used by picker).
 pub(crate) fn import_external_by_name(&mut self, name: &str) {
     let Some(external) = self.external_instances.iter().find(|e| e.name == name).cloned() else {
-        self.set_toast(&format!("Instance '{}' not found", name), true);
+        self.set_toast(&crate::i18n::tr_string(self.lang(), "toast.instance_not_found").replace("{}", name), true);
         return;
     };
     let manager = self.instance_manager.clone();

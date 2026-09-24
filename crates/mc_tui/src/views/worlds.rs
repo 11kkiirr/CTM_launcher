@@ -28,6 +28,8 @@ impl App {
             ])
             .split(area);
 
+        let open = self.tr("btn.open_folder");
+        let delete = self.tr("btn.delete");
         buttons_row(
             self,
             frame,
@@ -35,18 +37,15 @@ impl App {
             chunks[0].y,
             area.x + area.width,
             &[
-                ("Open Folder", "Enter", ButtonId::OpenFolder),
-                ("Delete", "d", ButtonId::DeleteSelected),
+                (open, "Enter", ButtonId::OpenFolder),
+                (delete, "d", ButtonId::DeleteSelected),
             ],
         );
 
+        let title = self.tr("nav.worlds").to_string();
         frame.render_widget(
-            Paragraph::new(section_title(
-                "Worlds",
-                &format!("{}", self.worlds.len()),
-                &self.theme,
-            ))
-            .style(self.theme.card()),
+            Paragraph::new(section_title(&title, &format!("{}", self.worlds.len()), &self.theme))
+                .style(self.theme.card()),
             chunks[2],
         );
 
@@ -59,9 +58,9 @@ impl App {
         if self.worlds.is_empty() {
             let lines = vec![
                 Line::from(""),
-                Line::from(Span::styled("No worlds found.", self.theme.header())),
+                Line::from(Span::styled(self.tr("empty.no_worlds"), self.theme.header())),
                 Line::from(Span::styled(
-                    "Worlds are stored in the saves folder.",
+                    self.tr("empty.worlds_hint"),
                     self.theme.card_dim(),
                 )),
             ];
@@ -71,12 +70,16 @@ impl App {
 
         let total = self.worlds.len();
         let visible = (inner.height / ROW_H) as usize;
+        self.world_visible_rows = visible;
+        self.ensure_world_visible();
+        let start = self.world_scroll;
         let selected = self.worlds_state.selected();
         let instance = self.selected_instance().cloned();
         let game_dir = instance.map(|i| i.game_dir());
 
         for row_idx in 0..visible {
-            if row_idx >= total {
+            let idx = start + row_idx;
+            if idx >= total {
                 break;
             }
             let y = inner.y + row_idx as u16 * ROW_H;
@@ -86,11 +89,11 @@ impl App {
                 width: inner.width,
                 height: ROW_H,
             };
-            let name = self.worlds[row_idx].clone();
-            let is_selected = selected == Some(row_idx);
+            let name = self.worlds[idx].clone();
+            let is_selected = selected == Some(idx);
             let hovered = self.is_hovered(rect);
             self.render_world_row(frame, rect, &name, game_dir.as_deref(), is_selected, hovered);
-            self.push_hitbox(rect, HitAction::InstanceTile(row_idx));
+            self.push_hitbox(rect, HitAction::WorldRow(idx));
         }
     }
 
@@ -198,15 +201,16 @@ impl App {
             Line::from(Span::styled(truncate(name, text_w as usize), name_style)),
             Line::from(""),
             Line::from(Span::styled(
-                format!("Seed:    {}", "unknown"),
+                crate::i18n::tr_string(self.lang(), "worlds.seed")
+                    .replace("{}", self.tr("worlds.unknown")),
                 dim_style,
             )),
             Line::from(Span::styled(
-                format!("Game:    {}", "Java"),
+                crate::i18n::tr_string(self.lang(), "worlds.game").replace("{}", "Java"),
                 dim_style,
             )),
             Line::from(Span::styled(
-                format!("Version: {}", "latest"),
+                crate::i18n::tr_string(self.lang(), "worlds.version").replace("{}", "latest"),
                 dim_style,
             )),
         ];
@@ -231,31 +235,22 @@ impl App {
 
     pub(crate) fn key_worlds(&mut self, key: KeyEvent) {
         use crossterm::event::KeyCode;
+        let len = self.worlds.len();
+        let page = self.world_visible_rows.max(1) as i32;
         match key.code {
             KeyCode::Enter | KeyCode::Char('o') => self.open_current_folder(),
             KeyCode::Char('d') => self.confirm_delete_selected(),
             KeyCode::Down | KeyCode::Char('j') => {
-                move_sel_worlds(&mut self.worlds_state, self.worlds.len(), 1);
+                crate::views::move_sel(&mut self.worlds_state, len, 1);
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                move_sel_worlds(&mut self.worlds_state, self.worlds.len(), -1);
+                crate::views::move_sel(&mut self.worlds_state, len, -1);
             }
-            KeyCode::Char('g') => self.worlds_state.select(Some(0)),
-            KeyCode::Char('G') => {
-                let last = self.worlds.len().saturating_sub(1);
-                self.worlds_state.select(Some(last));
-            }
+            KeyCode::PageDown => crate::views::move_sel(&mut self.worlds_state, len, page),
+            KeyCode::PageUp => crate::views::move_sel(&mut self.worlds_state, len, -page),
+            KeyCode::Char('g') => crate::views::jump(&mut self.worlds_state, len, false),
+            KeyCode::Char('G') => crate::views::jump(&mut self.worlds_state, len, true),
             _ => {}
         }
     }
-}
-
-fn move_sel_worlds(state: &mut ratatui::widgets::ListState, len: usize, delta: i32) {
-    if len == 0 {
-        state.select(None);
-        return;
-    }
-    let current = state.selected().unwrap_or(0) as i32;
-    let next = (current + delta).clamp(0, len as i32 - 1) as usize;
-    state.select(Some(next));
 }

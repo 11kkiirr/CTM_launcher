@@ -9,7 +9,7 @@ use ratatui::Frame;
 use crate::app::{App, ButtonId, Focus, HitAction};
 use crate::views::{buttons_row, card, section_title};
 
-const FIELD_COUNT: usize = 8;
+const FIELD_COUNT: usize = 9;
 
 impl App {
     pub(crate) fn render_settings(&mut self, frame: &mut Frame, area: Rect) {
@@ -24,6 +24,10 @@ impl App {
             ])
             .split(area);
 
+        let edit = self.tr("btn.edit");
+        let save = self.tr("btn.save");
+        let detect = self.tr("btn.detect_java");
+        let ascii = self.tr("btn.ascii_folder");
         buttons_row(
             self,
             frame,
@@ -31,10 +35,10 @@ impl App {
             chunks[0].y,
             area.x + area.width,
             &[
-                ("Edit", "e", ButtonId::EditSettings),
-                ("Save", "s", ButtonId::SaveSettings),
-                ("Detect Java", "J", ButtonId::DetectJava),
-                ("ASCII Folder", "a", ButtonId::OpenAsciiBgFolder),
+                (edit, "e", ButtonId::EditSettings),
+                (save, "s", ButtonId::SaveSettings),
+                (detect, "J", ButtonId::DetectJava),
+                (ascii, "a", ButtonId::OpenAsciiBgFolder),
             ],
         );
 
@@ -49,8 +53,9 @@ impl App {
             return;
         }
 
+        let title = self.tr("settings.title").to_string();
         frame.render_widget(
-            Paragraph::new(section_title("Launcher Settings", "", &self.theme))
+            Paragraph::new(section_title(&title, "", &self.theme))
                 .style(self.theme.card()),
             Rect {
                 x: inner.x,
@@ -60,30 +65,53 @@ impl App {
             },
         );
 
+        let lang = self.settings.language;
         let s = &self.settings;
         let java = s
             .java_path
             .as_ref()
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "auto-detect".to_string());
+            .unwrap_or_else(|| crate::i18n::tr(lang, "settings.auto_detect").to_string());
+        let yes = crate::i18n::tr(lang, "common.yes").to_string();
+        let no = crate::i18n::tr(lang, "common.no").to_string();
+        let mb = crate::i18n::tr(lang, "settings.mb");
         let values = [
-            ("Java Path", java),
-            ("Default Min RAM", format!("{} MB", s.default_min_memory_mb)),
-            ("Default Max RAM", format!("{} MB", s.default_max_memory_mb)),
-            ("Default GC", s.default_gc.label().to_string()),
             (
-                "Show Progress",
-                if s.show_progress { "yes" } else { "no" }.to_string(),
+                crate::i18n::tr(lang, "settings.java_path").to_string(),
+                java,
             ),
             (
-                "Confirm Quit",
-                if s.confirm_quit { "yes" } else { "no" }.to_string(),
+                crate::i18n::tr(lang, "settings.min_ram").to_string(),
+                format!("{} {}", s.default_min_memory_mb, mb),
             ),
             (
-                "Auto-scroll Logs",
-                if s.log_auto_scroll { "yes" } else { "no" }.to_string(),
+                crate::i18n::tr(lang, "settings.max_ram").to_string(),
+                format!("{} {}", s.default_max_memory_mb, mb),
             ),
-            ("ASCII Art Anchor", s.ascii_bg_anchor.label().to_string()),
+            (
+                crate::i18n::tr(lang, "settings.gc").to_string(),
+                s.default_gc.label().to_string(),
+            ),
+            (
+                crate::i18n::tr(lang, "settings.show_progress").to_string(),
+                if s.show_progress { yes.clone() } else { no.clone() },
+            ),
+            (
+                crate::i18n::tr(lang, "settings.confirm_quit").to_string(),
+                if s.confirm_quit { yes.clone() } else { no.clone() },
+            ),
+            (
+                crate::i18n::tr(lang, "settings.auto_scroll").to_string(),
+                if s.log_auto_scroll { yes.clone() } else { no.clone() },
+            ),
+            (
+                crate::i18n::tr(lang, "settings.ascii_anchor").to_string(),
+                s.ascii_bg_anchor.label_lang(lang),
+            ),
+            (
+                crate::i18n::tr(lang, "settings.language").to_string(),
+                s.language.native_label().to_string(),
+            ),
         ];
 
         for (idx, (label, value)) in values.iter().enumerate() {
@@ -123,13 +151,12 @@ impl App {
             return;
         }
 
+        let title = self.tr("settings.java_runtimes").to_string();
+        let rescan = self.tr("settings.rescan_hint").to_string();
+        let suffix = format!("{}  ·  {}", self.java_installations.len(), rescan);
         frame.render_widget(
-            Paragraph::new(section_title(
-                "Java Runtimes",
-                &format!("{}  ·  press 'J' to rescan", self.java_installations.len()),
-                &self.theme,
-            ))
-            .style(self.theme.card()),
+            Paragraph::new(section_title(&title, &suffix, &self.theme))
+                .style(self.theme.card()),
             Rect {
                 x: inner.x,
                 y: inner.y,
@@ -162,7 +189,7 @@ impl App {
         if self.java_installations.is_empty() {
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "Scanning for Java runtimes...",
+                    self.tr("settings.scanning_java"),
                     self.theme.card_dim(),
                 ))
                 .style(self.theme.card()),
@@ -181,20 +208,18 @@ impl App {
             }
             KeyCode::Enter => self.open_settings_form(),
             KeyCode::Char(' ') => self.toggle_setting(self.settings_field),
-            KeyCode::Left => {
-                if self.settings_field == 3 {
-                    self.cycle_setting_gc(false);
-                } else if self.settings_field == 7 {
-                    self.cycle_ascii_bg_anchor(false);
-                }
-            }
-            KeyCode::Right => {
-                if self.settings_field == 3 {
-                    self.cycle_setting_gc(true);
-                } else if self.settings_field == 7 {
-                    self.cycle_ascii_bg_anchor(true);
-                }
-            }
+            KeyCode::Left => match self.settings_field {
+                3 => self.cycle_setting_gc(false),
+                7 => self.cycle_ascii_bg_anchor(false),
+                8 => self.cycle_setting_language(false),
+                _ => {}
+            },
+            KeyCode::Right => match self.settings_field {
+                3 => self.cycle_setting_gc(true),
+                7 => self.cycle_ascii_bg_anchor(true),
+                8 => self.cycle_setting_language(true),
+                _ => {}
+            },
             KeyCode::Char('s') => self.save_settings(),
             KeyCode::Char('J') => self.spawn_java_discovery(),
             KeyCode::Char('a') => self.open_ascii_bg_folder(),

@@ -26,29 +26,42 @@ impl App {
         }
     }
 
+    /// True while an inline search/filter bar is capturing character input.
+    pub(crate) fn is_typing(&self) -> bool {
+        self.mods_search_focused
+            || self.rp_search_focused
+            || self.shaders_search_focused
+            || (self.nav == Nav::Browse
+                && self.browse.focus == crate::views::browse::BrowseFocus::Search)
+    }
+
     pub(crate) fn handle_key(&mut self, key: KeyEvent) {
         if self.overlay.is_some() {
             self.handle_overlay_key(key);
             return;
         }
 
+        let typing = self.is_typing();
         match key.code {
-            KeyCode::Char('q') if key.modifiers.is_empty() => self.request_quit(),
+            KeyCode::Char('q') if !typing && key.modifiers.is_empty() => self.request_quit(),
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
             }
-            KeyCode::Char('?') => self.show_help(),
-            KeyCode::Tab => self.toggle_focus(),
-            KeyCode::BackTab => self.toggle_focus(),
+            KeyCode::Char('?') if !typing => self.show_help(),
+            KeyCode::Tab if !typing => self.toggle_focus(),
+            KeyCode::BackTab if !typing => self.toggle_focus(),
             KeyCode::F(2) => self.open_nav(Nav::Accounts),
             KeyCode::F(3) => self.open_nav(Nav::Launcher),
-            KeyCode::Char(c @ '1'..='5') => {
+            KeyCode::F(4) => self.open_nav(Nav::Modpacks),
+            KeyCode::Char(c @ '1'..='9') if !typing => {
                 let idx = (c as u8 - b'1') as usize;
                 if let Some(nav) = Nav::menu().get(idx) {
                     self.open_nav(*nav);
                 }
             }
-            KeyCode::Char('n') if self.nav == Nav::Instances => self.open_create_instance_form(),
+            KeyCode::Char('n') if !typing && self.nav == Nav::Instances => {
+                self.open_create_instance_form()
+            }
             _ => self.handle_view_key(key),
         }
     }
@@ -56,7 +69,7 @@ impl App {
     pub(crate) fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             Focus::Sidebar => Focus::Content,
-            Focus::Content => Focus::Sidebar,
+            _ => Focus::Sidebar,
         };
     }
 
@@ -96,6 +109,7 @@ impl App {
                 }
                 return;
             }
+            // Content → Sidebar → leave (via open_nav).
             self.open_nav(Nav::Instances);
             return;
         }
@@ -195,7 +209,14 @@ impl App {
         match action {
             HitAction::NavItem(nav) => self.open_nav(nav),
             HitAction::InstanceTile(idx) => self.select_instance(idx),
-            HitAction::AddInstance => self.open_create_instance_form(),
+            HitAction::WorldRow(idx) => {
+                self.worlds_state.select(Some(idx));
+                self.focus = Focus::Content;
+            }
+            HitAction::ScreenshotTile(idx) => {
+                self.screenshots_state.select(Some(idx));
+                self.focus = Focus::Content;
+            }
             HitAction::SearchRow(idx) => {
                 self.search_state.select(Some(idx));
                 self.focus = Focus::Content;
@@ -231,23 +252,14 @@ impl App {
             HitAction::BrowseFilter(item) => self.browse_filter_click(item),
             HitAction::BrowsePagePrev => self.browse_prev_page(),
             HitAction::BrowsePageNext => self.browse_next_page(),
-            HitAction::GroupPill(idx) => {
-                let group = if idx == 0 {
-                    String::new()
-                } else {
-                    self.groups.get(idx - 1).cloned().unwrap_or_default()
-                };
-                self.set_selected_group(group);
-            }
-            HitAction::NewGroup => {
-                if self.selected_instance().is_some() {
-                    self.overlay = Some(Overlay::text(
-                        "New Group",
-                        "Group name: ",
-                        TextAction::NewGroup,
-                    ));
-                } else {
-                    self.set_toast("Select an instance first", true);
+            HitAction::GroupHeader(idx) => {
+                // Header click toggles collapse; also marks the active group.
+                let sections = self.instance_sections();
+                if let Some(section) = sections.get(idx) {
+                    let name = section.name.clone();
+                    self.set_selected_group(name.clone());
+                    self.toggle_group_collapsed(&name);
+                    self.focus = Focus::Content;
                 }
             }
             HitAction::Overlay(action) => self.dispatch_overlay_action(action),
@@ -260,7 +272,13 @@ impl App {
         }
         self.instance_state.select(Some(idx));
         self.focus = Focus::Content;
+        // Refresh per-instance content lists so we never show another
+        // instance's mods / packs / worlds / screenshots.
         self.reload_mods();
+        self.reload_resource_packs();
+        self.reload_shaders();
+        self.reload_worlds();
+        self.reload_screenshots();
     }
 
     pub(crate) fn dispatch_button(&mut self, button: ButtonId) {
@@ -312,6 +330,9 @@ impl App {
             ButtonId::OpenFolder => self.open_current_folder(),
             ButtonId::DeleteSelected => self.confirm_delete_selected(),
             ButtonId::ToggleSelected => self.toggle_selected_entry(),
+            ButtonId::NewGroup => self.open_new_group_form(),
+            ButtonId::RenameGroup => self.open_rename_group_form(),
+            ButtonId::DeleteGroup => self.confirm_delete_group(),
         }
     }
 
@@ -320,7 +341,14 @@ impl App {
             return;
         }
         match self.nav {
-            Nav::Instances => self.scroll_tiles(delta),
+            Nav::Instances => {
+                if self.grid_has_selection() || !self.instances.is_empty() {
+                    // Wheel moves one visual row (section-aware).
+                    let steps = delta.unsigned_abs().min(4) as i32;
+                    let dir = if delta > 0 { steps } else { -steps };
+                    self.move_grid_vert(dir);
+                }
+            }
             Nav::Browse => self.browse_scroll(delta),
             Nav::Versions => {}
             Nav::Modpacks => {
@@ -351,14 +379,85 @@ impl App {
                 let next = (self.settings_field as i32 + delta).clamp(0, len as i32 - 1) as usize;
                 self.settings_field = next;
             }
-            Nav::ResourcePacks | Nav::Shaders | Nav::Worlds | Nav::Screenshots => {}
+            Nav::ResourcePacks => {
+                move_selection(
+                    &mut self.resource_packs_state,
+                    self.resource_packs.len(),
+                    delta * 4,
+                );
+            }
+            Nav::Shaders => {
+                move_selection(&mut self.shaders_state, self.shaders.len(), delta * 4);
+            }
+            Nav::Worlds => {
+                move_selection(&mut self.worlds_state, self.worlds.len(), delta);
+            }
+            Nav::Screenshots => {
+                let cols = self.screenshot_cols.max(1);
+                move_selection(
+                    &mut self.screenshots_state,
+                    self.screenshots.len(),
+                    delta * cols as i32,
+                );
+            }
         }
     }
 
-    fn scroll_tiles(&mut self, delta: i32) {
-        let rows = self.tile_rows();
-        let next = (self.tile_scroll as i32 + delta).clamp(0, rows.saturating_sub(1) as i32);
-        self.tile_scroll = next as usize;
+    pub(crate) fn ensure_tile_visible(&mut self, view_h: usize) {
+        if view_h == 0 {
+            return;
+        }
+        let cols = self.tile_columns.max(1);
+        let sections = self.instance_sections();
+        let total = crate::views::tiles::content_height(&sections, cols);
+        let max_scroll = total.saturating_sub(view_h);
+
+        if let Some(selected) = self.instance_state.selected() {
+            if let Some(y) = crate::views::tiles::instance_content_y(&sections, cols, selected) {
+                let tile_end = y + crate::views::tiles::TILE_H as usize;
+                if y < self.tile_scroll {
+                    self.tile_scroll = y;
+                } else if tile_end > self.tile_scroll + view_h {
+                    self.tile_scroll = tile_end.saturating_sub(view_h);
+                }
+            }
+        }
+        self.tile_scroll = crate::views::tiles::snap_scroll(&sections, cols, self.tile_scroll);
+        self.tile_scroll = self.tile_scroll.min(max_scroll);
+        // Approximate visible tile rows for PageUp/PageDown step size.
+        let row_h = crate::views::tiles::TILE_H as usize + crate::views::tiles::GAP_Y as usize;
+        self.tile_visible_rows = (view_h / row_h).max(1);
+    }
+
+    pub(crate) fn ensure_screenshot_visible(&mut self) {
+        let cols = self.screenshot_cols.max(1);
+        let visible = self.screenshot_visible_rows.max(1);
+        let Some(selected) = self.screenshots_state.selected() else {
+            return;
+        };
+        let selected_row = selected / cols;
+        if selected_row < self.screenshot_scroll {
+            self.screenshot_scroll = selected_row;
+        } else if selected_row >= self.screenshot_scroll + visible {
+            self.screenshot_scroll = selected_row + 1 - visible;
+        }
+        let rows = self.screenshots.len().div_ceil(cols);
+        let max_scroll = rows.saturating_sub(visible);
+        self.screenshot_scroll = self.screenshot_scroll.min(max_scroll);
+    }
+
+    pub(crate) fn ensure_world_visible(&mut self) {
+        let visible = self.world_visible_rows.max(1);
+        let Some(selected) = self.worlds_state.selected() else {
+            return;
+        };
+        if selected < self.world_scroll {
+            self.world_scroll = selected;
+        } else if selected >= self.world_scroll + visible {
+            self.world_scroll = selected + 1 - visible;
+        }
+        let max_scroll = self.worlds.len().saturating_sub(visible);
+        self.world_scroll = self.world_scroll.min(max_scroll);
     }
 
     pub(crate) fn scroll_logs(&mut self, delta: i32) {
@@ -382,26 +481,6 @@ impl App {
             self.log_scroll = 0;
             self.log_follow = false;
         }
-    }
-
-    pub(crate) fn tile_rows(&self) -> usize {
-        let cols = self.tile_columns.max(1);
-        self.instances.len().div_ceil(cols)
-    }
-
-    pub(crate) fn ensure_tile_visible(&mut self, visible_rows: usize) {
-        if visible_rows == 0 {
-            return;
-        }
-        let cols = self.tile_columns.max(1);
-        let selected_row = self.instance_state.selected().unwrap_or(0) / cols;
-        if selected_row < self.tile_scroll {
-            self.tile_scroll = selected_row;
-        } else if selected_row >= self.tile_scroll + visible_rows {
-            self.tile_scroll = selected_row + 1 - visible_rows;
-        }
-        let max_scroll = self.tile_rows().saturating_sub(visible_rows);
-        self.tile_scroll = self.tile_scroll.min(max_scroll);
     }
 
     // ---------------------------------------------------------------------
@@ -630,8 +709,14 @@ impl App {
                 if trimmed.is_empty() {
                     return;
                 }
-                self.move_instance_to_group(&trimmed);
+                if self.pending_move_on_new_group {
+                    self.pending_move_on_new_group = false;
+                    self.move_instance_to_group(&trimmed);
+                } else {
+                    self.create_group(trimmed);
+                }
             }
+            TextAction::RenameGroup(old) => self.rename_group(old, text),
             TextAction::None => {}
         }
     }

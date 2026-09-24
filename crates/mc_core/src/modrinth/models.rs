@@ -237,6 +237,9 @@ pub struct InstalledMod {
     pub mod_name: String,
     /// Mod version parsed from jar manifest (e.g. "0.5.8").
     pub version: String,
+    /// Mod id from `fabric.mod.json` / `quilt.mod.json` (e.g. "sodium").
+    /// Often matches the Modrinth slug; empty when not present.
+    pub mod_id: String,
     /// File modification time used as install/update date (YYYY-MM-DD HH:MM).
     pub install_date: String,
 }

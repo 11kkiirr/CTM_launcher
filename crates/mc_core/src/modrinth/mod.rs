@@ -88,8 +88,9 @@ pub async fn scan_installed_mods(mods_dir: impl AsRef<Path>) -> Result<Vec<Insta
         let path = entry.path();
         let metadata = entry.metadata().await?;
 
-        // Parse jar manifest for mod name and version.
-        let (mod_name, version) = parse_jar_manifest(&path).await;
+        // Parse jar manifest for mod name and version; also read mod id
+        // from fabric.mod.json / quilt.mod.json when present.
+        let (mod_name, version, mod_id) = parse_jar_manifest(&path).await;
 
         // Format file modification time as install date.
         let install_date = metadata
@@ -109,6 +110,7 @@ pub async fn scan_installed_mods(mods_dir: impl AsRef<Path>) -> Result<Vec<Insta
             size: metadata.len(),
             mod_name,
             version,
+            mod_id,
             install_date,
         });
     }
@@ -120,67 +122,118 @@ pub async fn scan_installed_mods(mods_dir: impl AsRef<Path>) -> Result<Vec<Insta
     Ok(out)
 }
 
-/// Extract mod name and version from a jar's `META-INF/MANIFEST.MF`.
+/// Extract mod name, version and id from a jar.
 ///
-/// Looks for `Fabric-Mod` or `Forge-Mod` or `NeoForge-Mod` headers, falling
-/// back to `Implementation-Title` / `Implementation-Version`.
-async fn parse_jar_manifest(path: &std::path::Path) -> (String, String) {
+/// Name/version come from `META-INF/MANIFEST.MF` (`Fabric-Mod` /
+/// `Implementation-Title` headers), falling back to `fabric.mod.json`.
+/// The id is read from `fabric.mod.json` (`id`) or `quilt.mod.json`
+/// (`quilt_loader.id`) so Browse can match installed files to Modrinth slugs.
+async fn parse_jar_manifest(path: &std::path::Path) -> (String, String, String) {
     let path = path.to_path_buf();
-    let result = tokio::task::spawn_blocking(move || parse_jar_manifest_sync(&path))
+    tokio::task::spawn_blocking(move || parse_jar_manifest_sync(&path))
         .await
-        .unwrap_or_else(|_| (String::new(), String::new()));
-    result
+        .unwrap_or_else(|_| (String::new(), String::new(), String::new()))
 }
 
-fn parse_jar_manifest_sync(path: &std::path::Path) -> (String, String) {
+fn parse_jar_manifest_sync(path: &std::path::Path) -> (String, String, String) {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
-        Err(_) => return (String::new(), String::new()),
+        Err(_) => return (String::new(), String::new(), String::new()),
     };
     let reader = std::io::BufReader::new(file);
     let mut archive = match zip::ZipArchive::new(reader) {
         Ok(z) => z,
-        Err(_) => return (String::new(), String::new()),
+        Err(_) => return (String::new(), String::new(), String::new()),
     };
-    let mut manifest = match archive.by_name("META-INF/MANIFEST.MF") {
-        Ok(m) => m,
-        Err(_) => return (String::new(), String::new()),
-    };
-    let mut contents = String::new();
-    if std::io::Read::read_to_string(&mut manifest, &mut contents).is_err() {
-        return (String::new(), String::new());
-    }
 
     let mut name = String::new();
     let mut version = String::new();
+    let mut mod_id = String::new();
 
-    for line in contents.lines() {
-        let trimmed = line.trim();
-        if let Some(val) = trimmed.strip_prefix("Fabric-Mod:") {
-            let val = val.trim();
-            if !val.is_empty() && name.is_empty() {
-                name = val.to_string();
-            }
-        } else if let Some(val) = trimmed.strip_prefix("Implementation-Title:") {
-            let val = val.trim();
-            if !val.is_empty() && name.is_empty() {
-                name = val.to_string();
-            }
-        }
-        if let Some(val) = trimmed.strip_prefix("Fabric-Version:") {
-            let val = val.trim();
-            if !val.is_empty() && version.is_empty() {
-                version = val.to_string();
-            }
-        } else if let Some(val) = trimmed.strip_prefix("Implementation-Version:") {
-            let val = val.trim();
-            if !val.is_empty() && version.is_empty() {
-                version = val.to_string();
+    if let Ok(mut manifest) = archive.by_name("META-INF/MANIFEST.MF") {
+        let mut contents = String::new();
+        if std::io::Read::read_to_string(&mut manifest, &mut contents).is_ok() {
+            for line in contents.lines() {
+                let trimmed = line.trim();
+                if let Some(val) = trimmed.strip_prefix("Fabric-Mod:") {
+                    let val = val.trim();
+                    if !val.is_empty() && name.is_empty() {
+                        name = val.to_string();
+                    }
+                } else if let Some(val) = trimmed.strip_prefix("Implementation-Title:") {
+                    let val = val.trim();
+                    if !val.is_empty() && name.is_empty() {
+                        name = val.to_string();
+                    }
+                }
+                if let Some(val) = trimmed.strip_prefix("Fabric-Version:") {
+                    let val = val.trim();
+                    if !val.is_empty() && version.is_empty() {
+                        version = val.to_string();
+                    }
+                } else if let Some(val) = trimmed.strip_prefix("Implementation-Version:") {
+                    let val = val.trim();
+                    if !val.is_empty() && version.is_empty() {
+                        version = val.to_string();
+                    }
+                }
             }
         }
     }
 
-    (name, version)
+    if let Ok(mut f) = archive.by_name("fabric.mod.json") {
+        let mut contents = String::new();
+        if std::io::Read::read_to_string(&mut f, &mut contents).is_ok() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&contents) {
+                if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
+                    if !id.is_empty() {
+                        mod_id = id.to_string();
+                    }
+                }
+                if name.is_empty() {
+                    if let Some(n) = v.get("name").and_then(|x| x.as_str()) {
+                        name = n.to_string();
+                    }
+                }
+                if version.is_empty() {
+                    if let Some(ver) = v.get("version").and_then(|x| x.as_str()) {
+                        version = ver.to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    if mod_id.is_empty() {
+        if let Ok(mut f) = archive.by_name("quilt.mod.json") {
+            let mut contents = String::new();
+            if std::io::Read::read_to_string(&mut f, &mut contents).is_ok() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&contents) {
+                    if let Some(id) = v
+                        .get("quilt_loader")
+                        .and_then(|q| q.get("id"))
+                        .and_then(|x| x.as_str())
+                    {
+                        if !id.is_empty() {
+                            mod_id = id.to_string();
+                        }
+                    }
+                    if name.is_empty() {
+                        if let Some(n) = v
+                            .get("quilt_loader")
+                            .and_then(|q| q.get("metadata"))
+                            .and_then(|m| m.get("name"))
+                            .and_then(|x| x.as_str())
+                        {
+                            name = n.to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (name, version, mod_id)
 }
 
 /// Ensure a mod has its SHA-1 computed, hashing lazily when missing.
@@ -289,6 +342,33 @@ mod tests {
         assert_eq!(mods.len(), 2);
         assert!(mods.iter().any(|m| !m.enabled));
         assert!(mods.iter().any(|m| m.enabled));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn scan_reads_fabric_mod_id() {
+        use std::io::Write as _;
+
+        let dir = std::env::temp_dir().join(format!("ctm-scan-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let jar_path = dir.join("sodium.jar");
+        {
+            let file = std::fs::File::create(&jar_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("fabric.mod.json", options).unwrap();
+            zip.write_all(br#"{"id":"sodium","name":"Sodium","version":"0.6.0"}"#)
+                .unwrap();
+            zip.finish().unwrap();
+        }
+
+        let mods = scan_installed_mods(&dir).await.unwrap();
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods[0].mod_id, "sodium");
+        assert_eq!(mods[0].mod_name, "Sodium");
+        assert_eq!(mods[0].version, "0.6.0");
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

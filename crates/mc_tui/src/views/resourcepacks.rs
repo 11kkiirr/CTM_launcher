@@ -23,6 +23,9 @@ impl App {
             ])
             .split(area);
 
+        let toggle = self.tr("btn.toggle");
+        let delete = self.tr("btn.delete");
+        let browse = self.tr("btn.browse");
         buttons_row(
             self,
             frame,
@@ -30,9 +33,9 @@ impl App {
             chunks[0].y,
             area.x + area.width,
             &[
-                ("Toggle", "Space", ButtonId::ToggleSelected),
-                ("Delete", "d", ButtonId::DeleteSelected),
-                ("Browse", "s", ButtonId::RpBrowse),
+                (toggle, "Space", ButtonId::ToggleSelected),
+                (delete, "d", ButtonId::DeleteSelected),
+                (browse, "s", ButtonId::RpBrowse),
             ],
         );
 
@@ -131,7 +134,7 @@ impl App {
         };
         frame.render_widget(
             Paragraph::new(section_title(
-                "Resource Packs",
+                self.tr("rp.title"),
                 &format!("{instance_name}  ·  {count_text}"),
                 &self.theme,
             ))
@@ -149,9 +152,9 @@ impl App {
 
         if filtered.is_empty() {
             let hint = if !query_lower.is_empty() {
-                "No resource packs match the filter.".to_string()
+                self.tr("empty.no_rp_filter").to_string()
             } else {
-                "No resource packs found. Press 's' to browse Modrinth.".to_string()
+                self.tr("empty.no_rp").to_string()
             };
             frame.render_widget(
                 Paragraph::new(Span::styled(hint, self.theme.card_dim())).style(self.theme.card()),
@@ -223,6 +226,14 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => {
                 let len = self.resource_packs.len();
                 move_sel(&mut self.resource_packs_state, len, -1);
+            }
+            KeyCode::PageDown => {
+                let len = self.resource_packs.len();
+                move_sel(&mut self.resource_packs_state, len, 10);
+            }
+            KeyCode::PageUp => {
+                let len = self.resource_packs.len();
+                move_sel(&mut self.resource_packs_state, len, -10);
             }
             KeyCode::Char('g') => {
                 let len = self.resource_packs.len();

@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 
 use crate::engine::{EngineReceiver, EngineSender};
 use crate::forms::{gc_options, Overlay, PickerTarget};
+use crate::i18n::{self, Lang};
 use crate::settings::LauncherSettings;
 use crate::theme::Theme;
 use crate::views::browse::Browse;
@@ -87,29 +88,48 @@ impl Nav {
         Self::menu().iter().position(|n| n == self).map(|i| i + 1)
     }
 
+    #[allow(dead_code)]
     pub fn label(&self) -> &'static str {
-        match self {
-            Nav::Instances => "Instances",
-            Nav::Browse => "Browse",
-            Nav::Mods => "Mods",
-            Nav::Modpacks => "Modpacks",
-            Nav::Versions => "Versions",
-            Nav::Jvm => "JVM Settings",
-            Nav::Logs => "Logs",
-            Nav::Accounts => "Accounts",
-            Nav::Launcher => "Launcher Settings",
-            Nav::ResourcePacks => "Resource Packs",
-            Nav::Shaders => "Shaders",
-            Nav::Worlds => "Worlds",
-            Nav::Screenshots => "Screenshots",
-        }
+        i18n::en_static(self.nav_key())
     }
 
+    #[allow(dead_code)]
+    pub fn label_lang(&self, lang: Lang) -> String {
+        i18n::tr_string(lang, self.nav_key())
+    }
+
+    #[allow(dead_code)]
     pub fn menu_label(&self) -> &'static str {
         match self {
             Nav::Jvm => "JVM",
             Nav::ResourcePacks => "Res Packs",
             other => other.label(),
+        }
+    }
+
+    pub fn menu_label_lang(&self, lang: Lang) -> String {
+        match self {
+            Nav::Jvm => i18n::tr_string(lang, "nav.jvm_short"),
+            Nav::ResourcePacks => i18n::tr_string(lang, "nav.resource_packs_short"),
+            other => i18n::tr_string(lang, other.nav_key()),
+        }
+    }
+
+    fn nav_key(&self) -> &'static str {
+        match self {
+            Nav::Instances => "nav.instances",
+            Nav::Browse => "nav.browse",
+            Nav::Mods => "nav.mods",
+            Nav::Modpacks => "nav.modpacks",
+            Nav::Versions => "nav.versions",
+            Nav::Jvm => "nav.jvm",
+            Nav::Logs => "nav.logs",
+            Nav::Accounts => "nav.accounts",
+            Nav::Launcher => "nav.launcher",
+            Nav::ResourcePacks => "nav.resource_packs",
+            Nav::Shaders => "nav.shaders",
+            Nav::Worlds => "nav.worlds",
+            Nav::Screenshots => "nav.screenshots",
         }
     }
 
@@ -159,13 +179,14 @@ pub enum Focus {
 pub enum HitAction {
     NavItem(Nav),
     InstanceTile(usize),
-    AddInstance,
     SearchRow(usize),
     ProjectVersionRow(usize),
     ModRow(usize),
     ModsSearchBar,
     AccountRow(usize),
     SettingsRow(usize),
+    WorldRow(usize),
+    ScreenshotTile(usize),
     Button(ButtonId),
     BrowseResult(usize),
     BrowseVersion(usize),
@@ -175,8 +196,7 @@ pub enum HitAction {
     BrowseFilter(crate::views::browse::FilterItem),
     BrowsePagePrev,
     BrowsePageNext,
-    GroupPill(usize),
-    NewGroup,
+    GroupHeader(usize),
     Overlay(OverlayAction),
 }
 
@@ -234,6 +254,9 @@ pub enum ButtonId {
     OpenFolder,
     DeleteSelected,
     ToggleSelected,
+    NewGroup,
+    RenameGroup,
+    DeleteGroup,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -275,6 +298,12 @@ pub struct App {
     pub mouse_pos: Option<(u16, u16)>,
     pub tile_scroll: usize,
     pub tile_columns: usize,
+    pub tile_visible_rows: usize,
+    pub screenshot_scroll: usize,
+    pub screenshot_cols: usize,
+    pub screenshot_visible_rows: usize,
+    pub world_scroll: usize,
+    pub world_visible_rows: usize,
     pub sidebar_area: Rect,
 
     pub tick: u64,
@@ -290,7 +319,15 @@ pub struct App {
     pub instance_state: ListState,
 
     pub groups: Vec<String>,
+    /// Active section header for group rename/delete (empty = none).
     pub selected_group: String,
+    /// Instance counts keyed by group name (`""` = ungrouped / All).
+    pub group_counts: std::collections::HashMap<String, usize>,
+    /// Group names whose panel is collapsed (only the header strip shows).
+    pub collapsed_groups: HashSet<String>,
+    /// After the `g` picker's "[New Group]", the text prompt also moves
+    /// the selected instance into the new group.
+    pub pending_move_on_new_group: bool,
 
     pub external_instances: Vec<ExternalInstance>,
 
@@ -379,6 +416,12 @@ impl App {
             mouse_pos: None,
             tile_scroll: 0,
             tile_columns: 2,
+            tile_visible_rows: 1,
+            screenshot_scroll: 0,
+            screenshot_cols: 1,
+            screenshot_visible_rows: 1,
+            world_scroll: 0,
+            world_visible_rows: 1,
             sidebar_area: Rect::default(),
             tick: 0,
             status: "Ready".to_string(),
@@ -392,6 +435,9 @@ impl App {
             instance_state: ListState::default(),
             groups: Vec::new(),
             selected_group: String::new(),
+            group_counts: std::collections::HashMap::new(),
+            collapsed_groups: HashSet::new(),
+            pending_move_on_new_group: false,
             external_instances: Vec::new(),
             accounts,
             account_state: ListState::default(),
@@ -451,6 +497,10 @@ impl App {
         app.log_buffer.filter.min_level = logs::LogLevel::Info;
         app.spawn_java_discovery();
         app.reload_mods();
+        app.reload_resource_packs();
+        app.reload_shaders();
+        app.reload_worlds();
+        app.reload_screenshots();
         Ok(app)
     }
 
@@ -546,7 +596,7 @@ impl App {
 
     pub(crate) fn on_process_exit(&mut self, version: &str, code: Option<i32>) {
         if code == Some(0) {
-            self.set_toast(format!("Game exited normally ({version})"), false);
+            self.set_toast(crate::i18n::tr_string(self.lang(), "toast.game_exited").replace("{}", &version), false);
             return;
         }
         if let Some(instance) = self.selected_instance() {
@@ -555,16 +605,17 @@ impl App {
                     let headline = analysis.headline.clone();
                     self.crash_analysis = Some(analysis);
                     self.set_toast(
-                        format!("Game crashed ({version}): {headline} \u{2014} press 'a' in Logs"),
+                        crate::i18n::tr_string(self.lang(), "toast.game_crashed")
+                            .replace("{}", version)
+                            .replace("{}", &headline),
                         true,
                     );
                 }
                 _ => {
                     self.set_toast(
-                        format!(
-                            "Game exited with code {} ({version})",
-                            code.map_or("?".into(), |c| c.to_string())
-                        ),
+                        crate::i18n::tr_string(self.lang(), "toast.game_exit_code")
+                            .replace("{}", &code.map_or("?".into(), |c| c.to_string()))
+                            .replace("{}", version),
                         true,
                     );
                 }
@@ -589,7 +640,14 @@ pub(crate) fn move_selection(state: &mut ListState, len: usize, delta: i32) {
         state.select(None);
         return;
     }
-    let current = state.selected().unwrap_or(0) as i32;
+    let current = match state.selected() {
+        Some(i) => i as i32,
+        None => {
+            let start = if delta < 0 { len as i32 - 1 } else { 0 };
+            state.select(Some(start as usize));
+            return;
+        }
+    };
     let next = (current + delta).clamp(0, len as i32 - 1) as usize;
     state.select(Some(next));
 }
@@ -607,6 +665,28 @@ pub(crate) fn split_args(input: &str) -> Vec<String> {
 
 pub(crate) fn settings_field_count() -> usize {
     9
+}
+
+impl App {
+    /// Translate `key` using the current UI language.
+    pub fn tr(&self, key: &str) -> &'static str {
+        match i18n::tr(self.settings.language, key) {
+            std::borrow::Cow::Borrowed(s) => s,
+            // Unknown key: fall back to the English table, then the key.
+            std::borrow::Cow::Owned(_) => i18n::en_static(key),
+        }
+    }
+
+    /// Translate `key` into an owned string (for `format!` labels).
+    #[allow(dead_code)]
+    pub fn trs(&self, key: &str) -> String {
+        i18n::tr_string(self.settings.language, key)
+    }
+
+    /// Current UI language.
+    pub fn lang(&self) -> Lang {
+        self.settings.language
+    }
 }
 
 pub(crate) fn truncate_str(input: &str, max: usize) -> String {
@@ -632,89 +712,100 @@ pub(crate) fn info_line(label: &str, value: &str, theme: &Theme) -> Line<'static
 pub(crate) fn footer_hints(nav: Nav) -> &'static [(&'static str, &'static str)] {
     match nav {
         Nav::Instances => &[
-            ("Enter", "launch"),
-            ("n", "new"),
-            ("e", "edit"),
-            ("i", "install"),
-            ("p", "import"),
-            ("v", "versions"),
-            ("g", "group"),
-            ("r", "rename"),
-            ("d", "delete"),
+            ("Enter", "hint.launch"),
+            ("n", "hint.new"),
+            ("e", "hint.edit"),
+            ("i", "hint.install"),
+            ("p", "hint.import"),
+            ("v", "hint.versions"),
+            ("g", "hint.move_group"),
+            ("c", "hint.collapse"),
+            ("y", "hint.new_group"),
+            ("Y", "hint.ren_group"),
+            ("D", "hint.del_group"),
+            ("r", "hint.rename"),
+            ("d", "hint.delete"),
+            ("wheel", "hint.scroll"),
         ],
         Nav::Browse => &[
-            ("1-4", "type"),
-            ("s", "search"),
-            ("Enter", "open"),
-            ("i", "quick install"),
-            ("[/]", "pages"),
-            ("f", "compat"),
-            ("c", "side"),
-            ("o", "sort"),
+            ("s", "hint.search"),
+            ("Enter", "hint.open"),
+            ("i", "hint.quick_install"),
+            ("[/]", "hint.pages"),
+            ("f", "hint.compat"),
+            ("c", "hint.side"),
+            ("o", "hint.sort"),
         ],
         Nav::Mods => &[
-            ("t", "pane"),
-            ("Space", "toggle"),
-            ("s", "search"),
-            ("u", "updates"),
-            ("d", "delete"),
+            ("t", "hint.pane"),
+            ("Space", "hint.toggle"),
+            ("s", "hint.search"),
+            ("u", "hint.updates"),
+            ("d", "hint.delete"),
+            ("wheel", "hint.scroll"),
         ],
         Nav::Modpacks => &[
-            ("/", "search"),
-            ("Enter", "open"),
-            ("i", "install"),
-            ("m", "import"),
+            ("/", "hint.search"),
+            ("Enter", "hint.open"),
+            ("i", "hint.install"),
+            ("m", "hint.import"),
+            ("wheel", "hint.scroll"),
         ],
-        Nav::Versions => &[("c", "change version"), ("r", "reinstall")],
+        Nav::Versions => &[("c", "hint.change_version"), ("r", "hint.reinstall")],
         Nav::Jvm => &[
-            ("Enter", "edit"),
-            ("j/k", "move"),
-            ("s", "save"),
-            ("J", "detect Java"),
+            ("Enter", "hint.edit"),
+            ("j/k", "hint.move"),
+            ("s", "hint.save"),
+            ("J", "hint.detect_java"),
         ],
         Nav::Logs => &[
-            ("j/k", "scroll"),
-            ("f", "follow"),
-            ("p", "pause"),
-            ("c", "clear"),
-            ("/", "filter"),
-            ("a", "crash"),
+            ("j/k", "hint.scroll"),
+            ("f", "hint.follow"),
+            ("p", "hint.pause"),
+            ("c", "hint.clear"),
+            ("/", "hint.filter"),
+            ("a", "hint.crash"),
         ],
         Nav::Accounts => &[
-            ("n", "offline"),
+            ("n", "hint.offline"),
             ("m", "Microsoft"),
-            ("Enter", "active"),
-            ("c", "skin"),
-            ("d", "remove"),
+            ("Enter", "hint.active"),
+            ("c", "hint.skin"),
+            ("d", "hint.remove"),
+            ("wheel", "hint.scroll"),
         ],
         Nav::Launcher => &[
-            ("Enter", "edit"),
-            ("j/k", "move"),
-            ("s", "save"),
-            ("J", "detect Java"),
+            ("Enter", "hint.edit"),
+            ("j/k", "hint.move"),
+            ("s", "hint.save"),
+            ("J", "hint.detect_java"),
         ],
         Nav::ResourcePacks => &[
-            ("Space", "toggle"),
-            ("d", "delete"),
-            ("Enter", "open folder"),
-            ("t", "filter"),
-            ("s", "store"),
+            ("Space", "hint.toggle"),
+            ("d", "hint.delete"),
+            ("Enter", "hint.open_folder"),
+            ("t", "hint.filter"),
+            ("s", "hint.store"),
+            ("wheel", "hint.scroll"),
         ],
         Nav::Shaders => &[
-            ("Space", "toggle"),
-            ("d", "delete"),
-            ("Enter", "open folder"),
-            ("t", "filter"),
-            ("s", "store"),
+            ("Space", "hint.toggle"),
+            ("d", "hint.delete"),
+            ("Enter", "hint.open_folder"),
+            ("t", "hint.filter"),
+            ("s", "hint.store"),
+            ("wheel", "hint.scroll"),
         ],
         Nav::Worlds => &[
-            ("Enter", "open folder"),
-            ("d", "delete"),
+            ("Enter", "hint.open_folder"),
+            ("d", "hint.delete"),
+            ("wheel", "hint.scroll"),
         ],
         Nav::Screenshots => &[
-            ("Enter", "open folder"),
-            ("d", "delete"),
-            ("\u{2190}/\u{2192}", "prev/next"),
+            ("Enter", "hint.open_folder"),
+            ("d", "hint.delete"),
+            ("\u{2190}/\u{2192}", "hint.prev_next"),
+            ("wheel", "hint.scroll"),
         ],
     }
 }
@@ -727,7 +818,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    use crate::views::browse::BrowseFocus;
+    use crate::views::browse::{BrowseFocus, BrowseKind};
 
     fn temp_paths() -> Paths {
         let nanos = std::time::SystemTime::now()
@@ -798,6 +889,147 @@ mod tests {
         assert!(matches!(app.overlay, Some(Overlay::Message { .. })));
         app.handle_overlay_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.overlay.is_none());
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn groups_sections_render_and_manage() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+
+        app.instance_manager
+            .create("Alpha", "1.21.1", LoaderType::Fabric, None)
+            .await
+            .unwrap();
+        app.instance_manager
+            .create("Beta", "1.20.1", LoaderType::Vanilla, None)
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.nav = Nav::Instances;
+        app.focus = Focus::Content;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let content = buffer_text(&terminal);
+        assert!(content.contains("Builds"), "builds card missing");
+        assert!(content.contains("Ungrouped"), "ungrouped section header missing");
+        assert!(
+            !content.contains("Groups"),
+            "groups side panel should be gone"
+        );
+
+        // Create a group via the core API and verify its section header shows.
+        app.instance_manager.create_group("Pack").await.unwrap();
+        app.reload_instances();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let content = buffer_text(&terminal);
+        assert!(content.contains("Pack"), "created group section missing");
+        assert!(content.contains("Alpha"), "instance tiles missing");
+
+        // Click-selecting the Pack section marks it active without filtering.
+        app.set_selected_group("Pack".into());
+        assert_eq!(app.selected_group, "Pack");
+        assert_eq!(app.instances.len(), 2, "all builds stay visible");
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        // Rename: registry updates, section follows after reload.
+        app.instance_manager
+            .rename_group("Pack", "Renamed")
+            .await
+            .unwrap();
+        app.selected_group = "Renamed".into();
+        app.reload_instances();
+        assert!(app.groups.contains(&"Renamed".to_string()));
+        assert!(!app.groups.contains(&"Pack".to_string()));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let content = buffer_text(&terminal);
+        assert!(content.contains("Renamed"), "renamed section missing");
+
+        // Delete removes the empty group; builds remain.
+        app.instance_manager.delete_group("Renamed").await.unwrap();
+        app.selected_group.clear();
+        app.reload_instances();
+        assert!(!app.groups.contains(&"Renamed".to_string()));
+        assert!(app.selected_group.is_empty());
+        assert_eq!(app.instances.len(), 2);
+
+        // Tab cycles Sidebar ↔ Content only (no Groups focus).
+        app.focus = Focus::Sidebar;
+        app.toggle_focus();
+        assert_eq!(app.focus, Focus::Content);
+        app.toggle_focus();
+        assert_eq!(app.focus, Focus::Sidebar);
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn group_panels_collapse_and_expand() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+
+        app.instance_manager
+            .create("Alpha", "1.21.1", LoaderType::Fabric, None)
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.nav = Nav::Instances;
+        app.focus = Focus::Content;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let content = buffer_text(&terminal);
+        // "Ready to play" is unique to the instance tile body (not the sidebar).
+        assert!(
+            content.contains("Ready to play"),
+            "tile should be visible expanded"
+        );
+        assert!(content.contains("▼"), "expanded chevron missing");
+
+        app.toggle_group_collapsed("");
+        assert!(app.collapsed_groups.contains(""));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let content = buffer_text(&terminal);
+        assert!(
+            !content.contains("Ready to play"),
+            "collapsed panel must hide tiles"
+        );
+        assert!(content.contains("▶"), "collapsed chevron missing");
+        assert!(content.contains("Ungrouped"), "header must stay visible");
+
+        app.toggle_selected_group_collapsed();
+        assert!(!app.collapsed_groups.contains(""));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let content = buffer_text(&terminal);
+        assert!(
+            content.contains("Ready to play"),
+            "expanded panel must show tiles"
+        );
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn digit_keys_open_all_menu_navs_and_skip_while_typing() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+
+        for (i, expected) in Nav::menu().into_iter().enumerate() {
+            let digit = (b'1' + i as u8) as char;
+            app.handle_key(KeyEvent::new(KeyCode::Char(digit), KeyModifiers::NONE));
+            assert_eq!(app.nav, expected, "digit {digit} should open {expected:?}");
+        }
+
+        app.mods_search_focused = true;
+        app.nav = Nav::Mods;
+        app.handle_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
+        assert_eq!(app.nav, Nav::Mods, "digits must not switch tabs while typing");
+        assert!(app.mods_search_focused, "search focus must stay open");
+
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);
     }
 
@@ -1207,6 +1439,108 @@ mod tests {
             }
         }
         assert!(toggled, "toggle did not disable the mod");
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn browse_shows_installed_state() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+
+        app.browse.kind = BrowseKind::Mods;
+        app.browse.results.push(SearchHit {
+            project_id: "abc123".into(),
+            project_type: "mod".into(),
+            slug: "sodium".into(),
+            author: "Someone".into(),
+            title: "Sodium".into(),
+            description: "Engine".into(),
+            categories: vec![],
+            display_categories: vec![],
+            versions: vec![],
+            downloads: 1,
+            follows: 1,
+            icon_url: None,
+            date_created: String::new(),
+            date_modified: String::new(),
+            latest_version: Some("0.6.0".into()),
+            client_side: "".into(),
+            server_side: "".into(),
+            color: None,
+        });
+        app.browse.results.push(SearchHit {
+            project_id: "def456".into(),
+            project_type: "mod".into(),
+            slug: "lithium".into(),
+            author: "Someone".into(),
+            title: "Lithium".into(),
+            description: "Engine".into(),
+            categories: vec![],
+            display_categories: vec![],
+            versions: vec![],
+            downloads: 1,
+            follows: 1,
+            icon_url: None,
+            date_created: String::new(),
+            date_modified: String::new(),
+            latest_version: Some("0.3.0".into()),
+            client_side: "".into(),
+            server_side: "".into(),
+            color: None,
+        });
+        app.browse.total = 2;
+
+        // Uninstalled: both show Install
+        assert!(!app.is_hit_installed(&app.browse.results[0].clone()));
+        assert!(!app.is_hit_installed(&app.browse.results[1].clone()));
+
+        app.installed_mods.push(InstalledMod {
+            path: std::path::PathBuf::from("sodium.jar"),
+            file_name: "sodium.jar".into(),
+            enabled: true,
+            sha1: String::new(),
+            size: 1,
+            mod_name: "Sodium".into(),
+            version: "0.6.0".into(),
+            mod_id: "sodium".into(),
+            install_date: String::new(),
+        });
+
+        assert!(app.is_hit_installed(&app.browse.results[0].clone()));
+        assert!(!app.is_hit_installed(&app.browse.results[1].clone()));
+
+        // Resource-pack style name matching
+        app.browse.kind = BrowseKind::ResourcePacks;
+        app.resource_packs.push("Faithful_32x.zip".into());
+        let rp_hit = SearchHit {
+            project_id: "rp1".into(),
+            project_type: "resourcepack".into(),
+            slug: "faithful-32x".into(),
+            author: "Someone".into(),
+            title: "Faithful 32x".into(),
+            description: String::new(),
+            categories: vec![],
+            display_categories: vec![],
+            versions: vec![],
+            downloads: 1,
+            follows: 1,
+            icon_url: None,
+            date_created: String::new(),
+            date_modified: String::new(),
+            latest_version: None,
+            client_side: "".into(),
+            server_side: "".into(),
+            color: None,
+        };
+        assert!(app.is_hit_installed(&rp_hit));
 
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);
     }
