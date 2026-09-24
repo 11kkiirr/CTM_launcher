@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, ButtonId, HitAction};
+use crate::app::{App, ButtonId, HitAction, Nav};
 use crate::settings::AsciiBgAnchor;
 use crate::views::{pill_row, truncate};
 
@@ -574,7 +574,7 @@ impl App {
             KeyCode::Char('n') => self.open_create_instance_form(),
             KeyCode::Char('e') => {
                 self.select_instance(current);
-                self.open_edit_instance_form();
+                self.open_nav(Nav::Jvm);
             }
             KeyCode::Char('i') => {
                 self.select_instance(current);

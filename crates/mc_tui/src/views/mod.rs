@@ -9,6 +9,7 @@ pub mod mods;
 pub mod resourcepacks;
 pub mod screenshots;
 pub mod settings;
+pub mod settings_ui;
 pub mod shaders;
 pub mod tiles;
 pub mod versions;

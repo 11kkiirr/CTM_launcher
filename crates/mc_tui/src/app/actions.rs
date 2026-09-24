@@ -22,7 +22,9 @@ use crate::forms::{
 use crate::i18n::Lang;
 use crate::views::browse::{BrowseFocus, BrowseKind, SideFilter};
 
-use super::{gc_index, rect_contains, split_args, App, CLIENT_ID, HitAction, Hitbox, Nav, Toast};
+use super::{
+    gc_index, rect_contains, split_args, App, CLIENT_ID, Focus, HitAction, Hitbox, Nav, Toast,
+};
 
     // ---------------------------------------------------------------------
     // Actions: instances
@@ -307,6 +309,7 @@ pub(crate) fn install_modrinth_modpack(
     });
 }
 
+#[allow(dead_code)]
 pub(crate) fn open_edit_instance_form(&mut self) {
     let Some(instance) = self.selected_instance().cloned() else {
         self.set_toast(self.tr("toast.no_instance"), true);
@@ -1983,6 +1986,277 @@ pub(crate) fn save_settings(&mut self) {
     self.set_toast(self.tr("toast.settings_saved"), false);
 }
 
+/// Begin inline text/number editing for the selected launcher settings row.
+pub(crate) fn begin_settings_edit(&mut self) {
+    let field = self.settings_field;
+    let buffer = match field {
+        0 => self
+            .settings
+            .java_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        1 => self.settings.default_min_memory_mb.to_string(),
+        2 => self.settings.default_max_memory_mb.to_string(),
+        _ => return,
+    };
+    self.settings_edit = Some((field, buffer));
+}
+
+/// Mouse click helper: start editing whichever text/slider row is selected.
+pub(crate) fn begin_settings_row_edit(&mut self) {
+    if self.nav == Nav::Jvm {
+        self.begin_instance_settings_edit();
+    } else {
+        self.begin_settings_edit();
+    }
+}
+
+/// Mouse click helper: toggle the bool under the selected row.
+pub(crate) fn toggle_selected_bool_row(&mut self) {
+    if self.nav == Nav::Jvm {
+        self.toggle_instance_setting(self.settings_field);
+    } else {
+        self.toggle_setting(self.settings_field);
+    }
+}
+
+/// Commit an inline edit of a launcher settings text/number field.
+pub(crate) fn commit_launcher_setting(&mut self, field: usize, buffer: &str) {
+    use crate::views::settings_ui::{is_ram_over_half, max_ram_range, min_ram_range, snap_ram, RAM_STEP};
+    match field {
+        0 => {
+            let path = buffer.trim();
+            self.settings.java_path = if path.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(path))
+            };
+        }
+        1 => {
+            if let Ok(v) = buffer.trim().parse::<u32>() {
+                let (lo, hi) = min_ram_range(self.settings.default_max_memory_mb);
+                let v = snap_ram(v, lo, hi);
+                self.settings.default_min_memory_mb = v;
+                if is_ram_over_half(v) {
+                    self.warn_ram_over_half(v);
+                }
+            }
+        }
+        2 => {
+            if let Ok(v) = buffer.trim().parse::<u32>() {
+                let (lo, hi) = max_ram_range(self.settings.default_min_memory_mb);
+                let v = snap_ram(v, lo, hi);
+                self.settings.default_max_memory_mb = v;
+                if is_ram_over_half(v) {
+                    self.warn_ram_over_half(v);
+                }
+            }
+            // Keep min ≤ max − step after max edits.
+            let max = self.settings.default_max_memory_mb;
+            let (lo, _) = min_ram_range(max);
+            if self.settings.default_min_memory_mb > max.saturating_sub(RAM_STEP) {
+                self.settings.default_min_memory_mb = lo;
+            }
+        }
+        _ => return,
+    }
+    self.save_settings_async();
+}
+
+/// ←/→ adjust the selected launcher settings row without opening a form.
+pub(crate) fn settings_adjust(&mut self, forward: bool) {
+    use crate::views::settings_ui::{is_ram_over_half, max_ram_range, min_ram_range, snap_ram, RAM_STEP};
+    match self.settings_field {
+        1 => {
+            let (lo, hi) = min_ram_range(self.settings.default_max_memory_mb);
+            let cur = self.settings.default_min_memory_mb.clamp(lo, hi);
+            let next = if forward {
+                snap_ram(cur.saturating_add(RAM_STEP), lo, hi)
+            } else {
+                snap_ram(cur.saturating_sub(RAM_STEP), lo, hi)
+            };
+            self.settings.default_min_memory_mb = next;
+            self.save_settings_async();
+            if is_ram_over_half(next) {
+                self.warn_ram_over_half(next);
+            }
+        }
+        2 => {
+            let (lo, hi) = max_ram_range(self.settings.default_min_memory_mb);
+            let cur = self.settings.default_max_memory_mb.clamp(lo, hi);
+            let next = if forward {
+                snap_ram(cur.saturating_add(RAM_STEP), lo, hi)
+            } else {
+                snap_ram(cur.saturating_sub(RAM_STEP), lo, hi)
+            };
+            self.settings.default_max_memory_mb = next;
+            self.save_settings_async();
+            if is_ram_over_half(next) {
+                self.warn_ram_over_half(next);
+            }
+        }
+        3 => self.cycle_setting_gc(forward),
+        7 => self.cycle_ascii_bg_anchor(forward),
+        8 => self.cycle_setting_language(forward),
+        _ => {}
+    }
+}
+
+/// Begin inline editing for the selected instance JVM settings row.
+pub(crate) fn begin_instance_settings_edit(&mut self) {
+    let Some(instance) = self.selected_instance().cloned() else {
+        return;
+    };
+    let jvm = &instance.metadata.jvm;
+    let field = self.settings_field;
+    let buffer = match field {
+        0 => jvm.min_memory_mb.to_string(),
+        1 => jvm.max_memory_mb.to_string(),
+        3 => jvm
+            .java_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        5 => jvm.custom_jvm_args.join(" "),
+        6 => jvm.extra_game_args.join(" "),
+        _ => return,
+    };
+    self.settings_edit = Some((field, buffer));
+}
+
+/// Commit an inline edit of an instance JVM settings field.
+pub(crate) fn commit_instance_setting(&mut self, field: usize, buffer: &str) {
+    use crate::views::settings_ui::{
+        is_ram_over_half, max_ram_range, min_ram_range, snap_ram, RAM_STEP,
+    };
+    let Some(instance) = self.selected_instance().cloned() else {
+        return;
+    };
+    let id = instance.id().to_string();
+    match field {
+        0 => {
+            let raw: u32 = buffer.trim().parse().unwrap_or(512);
+            let (lo, hi) = min_ram_range(instance.metadata.jvm.max_memory_mb);
+            let v = snap_ram(raw, lo, hi);
+            self.update_instance_jvm(&id, |jvm| jvm.min_memory_mb = v);
+            if is_ram_over_half(v) {
+                self.warn_ram_over_half(v);
+            }
+        }
+        1 => {
+            let raw: u32 = buffer.trim().parse().unwrap_or(4096);
+            let (lo, hi) = max_ram_range(instance.metadata.jvm.min_memory_mb);
+            let v = snap_ram(raw, lo, hi);
+            let min = instance.metadata.jvm.min_memory_mb;
+            self.update_instance_jvm(&id, |jvm| {
+                jvm.max_memory_mb = v;
+                if jvm.min_memory_mb > v.saturating_sub(RAM_STEP) {
+                    jvm.min_memory_mb = min_ram_range(v).0.min(min).max(512);
+                }
+            });
+            if is_ram_over_half(v) {
+                self.warn_ram_over_half(v);
+            }
+        }
+        3 => {
+            let path = buffer.trim();
+            let p = if path.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(path))
+            };
+            self.update_instance_jvm(&id, |jvm| jvm.java_path = p);
+        }
+        5 => {
+            let args = split_args(buffer);
+            self.update_instance_jvm(&id, |jvm| jvm.custom_jvm_args = args);
+        }
+        6 => {
+            let args = split_args(buffer);
+            self.update_instance_jvm(&id, |jvm| jvm.extra_game_args = args);
+        }
+        _ => {}
+    }
+}
+
+/// ←/→ adjust the selected instance JVM settings row.
+pub(crate) fn instance_settings_adjust(&mut self, forward: bool) {
+    use crate::views::settings_ui::{
+        is_ram_over_half, max_ram_range, min_ram_range, snap_ram, RAM_STEP,
+    };
+    let Some(instance) = self.selected_instance().cloned() else {
+        return;
+    };
+    let id = instance.id().to_string();
+    match self.settings_field {
+        0 => {
+            let (lo, hi) = min_ram_range(instance.metadata.jvm.max_memory_mb);
+            let cur = instance.metadata.jvm.min_memory_mb.clamp(lo, hi);
+            let next = if forward {
+                snap_ram(cur.saturating_add(RAM_STEP), lo, hi)
+            } else {
+                snap_ram(cur.saturating_sub(RAM_STEP), lo, hi)
+            };
+            self.update_instance_jvm(&id, |jvm| jvm.min_memory_mb = next);
+            if is_ram_over_half(next) {
+                self.warn_ram_over_half(next);
+            }
+        }
+        1 => {
+            let (lo, hi) = max_ram_range(instance.metadata.jvm.min_memory_mb);
+            let cur = instance.metadata.jvm.max_memory_mb.clamp(lo, hi);
+            let next = if forward {
+                snap_ram(cur.saturating_add(RAM_STEP), lo, hi)
+            } else {
+                snap_ram(cur.saturating_sub(RAM_STEP), lo, hi)
+            };
+            self.update_instance_jvm(&id, |jvm| jvm.max_memory_mb = next);
+            if is_ram_over_half(next) {
+                self.warn_ram_over_half(next);
+            }
+        }
+        2 => {
+            let options = mc_core::instance::GcPreset::all();
+            let current = options
+                .iter()
+                .position(|g| *g == instance.metadata.jvm.gc)
+                .unwrap_or(0);
+            let next = if forward {
+                (current + 1) % options.len()
+            } else {
+                (current + options.len() - 1) % options.len()
+            };
+            let gc = options[next];
+            self.update_instance_jvm(&id, |jvm| jvm.gc = gc);
+        }
+        4 => {
+            let v = !instance.metadata.jvm.fullscreen;
+            self.update_instance_jvm(&id, |jvm| jvm.fullscreen = v);
+        }
+        _ => {}
+    }
+}
+
+/// Space toggle for the selected instance JVM settings row.
+pub(crate) fn toggle_instance_setting(&mut self, field: usize) {
+    if field != 4 {
+        return;
+    }
+    if let Some(instance) = self.selected_instance().cloned() {
+        let id = instance.id().to_string();
+        let v = !instance.metadata.jvm.fullscreen;
+        self.update_instance_jvm(&id, |jvm| jvm.fullscreen = v);
+    }
+}
+
+/// Persist instance JVM settings immediately (Save button).
+pub(crate) fn save_instance_settings_now(&mut self) {
+    // update_instance_jvm already persists; just toast.
+    self.set_toast(self.tr("toast.settings_saved"), false);
+}
+
+#[allow(dead_code)]
 pub(crate) fn open_settings_form(&mut self) {
     use crate::settings::AsciiBgAnchor;
     let s = &self.settings;
@@ -2125,6 +2399,223 @@ pub(crate) fn save_settings_async(&self) {
     tokio::spawn(async move {
         let _ = settings.save(&paths).await;
     });
+}
+
+/// Select a settings field (commits any open edit, closes dropdown).
+pub(crate) fn settings_select_field(&mut self, idx: usize) {
+    if let Some((field, buffer)) = self.settings_edit.take() {
+        let buf = buffer;
+        if self.nav == Nav::Jvm {
+            self.commit_instance_setting(field, &buf);
+        } else {
+            self.commit_launcher_setting(field, &buf);
+        }
+    }
+    self.settings_dropdown = None;
+    self.settings_field = idx;
+    self.focus = Focus::Content;
+}
+
+/// Open the choice dropdown for the selected field (if it is a choice).
+pub(crate) fn settings_open_dropdown(&mut self) {
+    let field = self.settings_field;
+    if self.nav == Nav::Jvm {
+        if field != 2 {
+            return;
+        }
+        let cur = self
+            .selected_instance()
+            .map(|i| i.metadata.jvm.gc)
+            .unwrap_or(mc_core::instance::GcPreset::G1);
+        let opts = mc_core::instance::GcPreset::all();
+        let sel = opts.iter().position(|g| *g == cur).unwrap_or(0);
+        self.settings_dropdown = Some((field, sel));
+    } else {
+        let sel = match field {
+            3 => self.gc_dropdown_index(),
+            7 => self.anchor_dropdown_index(),
+            8 => self.lang_dropdown_index(),
+            _ => return,
+        };
+        self.settings_dropdown = Some((field, sel));
+    }
+}
+
+fn gc_dropdown_index(&self) -> usize {
+    mc_core::instance::GcPreset::all()
+        .iter()
+        .position(|g| *g == self.settings.default_gc)
+        .unwrap_or(0)
+}
+
+fn anchor_dropdown_index(&self) -> usize {
+    crate::settings::AsciiBgAnchor::ALL
+        .iter()
+        .position(|a| *a == self.settings.ascii_bg_anchor)
+        .unwrap_or(0)
+}
+
+fn lang_dropdown_index(&self) -> usize {
+    Lang::ALL
+        .iter()
+        .position(|l| *l == self.settings.language)
+        .unwrap_or(0)
+}
+
+/// Move the highlight inside an open dropdown.
+pub(crate) fn settings_dropdown_move(&mut self, delta: i32) {
+    let Some((field, sel)) = self.settings_dropdown else {
+        return;
+    };
+    let len = self.settings_dropdown_options(field).len();
+    if len == 0 {
+        return;
+    }
+    let next = (sel as i32 + delta).rem_euclid(len as i32) as usize;
+    self.settings_dropdown = Some((field, next));
+}
+
+/// Apply option `opt` for `field` and close the dropdown.
+pub(crate) fn settings_pick_option(&mut self, field: usize, opt: usize) {
+    self.settings_dropdown = None;
+    if self.nav == Nav::Jvm {
+        let opts = mc_core::instance::GcPreset::all();
+        if field == 2 && opt < opts.len() {
+            let gc = opts[opt];
+            if let Some(instance) = self.selected_instance().cloned() {
+                let id = instance.id().to_string();
+                self.update_instance_jvm(&id, |jvm| jvm.gc = gc);
+            }
+        }
+        return;
+    }
+    match field {
+        3 => {
+            let opts = mc_core::instance::GcPreset::all();
+            if opt < opts.len() {
+                self.settings.default_gc = opts[opt];
+                self.save_settings_async();
+            }
+        }
+        7 => {
+            let opts = crate::settings::AsciiBgAnchor::ALL;
+            if opt < opts.len() {
+                self.settings.ascii_bg_anchor = opts[opt];
+                self.save_settings_async();
+            }
+        }
+        8 => {
+            let opts = Lang::ALL;
+            if opt < opts.len() {
+                self.settings.language = opts[opt];
+                self.save_settings_async();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Labels for the dropdown attached to `field`.
+pub(crate) fn settings_dropdown_options(&self, field: usize) -> Vec<String> {
+    if self.nav == Nav::Jvm {
+        if field == 2 {
+            return mc_core::instance::GcPreset::all()
+                .iter()
+                .map(|g| g.label().to_string())
+                .collect();
+        }
+        return Vec::new();
+    }
+    match field {
+        3 => mc_core::instance::GcPreset::all()
+            .iter()
+            .map(|g| g.label().to_string())
+            .collect(),
+        7 => crate::settings::AsciiBgAnchor::ALL
+            .iter()
+            .map(|a| a.label_lang(self.settings.language))
+            .collect(),
+        8 => Lang::ALL.iter().map(|l| l.native_label().to_string()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Close an open dropdown without applying.
+pub(crate) fn settings_close_dropdown(&mut self) {
+    self.settings_dropdown = None;
+}
+
+/// Set a slider value for field `field` (RAM snapped to grid, min≤max−step).
+pub(crate) fn settings_set_slider(&mut self, field: usize, value: u32) {
+    use crate::views::settings_ui::{
+        is_ram_over_half, max_ram_range, min_ram_range, snap_ram, RAM_STEP,
+    };
+    if self.nav == Nav::Jvm {
+        if let Some(instance) = self.selected_instance().cloned() {
+            let id = instance.id().to_string();
+            match field {
+                0 => {
+                    let (lo, hi) = min_ram_range(instance.metadata.jvm.max_memory_mb);
+                    let v = snap_ram(value, lo, hi);
+                    self.update_instance_jvm(&id, |j| j.min_memory_mb = v);
+                    if is_ram_over_half(v) {
+                        self.warn_ram_over_half(v);
+                    }
+                }
+                1 => {
+                    let (lo, hi) = max_ram_range(instance.metadata.jvm.min_memory_mb);
+                    let v = snap_ram(value, lo, hi);
+                    let min = instance.metadata.jvm.min_memory_mb;
+                    self.update_instance_jvm(&id, |j| {
+                        j.max_memory_mb = v;
+                        if j.min_memory_mb > v.saturating_sub(RAM_STEP) {
+                            j.min_memory_mb = min_ram_range(v).0.min(min).max(512);
+                        }
+                    });
+                    if is_ram_over_half(v) {
+                        self.warn_ram_over_half(v);
+                    }
+                }
+                _ => {}
+            }
+        }
+        return;
+    }
+    match field {
+        1 => {
+            let (lo, hi) = min_ram_range(self.settings.default_max_memory_mb);
+            let v = snap_ram(value, lo, hi);
+            self.settings.default_min_memory_mb = v;
+            self.save_settings_async();
+            if is_ram_over_half(v) {
+                self.warn_ram_over_half(v);
+            }
+        }
+        2 => {
+            let (lo, hi) = max_ram_range(self.settings.default_min_memory_mb);
+            let v = snap_ram(value, lo, hi);
+            self.settings.default_max_memory_mb = v;
+            let max = self.settings.default_max_memory_mb;
+            if self.settings.default_min_memory_mb > max.saturating_sub(RAM_STEP) {
+                self.settings.default_min_memory_mb = min_ram_range(max).0;
+            }
+            self.save_settings_async();
+            if is_ram_over_half(v) {
+                self.warn_ram_over_half(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Toast: selected RAM is over ~60% of physical memory.
+fn warn_ram_over_half(&mut self, mb: u32) {
+    use crate::views::settings_ui::{ram_warn_threshold, system_ram_mb};
+    let msg = crate::i18n::tr_string(self.lang(), "toast.ram_over_half")
+        .replacen("{}", &mb.to_string(), 1)
+        .replacen("{}", &system_ram_mb().to_string(), 1)
+        .replacen("{}", &ram_warn_threshold().to_string(), 1);
+    self.set_toast(msg, true);
 }
 
 pub(crate) fn spawn_java_discovery(&self) {

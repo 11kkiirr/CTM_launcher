@@ -26,9 +26,11 @@ impl App {
         }
     }
 
-    /// True while an inline search/filter bar is capturing character input.
+    /// True while an inline search/filter bar or settings field is capturing character input.
     pub(crate) fn is_typing(&self) -> bool {
-        self.mods_search_focused
+        self.settings_edit.is_some()
+            || self.settings_dropdown.is_some()
+            || self.mods_search_focused
             || self.rp_search_focused
             || self.shaders_search_focused
             || (self.nav == Nav::Browse
@@ -50,9 +52,9 @@ impl App {
             KeyCode::Char('?') if !typing => self.show_help(),
             KeyCode::Tab if !typing => self.toggle_focus(),
             KeyCode::BackTab if !typing => self.toggle_focus(),
-            KeyCode::F(2) => self.open_nav(Nav::Accounts),
-            KeyCode::F(3) => self.open_nav(Nav::Launcher),
-            KeyCode::F(4) => self.open_nav(Nav::Modpacks),
+            KeyCode::F(2) if !typing => self.open_nav(Nav::Accounts),
+            KeyCode::F(3) if !typing => self.open_nav(Nav::Launcher),
+            KeyCode::F(4) if !typing => self.open_nav(Nav::Modpacks),
             KeyCode::Char(c @ '1'..='9') if !typing => {
                 let idx = (c as u8 - b'1') as usize;
                 if let Some(nav) = Nav::menu().get(idx) {
@@ -79,6 +81,11 @@ impl App {
         }
         self.nav = nav;
         self.focus = Focus::Content;
+        self.settings_edit = None;
+        self.settings_dropdown = None;
+        self.settings_scroll = 0;
+        let max = settings_field_count(nav).saturating_sub(1);
+        self.settings_field = self.settings_field.min(max);
         match nav {
             Nav::Instances => self.reload_instances(),
             Nav::Browse => self.open_browse(),
@@ -100,7 +107,11 @@ impl App {
             self.handle_sidebar_key(key);
             return;
         }
-        if key.code == KeyCode::Esc && self.nav != Nav::Modpacks {
+        if key.code == KeyCode::Esc
+            && self.nav != Nav::Modpacks
+            && self.settings_edit.is_none()
+            && self.settings_dropdown.is_none()
+        {
             if self.nav == Nav::Browse {
                 if self.browse.in_detail() {
                     self.browse_close_detail();
@@ -237,8 +248,40 @@ impl App {
                 self.focus = Focus::Content;
             }
             HitAction::SettingsRow(idx) => {
-                self.settings_field = idx;
-                self.focus = Focus::Content;
+                self.settings_select_field(idx);
+                // Choice rows open their dropdown immediately; text/slider rows
+                // start inline edit so mouse users never need Enter.
+                if !self.settings_dropdown_options(idx).is_empty() {
+                    self.settings_open_dropdown();
+                } else {
+                    let is_text_or_slider = matches!(
+                        (self.nav, idx),
+                        (Nav::Launcher, 0..=2) | (Nav::Jvm, 0 | 1 | 3 | 5 | 6)
+                    );
+                    if is_text_or_slider {
+                        self.begin_settings_row_edit();
+                    } else if matches!((self.nav, idx), (Nav::Launcher, 4..=6) | (Nav::Jvm, 4)) {
+                        self.toggle_selected_bool_row();
+                    }
+                }
+            }
+            HitAction::SettingsOption(field, opt) => {
+                self.settings_select_field(field);
+                self.settings_pick_option(field, opt);
+            }
+            HitAction::SettingsSlider(field) => {
+                self.settings_select_field(field);
+                if let Some((_, track, min, max)) = self
+                    .settings_sliders
+                    .iter()
+                    .find(|(f, ..)| *f == field)
+                    .cloned()
+                {
+                    if let Some(pos) = self.mouse_pos {
+                        let v = crate::views::settings_ui::slider_value_at(pos.0, track, min, max);
+                        self.settings_set_slider(field, v);
+                    }
+                }
             }
             HitAction::Button(button) => self.dispatch_button(button),
             HitAction::BrowseResult(idx) => self.browse_select_result(idx),
@@ -285,7 +328,7 @@ impl App {
         match button {
             ButtonId::Launch => self.launch_selected(),
             ButtonId::NewInstance => self.open_create_instance_form(),
-            ButtonId::EditInstance => self.open_edit_instance_form(),
+            ButtonId::EditInstance => self.open_nav(Nav::Jvm),
             ButtonId::DeleteInstance => self.confirm_delete_instance(),
             ButtonId::InstallInstance => self.install_selected_instance(),
             ButtonId::ChangeVersion => self.open_change_version_picker(),
@@ -324,7 +367,6 @@ impl App {
             ButtonId::FollowLogs => self.log_follow = !self.log_follow,
             ButtonId::AnalyzeCrash => self.analyze_crash(),
             ButtonId::SaveSettings => self.save_settings(),
-            ButtonId::EditSettings => self.open_settings_form(),
             ButtonId::DetectJava => self.spawn_java_discovery(),
             ButtonId::OpenAsciiBgFolder => self.open_ascii_bg_folder(),
             ButtonId::OpenFolder => self.open_current_folder(),
@@ -365,7 +407,7 @@ impl App {
             }
             Nav::Logs => self.scroll_logs(delta * 3),
             Nav::Jvm => {
-                let len = settings_field_count();
+                let len = settings_field_count(Nav::Jvm);
                 let next = (self.settings_field as i32 + delta).clamp(0, len as i32 - 1) as usize;
                 self.settings_field = next;
             }
@@ -375,7 +417,7 @@ impl App {
                 delta * 4,
             ),
             Nav::Launcher => {
-                let len = settings_field_count();
+                let len = settings_field_count(Nav::Launcher);
                 let next = (self.settings_field as i32 + delta).clamp(0, len as i32 - 1) as usize;
                 self.settings_field = next;
             }

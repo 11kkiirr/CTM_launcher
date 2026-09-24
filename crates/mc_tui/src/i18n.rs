@@ -154,6 +154,11 @@ fn en(key: &str) -> std::borrow::Cow<'static, str> {
         "settings.auto_detect" => "auto-detect",
         "settings.blank_auto" => "blank = auto-detect",
         "settings.mb" => "MB",
+        "settings.section.java" => "Java",
+        "settings.section.memory" => "Memory",
+        "settings.section.interface" => "Interface",
+        "settings.section.appearance" => "Appearance",
+        "settings.dropdown_hint" => "Enter to open",
         "common.yes" => "yes",
         "common.no" => "no",
 
@@ -173,7 +178,11 @@ fn en(key: &str) -> std::borrow::Cow<'static, str> {
         "instance_settings.jvm_args" => "Custom JVM Args",
         "instance_settings.game_args" => "Extra Game Args",
         "instance_settings.hint" =>
-            "Press Enter or 'e' to edit. Changes apply the next time you launch.",
+            "Edit inline: ←/→ change, Enter type, Space toggle. Saves immediately.",
+        "instance_settings.section.memory" => "Memory",
+        "instance_settings.section.java" => "Java",
+        "instance_settings.section.display" => "Display",
+        "instance_settings.section.args" => "Arguments",
 
         // ── Instances / Builds ──────────────────────────────────────
         "builds.title" => "Builds",
@@ -258,6 +267,9 @@ fn en(key: &str) -> std::borrow::Cow<'static, str> {
         "hint.prev" => "prev",
         "hint.next" => "next",
         "hint.prev_next" => "prev/next",
+        "hint.change" => "change",
+        "hint.open_list" => "open list",
+        "hint.cancel" => "cancel",
 
         // ── Dialogs / overlays ──────────────────────────────────────
         "dialog.enter_confirm" => "Enter confirm · Esc cancel",
@@ -388,6 +400,8 @@ fn en(key: &str) -> std::borrow::Cow<'static, str> {
         "toast.instance_path_required" => "Enter a path to the instance directory",
         "toast.no_file" => "This modpack version has no downloadable file",
         "toast.instance_not_found" => "Instance '{}' not found",
+        "toast.ram_over_half" =>
+            "{} MB is over ~60% of your {} MB RAM (limit {} MB)",
         "logs.following" => "FOLLOW",
         "logs.unfollow" => "UNFOLLOW",
         "modpacks.install_hint" =>
@@ -614,6 +628,11 @@ fn uk(key: &str) -> Option<&'static str> {
         "settings.auto_detect" => "автовизначення",
         "settings.blank_auto" => "порожньо = автовизначення",
         "settings.mb" => "МБ",
+        "settings.section.java" => "Java",
+        "settings.section.memory" => "Пам'ять",
+        "settings.section.interface" => "Інтерфейс",
+        "settings.section.appearance" => "Вигляд",
+        "settings.dropdown_hint" => "Enter, щоб відкрити",
         "common.yes" => "так",
         "common.no" => "ні",
 
@@ -633,7 +652,11 @@ fn uk(key: &str) -> Option<&'static str> {
         "instance_settings.jvm_args" => "Додаткові аргументи JVM",
         "instance_settings.game_args" => "Додаткові аргументи гри",
         "instance_settings.hint" =>
-            "Натисніть Enter або 'e' для редагування. Зміни застосуються під час наступного запуску.",
+            "Редагуйте прямо тут: ←/→ змінити, Enter — введення, Space — увімк./вимк. Зберігається одразу.",
+        "instance_settings.section.memory" => "Пам'ять",
+        "instance_settings.section.java" => "Java",
+        "instance_settings.section.display" => "Екран",
+        "instance_settings.section.args" => "Аргументи",
 
         // Збірки
         "builds.title" => "Збірки",
@@ -701,7 +724,10 @@ fn uk(key: &str) -> Option<&'static str> {
         "hint.updates" => "оновлення",
         "hint.change_version" => "змін. версію",
         "hint.reinstall" => "перевстанов.",
+        "hint.change" => "змінити",
         "hint.move" => "рух",
+        "hint.open_list" => "список",
+        "hint.cancel" => "скасувати",
         "hint.save" => "зберегти",
         "hint.detect_java" => "знайти Java",
         "hint.follow" => "стежити",
@@ -911,6 +937,8 @@ fn uk(key: &str) -> Option<&'static str> {
         "modpacks.versions_col" => "    Версії  ",
         "toast.no_file" => "У цієї версії збірки немає файлу для завантаження",
         "toast.instance_not_found" => "Збірку '{}' не знайдено",
+        "toast.ram_over_half" =>
+            "{} МБ — це вже ~60% вашої ОЗУ {} МБ (ліміт {} МБ)",
         "worlds.seed" => "Насіння:  {}",
         "worlds.game" => "Гра:      {}",
         "worlds.version" => "Версія:   {}",
@@ -1081,6 +1109,11 @@ fn ru(key: &str) -> Option<&'static str> {
         "settings.auto_detect" => "автоопределение",
         "settings.blank_auto" => "пусто = автоопределение",
         "settings.mb" => "МБ",
+        "settings.section.java" => "Java",
+        "settings.section.memory" => "Память",
+        "settings.section.interface" => "Интерфейс",
+        "settings.section.appearance" => "Внешний вид",
+        "settings.dropdown_hint" => "Enter, чтобы открыть",
         "common.yes" => "да",
         "common.no" => "нет",
 
@@ -1100,7 +1133,11 @@ fn ru(key: &str) -> Option<&'static str> {
         "instance_settings.jvm_args" => "Доп. аргументы JVM",
         "instance_settings.game_args" => "Доп. аргументы игры",
         "instance_settings.hint" =>
-            "Нажмите Enter или 'e' для правки. Изменения применятся при следующем запуске.",
+            "Редактируйте прямо здесь: ←/→ изменить, Enter — ввод, Space — вкл./выкл. Сохраняется сразу.",
+        "instance_settings.section.memory" => "Память",
+        "instance_settings.section.java" => "Java",
+        "instance_settings.section.display" => "Экран",
+        "instance_settings.section.args" => "Аргументы",
 
         // Сборки
         "builds.title" => "Сборки",
@@ -1168,7 +1205,10 @@ fn ru(key: &str) -> Option<&'static str> {
         "hint.updates" => "обновления",
         "hint.change_version" => "смен. версию",
         "hint.reinstall" => "переустанов.",
+        "hint.change" => "изменить",
         "hint.move" => "движение",
+        "hint.open_list" => "список",
+        "hint.cancel" => "отмена",
         "hint.save" => "сохранить",
         "hint.detect_java" => "найти Java",
         "hint.follow" => "следить",
@@ -1378,6 +1418,8 @@ fn ru(key: &str) -> Option<&'static str> {
         "modpacks.versions_col" => "    Версии  ",
         "toast.no_file" => "У этой версии сборки нет файла для загрузки",
         "toast.instance_not_found" => "Сборка '{}' не найдена",
+        "toast.ram_over_half" =>
+            "{} МБ — это уже ~60% вашей ОЗУ {} МБ (лимит {} МБ)",
         "worlds.seed" => "Сид:       {}",
         "worlds.game" => "Игра:      {}",
         "worlds.version" => "Версия:    {}",

@@ -185,6 +185,10 @@ pub enum HitAction {
     ModsSearchBar,
     AccountRow(usize),
     SettingsRow(usize),
+    /// Open dropdown option click: `(field_index, option_index)`.
+    SettingsOption(usize, usize),
+    /// Click on a RAM slider track: `(field_index)`.
+    SettingsSlider(usize),
     WorldRow(usize),
     ScreenshotTile(usize),
     Button(ButtonId),
@@ -248,7 +252,6 @@ pub enum ButtonId {
     FollowLogs,
     AnalyzeCrash,
     SaveSettings,
-    EditSettings,
     DetectJava,
     OpenAsciiBgFolder,
     OpenFolder,
@@ -390,6 +393,14 @@ pub struct App {
 
     pub java_installations: Vec<JavaInstallation>,
     pub settings_field: usize,
+    /// Inline settings editor: `(field_index, text_buffer)` while typing.
+    pub settings_edit: Option<(usize, String)>,
+    /// Open choice dropdown: `(field_index, highlighted_option)`.
+    pub settings_dropdown: Option<(usize, usize)>,
+    /// Vertical scroll offset for the settings body (sections may overflow).
+    pub settings_scroll: u16,
+    /// Slider track hitboxes rebuilt each frame: `(field, rect, min, max)`.
+    pub settings_sliders: Vec<(usize, Rect, u32, u32)>,
 
     pub engine_tx: EngineSender,
     pub engine_rx: EngineReceiver,
@@ -484,6 +495,10 @@ impl App {
             last_command: None,
             java_installations: Vec::new(),
             settings_field: 0,
+            settings_edit: None,
+            settings_dropdown: None,
+            settings_scroll: 0,
+            settings_sliders: Vec::new(),
             engine_tx,
             engine_rx,
         };
@@ -663,8 +678,11 @@ pub(crate) fn split_args(input: &str) -> Vec<String> {
     input.split_whitespace().map(str::to_string).collect()
 }
 
-pub(crate) fn settings_field_count() -> usize {
-    9
+pub(crate) fn settings_field_count(nav: Nav) -> usize {
+    match nav {
+        Nav::Jvm => 7,
+        _ => 9,
+    }
 }
 
 impl App {
@@ -753,10 +771,11 @@ pub(crate) fn footer_hints(nav: Nav) -> &'static [(&'static str, &'static str)] 
         ],
         Nav::Versions => &[("c", "hint.change_version"), ("r", "hint.reinstall")],
         Nav::Jvm => &[
-            ("Enter", "hint.edit"),
             ("j/k", "hint.move"),
-            ("s", "hint.save"),
-            ("J", "hint.detect_java"),
+            ("←/→", "hint.change"),
+            ("Enter", "hint.edit"),
+            ("Space", "hint.toggle"),
+            ("Esc", "hint.cancel"),
         ],
         Nav::Logs => &[
             ("j/k", "hint.scroll"),
@@ -775,9 +794,10 @@ pub(crate) fn footer_hints(nav: Nav) -> &'static [(&'static str, &'static str)] 
             ("wheel", "hint.scroll"),
         ],
         Nav::Launcher => &[
-            ("Enter", "hint.edit"),
             ("j/k", "hint.move"),
-            ("s", "hint.save"),
+            ("←/→", "hint.change"),
+            ("Enter", "hint.open_list"),
+            ("Space", "hint.toggle"),
             ("J", "hint.detect_java"),
         ],
         Nav::ResourcePacks => &[
