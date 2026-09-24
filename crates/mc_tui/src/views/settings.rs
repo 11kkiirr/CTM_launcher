@@ -66,7 +66,7 @@ impl App {
             frame,
             chunks[0].x + SIDE_PAD,
             chunks[0].y,
-            area.x + area.width - SIDE_PAD,
+            area.x + area.width,
             &[
                 (save, "s", ButtonId::SaveSettings),
                 (detect, "J", ButtonId::DetectJava),
@@ -108,7 +108,7 @@ impl App {
             Rect {
                 x: area.x + SIDE_PAD,
                 y: area.y,
-                width: area.width.saturating_sub(SIDE_PAD * 2),
+                width: area.width.saturating_sub(SIDE_PAD),
                 height: 1,
             },
         );
@@ -124,7 +124,7 @@ impl App {
         }
 
         let panel_x = body.x + SIDE_PAD;
-        let panel_w = body.width.saturating_sub(SIDE_PAD * 2);
+        let panel_w = body.width.saturating_sub(SIDE_PAD);
         if panel_w < 16 {
             return;
         }

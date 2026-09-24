@@ -43,7 +43,7 @@ pub(crate) fn render(&mut self, frame: &mut Frame) {
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Min(20),
-            Constraint::Length(1),
+            Constraint::Length(2),
             Constraint::Length(30),
         ])
         .split(chunks[1]);

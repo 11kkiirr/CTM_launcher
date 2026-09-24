@@ -449,13 +449,13 @@ impl App {
         if view_h == 0 {
             return;
         }
-        let cols = self.tile_columns.max(1);
         let sections = self.instance_sections();
-        let total = crate::views::tiles::content_height(&sections, cols);
+        let boxes = crate::views::tiles::layout_panels(&sections, self.tile_body_w);
+        let total = crate::views::tiles::content_height(&boxes);
         let max_scroll = total.saturating_sub(view_h);
 
         if let Some(selected) = self.instance_state.selected() {
-            if let Some(y) = crate::views::tiles::instance_content_y(&sections, cols, selected) {
+            if let Some(y) = crate::views::tiles::instance_content_y(&boxes, &sections, selected) {
                 let tile_end = y + crate::views::tiles::TILE_H as usize;
                 if y < self.tile_scroll {
                     self.tile_scroll = y;
@@ -464,7 +464,8 @@ impl App {
                 }
             }
         }
-        self.tile_scroll = crate::views::tiles::snap_scroll(&sections, cols, self.tile_scroll);
+        self.tile_scroll =
+            crate::views::tiles::snap_scroll(&boxes, &sections, self.tile_scroll);
         self.tile_scroll = self.tile_scroll.min(max_scroll);
         // Approximate visible tile rows for PageUp/PageDown step size.
         let row_h = crate::views::tiles::TILE_H as usize + crate::views::tiles::GAP_Y as usize;

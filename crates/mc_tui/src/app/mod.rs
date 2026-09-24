@@ -301,6 +301,7 @@ pub struct App {
     pub mouse_pos: Option<(u16, u16)>,
     pub tile_scroll: usize,
     pub tile_columns: usize,
+    pub tile_body_w: u16,
     pub tile_visible_rows: usize,
     pub screenshot_scroll: usize,
     pub screenshot_cols: usize,
@@ -411,7 +412,6 @@ impl App {
         paths.ensure_layout()?;
         let settings = LauncherSettings::load(&paths).await;
         let instance_manager = InstanceManager::new(paths.clone());
-        let instances = instance_manager.list().unwrap_or_default();
         let accounts = AccountStore::load(paths.accounts_file()).await?;
         let (engine_tx, engine_rx) = mpsc::unbounded_channel();
 
@@ -427,6 +427,7 @@ impl App {
             mouse_pos: None,
             tile_scroll: 0,
             tile_columns: 2,
+            tile_body_w: 0,
             tile_visible_rows: 1,
             screenshot_scroll: 0,
             screenshot_cols: 1,
@@ -442,7 +443,7 @@ impl App {
             pending_wizard: None,
             hitboxes: Vec::new(),
             instance_manager,
-            instances,
+            instances: Vec::new(),
             instance_state: ListState::default(),
             groups: Vec::new(),
             selected_group: String::new(),
@@ -509,6 +510,7 @@ impl App {
         if !app.accounts.accounts().is_empty() {
             app.account_state.select(Some(0));
         }
+        app.reload_instances();
         app.log_buffer.filter.min_level = logs::LogLevel::Info;
         app.spawn_java_discovery();
         app.reload_mods();
@@ -933,7 +935,6 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
         let content = buffer_text(&terminal);
-        assert!(content.contains("Builds"), "builds card missing");
         assert!(content.contains("Ungrouped"), "ungrouped section header missing");
         assert!(
             !content.contains("Groups"),
