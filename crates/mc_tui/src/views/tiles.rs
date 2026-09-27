@@ -55,11 +55,7 @@ impl App {
     pub(crate) fn render_instance_grid(&mut self, frame: &mut Frame, area: Rect) {
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(3),
-            ])
+            .constraints([Constraint::Length(3), Constraint::Min(3)])
             .split(area);
 
         let launch = self.tr("btn.launch");
@@ -94,7 +90,7 @@ impl App {
             ],
         );
 
-        self.render_group_panels(frame, rows[2]);
+        self.render_group_panels(frame, rows[1]);
     }
 
     /// Dark page background + group panels in a horizontal flow (wrap rows).

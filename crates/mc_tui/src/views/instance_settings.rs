@@ -55,8 +55,7 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
+                Constraint::Length(3),
                 Constraint::Min(6),
                 Constraint::Length(1),
             ])
@@ -77,8 +76,8 @@ impl App {
         );
 
         self.settings_sliders.clear();
-        paint_page_bg(self, frame, chunks[2]);
-        self.render_instance_settings_body(frame, chunks[2]);
+        paint_page_bg(self, frame, chunks[1]);
+        self.render_instance_settings_body(frame, chunks[1]);
 
         frame.render_widget(
             Paragraph::new(Span::styled(
@@ -86,7 +85,7 @@ impl App {
                 Style::default().fg(self.theme.muted).bg(self.theme.bg),
             ))
             .style(Style::default().bg(self.theme.bg)),
-            chunks[3],
+            chunks[2],
         );
     }
 

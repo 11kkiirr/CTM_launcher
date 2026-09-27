@@ -812,6 +812,15 @@ pub(crate) fn launch_selected(&mut self) {
     });
 }
 
+pub(crate) fn stop_selected_game(&mut self) {
+    let Some(running) = &mut self.running else {
+        return;
+    };
+    if running.handle.kill().is_ok() {
+        self.stop_requested = true;
+    }
+}
+
 // ---------------------------------------------------------------------
 // Actions: modpacks
 // ---------------------------------------------------------------------

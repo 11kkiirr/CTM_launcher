@@ -227,6 +227,7 @@ pub enum OverlayAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonId {
     Launch,
+    StopGame,
     NewInstance,
     EditInstance,
     DeleteInstance,
@@ -401,6 +402,7 @@ pub struct App {
     pub crash_analysis: Option<CrashAnalysis>,
 
     pub running: Option<RunningProcess>,
+    pub stop_requested: bool,
     pub last_command: Option<String>,
 
     pub java_installations: Vec<JavaInstallation>,
@@ -515,6 +517,7 @@ impl App {
             local_image_requested: HashSet::new(),
             crash_analysis: None,
             running: None,
+            stop_requested: false,
             last_command: None,
             java_installations: Vec::new(),
             settings_field: 0,
@@ -578,8 +581,9 @@ impl App {
                     }
                 }
                 _ = ticker.tick() => {
-                    self.on_tick();
-                    needs_draw = true;
+                    if self.on_tick() {
+                        needs_draw = true;
+                    }
                 }
             }
         }
@@ -588,20 +592,25 @@ impl App {
 
     pub(crate) fn on_tick(&mut self) -> bool {
         self.tick = self.tick.wrapping_add(1);
-        self.animate_scrolls();
-        self.drain_process();
+        let mut changed = self.animate_scrolls();
+        changed |= self.drain_process();
         if let Some(toast) = &self.toast {
             if toast.at.elapsed() > Duration::from_secs(6) {
                 self.toast = None;
+                changed = true;
             }
         }
-        true
+        changed |= self.progress.is_some();
+        changed |= self.running.is_some() && self.tick % 30 == 0;
+        changed
     }
 
-    fn animate_scrolls(&mut self) {
-        step_toward(&mut self.toolbar_scroll, self.toolbar_target);
-        step_toward(&mut self.nav_scroll, self.nav_target);
-        advance(&mut self.tile_scroll, self.tile_target);
+    fn animate_scrolls(&mut self) -> bool {
+        let mut moved = false;
+        moved |= step_toward(&mut self.toolbar_scroll, self.toolbar_target);
+        moved |= step_toward(&mut self.nav_scroll, self.nav_target);
+        moved |= advance(&mut self.tile_scroll, self.tile_target);
+        moved
     }
 
     pub(crate) fn drain_process(&mut self) -> bool {
@@ -633,7 +642,16 @@ impl App {
                 .unwrap_or_default();
             self.running = None;
             self.progress = None;
-            self.on_process_exit(&version, code);
+            if self.stop_requested {
+                self.stop_requested = false;
+                self.set_toast(
+                    crate::i18n::tr_string(self.lang(), "toast.game_stopped")
+                        .replace("{}", &version),
+                    false,
+                );
+            } else {
+                self.on_process_exit(&version, code);
+            }
             changed = true;
         }
 
@@ -681,19 +699,23 @@ pub(crate) fn rect_contains(rect: Rect, (x, y): (u16, u16)) -> bool {
         && y < rect.y.saturating_add(rect.height)
 }
 
-pub(crate) fn step_toward(cur: &mut u16, target: u16) {
+pub(crate) fn step_toward(cur: &mut u16, target: u16) -> bool {
     const SPEED: u16 = 3;
     if *cur < target {
         *cur = (*cur + SPEED).min(target);
+        true
     } else if *cur > target {
         *cur = cur.saturating_sub(SPEED);
+        true
+    } else {
+        false
     }
 }
 
-fn advance(cur: &mut usize, target: usize) {
+fn advance(cur: &mut usize, target: usize) -> bool {
     let diff = target.abs_diff(*cur);
     if diff == 0 {
-        return;
+        return false;
     }
     let speed = (diff / 4).clamp(3, 12);
     if *cur < target {
@@ -701,6 +723,7 @@ fn advance(cur: &mut usize, target: usize) {
     } else {
         *cur = cur.saturating_sub(speed);
     }
+    true
 }
 
 pub(crate) fn move_selection(state: &mut ListState, len: usize, delta: i32) {
@@ -914,6 +937,59 @@ mod tests {
     fn buffer_row(terminal: &Terminal<TestBackend>, y: u16, x0: u16, x1: u16) -> String {
         let buf = terminal.backend().buffer();
         (x0..x1).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[tokio::test]
+    async fn idle_tick_reports_no_change() {
+        let mut app = App::new(temp_paths(), reqwest::Client::new()).await.unwrap();
+        app.toast = None;
+        assert!(!app.on_tick());
+        assert!(!app.on_tick());
+
+        app.progress = Some((None, "busy".to_string()));
+        assert!(app.on_tick());
+        app.progress = None;
+
+        app.tile_target = app.tile_scroll + 50;
+        assert!(app.on_tick());
+        for _ in 0..32 {
+            app.on_tick();
+        }
+        assert!(!app.on_tick());
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn sidebar_power_button_launches_when_idle() {
+        let mut app = App::new(temp_paths(), reqwest::Client::new()).await.unwrap();
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 44)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(
+            buffer_text(&terminal).contains("▶"),
+            "sidebar must show the launch glyph"
+        );
+        let hit = app
+            .hitboxes
+            .iter()
+            .find(|h| h.action == HitAction::Button(ButtonId::Launch));
+        assert!(hit.is_some(), "sidebar launch hitbox missing");
+        let rect = hit.unwrap().rect;
+        assert_eq!(rect.y, app.sidebar_area.y);
+        assert_eq!(rect.height, 3);
+        assert_eq!(rect.width, 5);
+
+        app.stop_selected_game();
+        assert!(!app.stop_requested);
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
     }
 
     #[tokio::test]
@@ -1228,7 +1304,7 @@ mod tests {
         terminal.draw(|frame| app.render(frame)).unwrap();
         let (tx, ty, tr) = (
             app.toolbar_area.x,
-            app.toolbar_area.y,
+            app.toolbar_area.y + 1,
             app.toolbar_area.right(),
         );
         let row = buffer_row(&terminal, ty, tx, tr);

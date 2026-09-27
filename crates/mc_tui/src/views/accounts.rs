@@ -16,8 +16,7 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
+                Constraint::Length(3),
                 Constraint::Min(5),
                 Constraint::Length(1),
                 Constraint::Length(10),
@@ -44,8 +43,8 @@ impl App {
             ],
         );
 
-        self.render_account_list(frame, chunks[2]);
-        self.render_account_details(frame, chunks[4]);
+        self.render_account_list(frame, chunks[1]);
+        self.render_account_details(frame, chunks[3]);
     }
 
     fn render_account_list(&mut self, frame: &mut Frame, area: Rect) {

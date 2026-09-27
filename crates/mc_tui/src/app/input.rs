@@ -372,6 +372,7 @@ impl App {
     pub(crate) fn dispatch_button(&mut self, button: ButtonId) {
         match button {
             ButtonId::Launch => self.launch_selected(),
+            ButtonId::StopGame => self.stop_selected_game(),
             ButtonId::NewInstance => self.open_create_instance_form(),
             ButtonId::EditInstance => self.open_nav(Nav::Jvm),
             ButtonId::DeleteInstance => self.confirm_delete_instance(),

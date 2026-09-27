@@ -23,8 +23,7 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
+                Constraint::Length(3),
                 Constraint::Min(5),
                 Constraint::Length(1),
             ])
@@ -56,8 +55,8 @@ impl App {
             ],
         );
 
-        self.render_log_list(frame, chunks[2]);
-        self.render_log_status(frame, chunks[3]);
+        self.render_log_list(frame, chunks[1]);
+        self.render_log_status(frame, chunks[2]);
     }
 
     fn render_log_list(&mut self, frame: &mut Frame, area: Rect) {

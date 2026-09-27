@@ -44,11 +44,7 @@ impl App {
     pub(crate) fn render_mods(&mut self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(5),
-            ])
+            .constraints([Constraint::Length(3), Constraint::Min(5)])
             .split(area);
 
         let toggle = self.tr("btn.toggle");
@@ -69,7 +65,7 @@ impl App {
             ],
         );
 
-        self.render_installed_mods(frame, chunks[2]);
+        self.render_installed_mods(frame, chunks[1]);
     }
 
     fn render_installed_mods(&mut self, frame: &mut Frame, area: Rect) {

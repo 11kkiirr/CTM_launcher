@@ -19,8 +19,7 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
+                Constraint::Length(3),
                 Constraint::Length(9),
                 Constraint::Length(1),
                 Constraint::Min(3),
@@ -42,7 +41,7 @@ impl App {
         );
 
         let focused = self.focus == Focus::Content;
-        let inner = card(self, frame, chunks[2], focused);
+        let inner = card(self, frame, chunks[1], focused);
         if inner.height == 0 {
             return;
         }
@@ -107,7 +106,7 @@ impl App {
                 self.theme.card_dim(),
             ))
             .style(self.theme.card()),
-            chunks[4],
+            chunks[3],
         );
     }
 

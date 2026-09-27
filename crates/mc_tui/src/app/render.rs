@@ -5,7 +5,7 @@ use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
 use super::{
-    footer_hints, info_line, truncate_str, App, Focus, HitAction, Nav, OverlayAction,
+    footer_hints, info_line, truncate_str, App, ButtonId, Focus, HitAction, Nav, OverlayAction,
     NAV_BUTTON_HEIGHT,
 };
 use crate::forms::Overlay;
@@ -50,12 +50,8 @@ pub(crate) fn render(&mut self, frame: &mut Frame) {
         ])
         .split(chunks[1]);
 
-    // Content area gets the 1-row top gap like before.
-    let content_rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(3)])
-        .split(body_columns[0]);
-    let content = content_rows[1];
+    // Content area spans the full body height, flush under the header.
+    let content = body_columns[0];
 
     self.sidebar_area = body_columns[2];
     self.render_nav_panel(frame, body_columns[2]);
@@ -89,12 +85,13 @@ pub(crate) fn render_nav_panel(&mut self, frame: &mut Frame, area: Rect) {
     let focused = self.focus == Focus::Sidebar;
     let inner = crate::views::card(self, frame, area, focused);
 
-    // 1-char left indent for all sidebar content.
+    // 1-char left indent for all sidebar content. The top card padding row
+    // is skipped so the build name sits flush under the header.
     let content = Rect {
         x: inner.x + 1,
-        y: inner.y,
+        y: inner.y.saturating_sub(1),
         width: inner.width.saturating_sub(1),
-        height: inner.height,
+        height: inner.height.saturating_add(1),
     };
 
     let menu = Nav::menu();
@@ -102,7 +99,7 @@ pub(crate) fn render_nav_panel(&mut self, frame: &mut Frame, area: Rect) {
     let has_build = self.selected_instance().is_some();
     let build_detail_height = if has_build { 5 } else { 0 };
 
-    let top_h = has_build as u16 + 1;
+    let top_h = if has_build { 3 } else { 1 };
     let mut bottom_h = 1 + build_detail_height;
     if top_h + bottom_h > content.height {
         bottom_h = content.height.saturating_sub(top_h);
@@ -124,14 +121,23 @@ pub(crate) fn render_nav_panel(&mut self, frame: &mut Frame, area: Rect) {
     self.nav_scroll = self.nav_scroll.min(self.nav_max);
     let offset = self.nav_scroll;
 
-    // Build name pinned above navigation.
+    // Build name pinned above navigation, with a launch/stop pill at right.
+    // The pill is 3 rows tall but capped with half-blocks so it reads as 2.
     if has_build {
         if let Some(instance) = self.selected_instance() {
+            let running = self.running.is_some();
+            let btn_w = 5u16.min(content.width);
             let name_rect = Rect {
                 x: content.x,
-                y: content.y,
-                width: content.width,
+                y: content.y + 1,
+                width: content.width.saturating_sub(btn_w),
                 height: 1,
+            };
+            let btn_rect = Rect {
+                x: name_rect.right(),
+                y: content.y,
+                width: btn_w,
+                height: 3,
             };
             let name = truncate_str(instance.name(), name_rect.width as usize);
             frame.render_widget(
@@ -139,6 +145,58 @@ pub(crate) fn render_nav_panel(&mut self, frame: &mut Frame, area: Rect) {
                     .alignment(ratatui::layout::Alignment::Center)
                     .style(self.theme.card()),
                 name_rect,
+            );
+            let hovered = self.is_hovered(btn_rect);
+            let btn_bg = if running {
+                self.theme.error
+            } else {
+                self.theme.green
+            };
+            let glyph_fg = if hovered { self.theme.fg } else { self.theme.panel };
+            let edge = Style::default().fg(btn_bg).bg(self.theme.panel);
+            let cap = "▄".repeat(btn_w as usize);
+            frame.render_widget(
+                Paragraph::new(Span::styled(cap, edge)).style(self.theme.card()),
+                Rect { height: 1, ..btn_rect },
+            );
+            let mid = Rect {
+                y: btn_rect.y + 1,
+                height: 1,
+                ..btn_rect
+            };
+            frame.render_widget(
+                Block::default().style(Style::default().bg(btn_bg)),
+                mid,
+            );
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    if running { "■" } else { "▶" },
+                    Style::default().fg(glyph_fg).bg(btn_bg),
+                ))
+                .alignment(ratatui::layout::Alignment::Center)
+                .style(Style::default().bg(btn_bg)),
+                mid,
+            );
+            let toe = Rect {
+                y: btn_rect.y + 2,
+                height: 1,
+                ..btn_rect
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "▀".repeat(btn_w as usize),
+                    edge,
+                ))
+                .style(self.theme.card()),
+                toe,
+            );
+            self.push_hitbox(
+                btn_rect,
+                HitAction::Button(if running {
+                    ButtonId::StopGame
+                } else {
+                    ButtonId::Launch
+                }),
             );
         }
     }

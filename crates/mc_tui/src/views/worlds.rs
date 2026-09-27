@@ -21,8 +21,7 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
+                Constraint::Length(3),
                 Constraint::Length(1),
                 Constraint::Min(3),
             ])
@@ -46,11 +45,11 @@ impl App {
         frame.render_widget(
             Paragraph::new(section_title(&title, &format!("{}", self.worlds.len()), &self.theme))
                 .style(self.theme.card()),
-            chunks[2],
+            chunks[1],
         );
 
         let focused = self.focus == Focus::Content;
-        let inner = card(self, frame, chunks[3], focused);
+        let inner = card(self, frame, chunks[2], focused);
         if inner.height == 0 || inner.width == 0 {
             return;
         }

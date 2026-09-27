@@ -16,7 +16,7 @@ pub mod versions;
 pub mod worlds;
 
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, ListState, Paragraph};
 use ratatui::Frame;
@@ -161,53 +161,50 @@ fn row_widths<'a>(items: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<u16> {
         .collect()
 }
 
-/// Render a horizontal row of clickable action buttons and register their
-/// hitboxes. Flat text chips on a dark background, matching pill_row style.
-/// Scrolls horizontally while the mouse hovers over the row.
-pub(crate) fn buttons_row(
+/// Height of a toolbar pill: label row capped with half-blocks top and
+/// bottom so it reads as 2 rows.
+const PILL_H: u16 = 3;
+
+/// Draw one 3-row toolbar pill (cap / label / toe) and register its hitbox.
+fn pill_cell(
     app: &mut App,
     frame: &mut Frame,
-    x: u16,
-    y: u16,
-    max_width: u16,
-    buttons: &[(&str, &str, ButtonId)],
+    rect: Rect,
+    skip: u16,
+    line: Line<'_>,
+    bg: Color,
+    action: HitAction,
 ) {
-    let widths = row_widths(buttons.iter().map(|(l, k, _)| (*l, *k)));
-    let (scroll, viewport) = begin_action_row(app, x, y, max_width, &widths);
-    let mut vx = 0u16;
-    for (i, (label, key, id)) in buttons.iter().enumerate() {
-        if let Some((rect, skip)) = action_cell(viewport, vx, widths[i], scroll) {
-            let hovered = app.is_hovered(rect);
-            let bg = if hovered {
-                app.theme.selection_bg
-            } else {
-                app.theme.panel_alt
-            };
-            let label_style = if hovered {
-                app.theme.accent_bright()
-            } else {
-                Style::default().fg(app.theme.fg)
-            };
-            let line = Line::from(vec![
-                Span::styled(format!(" {label}  "), label_style),
-                Span::styled(key.to_string(), app.theme.accent()),
-                Span::styled(" ", app.theme.comment_style()),
-            ]);
-            frame.render_widget(
-                Paragraph::new(line).style(Style::default().bg(bg)).scroll((0, skip)),
-                rect,
-            );
-            app.hitboxes.push(crate::app::Hitbox {
-                rect,
-                action: HitAction::Button(*id),
-            });
-        }
-        vx = vx.saturating_add(widths[i] + 1);
-    }
+    let edge = Style::default().fg(bg).bg(app.theme.bg);
+    frame.render_widget(
+        Paragraph::new(Span::styled("▄".repeat(rect.width as usize), edge))
+            .style(Style::default().bg(app.theme.bg)),
+        Rect { height: 1, ..rect },
+    );
+    frame.render_widget(
+        Paragraph::new(line).style(Style::default().bg(bg)).scroll((0, skip)),
+        Rect {
+            y: rect.y + 1,
+            height: 1,
+            ..rect
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled("▀".repeat(rect.width as usize), edge))
+            .style(Style::default().bg(app.theme.bg)),
+        Rect {
+            y: rect.y + 2,
+            height: 1,
+            ..rect
+        },
+    );
+    app.hitboxes.push(crate::app::Hitbox { rect, action });
 }
 
 /// Render a row of tabs. The active tab is bright green, the rest muted.
 /// Scrolls horizontally while the mouse hovers over the row.
+///
+/// Same 3-row pill look as the toolbar buttons.
 pub(crate) fn tab_row(
     app: &mut App,
     frame: &mut Frame,
@@ -218,9 +215,15 @@ pub(crate) fn tab_row(
 ) {
     let widths = row_widths(tabs.iter().map(|(l, k, _, _)| (*l, *k)));
     let (scroll, viewport) = begin_action_row(app, x, y, max_width, &widths);
+    app.toolbar_area.height = PILL_H;
     let mut vx = 0u16;
     for (i, (label, key, id, active)) in tabs.iter().enumerate() {
-        if let Some((rect, skip)) = action_cell(viewport, vx, widths[i], scroll) {
+        if let Some((cell, skip)) = action_cell(viewport, vx, widths[i], scroll) {
+            let rect = Rect {
+                y: viewport.y,
+                height: PILL_H,
+                ..cell
+            };
             let hovered = app.is_hovered(rect);
             let bg = if hovered {
                 app.theme.selection_bg
@@ -239,14 +242,7 @@ pub(crate) fn tab_row(
                 Span::styled(key.to_string(), app.theme.accent()),
                 Span::styled(" ", app.theme.comment_style()),
             ]);
-            frame.render_widget(
-                Paragraph::new(line).style(Style::default().bg(bg)).scroll((0, skip)),
-                rect,
-            );
-            app.hitboxes.push(crate::app::Hitbox {
-                rect,
-                action: HitAction::Button(*id),
-            });
+            pill_cell(app, frame, rect, skip, line, bg, HitAction::Button(*id));
         }
         vx = vx.saturating_add(widths[i] + 1);
     }
@@ -257,6 +253,9 @@ pub(crate) fn tab_row(
 ///
 /// Used for the modernized top action toolbar. Scrolls horizontally while the
 /// mouse hovers over the row.
+///
+/// Each pill is 3 rows tall but capped with half-blocks top and bottom so it
+/// reads as 2 rows.
 pub(crate) fn pill_row(
     app: &mut App,
     frame: &mut Frame,
@@ -267,9 +266,15 @@ pub(crate) fn pill_row(
 ) {
     let widths = row_widths(pills.iter().map(|(l, k, _)| (*l, *k)));
     let (scroll, viewport) = begin_action_row(app, x, y, max_width, &widths);
+    app.toolbar_area.height = PILL_H;
     let mut vx = 0u16;
     for (i, (label, key, id)) in pills.iter().enumerate() {
-        if let Some((rect, skip)) = action_cell(viewport, vx, widths[i], scroll) {
+        if let Some((cell, skip)) = action_cell(viewport, vx, widths[i], scroll) {
+            let rect = Rect {
+                y: viewport.y,
+                height: PILL_H,
+                ..cell
+            };
             let hovered = app.is_hovered(rect);
             let bg = if hovered {
                 app.theme.selection_bg
@@ -286,17 +291,23 @@ pub(crate) fn pill_row(
                 Span::styled(key.to_string(), app.theme.accent()),
                 Span::styled(" ", app.theme.comment_style()),
             ]);
-            frame.render_widget(
-                Paragraph::new(line).style(Style::default().bg(bg)).scroll((0, skip)),
-                rect,
-            );
-            app.hitboxes.push(crate::app::Hitbox {
-                rect,
-                action: HitAction::Button(*id),
-            });
+            pill_cell(app, frame, rect, skip, line, bg, HitAction::Button(*id));
         }
         vx = vx.saturating_add(widths[i] + 1);
     }
+}
+
+/// Render a horizontal row of clickable action buttons.
+/// Same 3-row pill look as [`pill_row`].
+pub(crate) fn buttons_row(
+    app: &mut App,
+    frame: &mut Frame,
+    x: u16,
+    y: u16,
+    max_width: u16,
+    buttons: &[(&str, &str, ButtonId)],
+) {
+    pill_row(app, frame, x, y, max_width, buttons);
 }
 
 /// A card section title: a green label with an optional muted suffix.

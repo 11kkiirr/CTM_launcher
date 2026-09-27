@@ -17,8 +17,7 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
+                Constraint::Length(3),
                 Constraint::Min(5),
                 Constraint::Length(1),
                 Constraint::Length(8),
@@ -44,11 +43,11 @@ impl App {
         );
 
         if self.selected_project.is_some() {
-            self.render_project(frame, chunks[2]);
-            self.render_project_info(frame, chunks[4]);
+            self.render_project(frame, chunks[1]);
+            self.render_project_info(frame, chunks[3]);
         } else {
-            self.render_search_results(frame, chunks[2]);
-            self.render_search_info(frame, chunks[4]);
+            self.render_search_results(frame, chunks[1]);
+            self.render_search_info(frame, chunks[3]);
         }
     }
 
