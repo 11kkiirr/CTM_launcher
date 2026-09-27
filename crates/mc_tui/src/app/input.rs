@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 
 use super::{
     rect_contains, move_selection, settings_field_count, split_args, App, ButtonId, Focus,
-    HitAction, Nav, OverlayAction, PickerKey,
+    HitAction, Nav, OverlayAction, PickerKey, NAV_BUTTON_HEIGHT,
 };
 use crate::forms::{Form, FormAction, Overlay, TextAction};
 
@@ -73,6 +73,9 @@ impl App {
             Focus::Sidebar => Focus::Content,
             _ => Focus::Sidebar,
         };
+        if self.focus == Focus::Sidebar {
+            self.ensure_nav_visible();
+        }
     }
 
     pub(crate) fn open_nav(&mut self, nav: Nav) {
@@ -84,6 +87,8 @@ impl App {
         self.settings_edit = None;
         self.settings_dropdown = None;
         self.settings_scroll = 0;
+        self.toolbar_scroll = 0;
+        self.toolbar_target = 0;
         let max = settings_field_count(nav).saturating_sub(1);
         self.settings_field = self.settings_field.min(max);
         match nav {
@@ -100,6 +105,7 @@ impl App {
             Nav::Screenshots => self.reload_screenshots(),
             _ => {}
         }
+        self.ensure_nav_visible();
     }
 
     pub(crate) fn handle_view_key(&mut self, key: KeyEvent) {
@@ -190,11 +196,11 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::ScrollDown => {
-                self.scroll_active(1);
+                self.hover_scroll(1);
                 true
             }
             MouseEventKind::ScrollUp => {
-                self.scroll_active(-1);
+                self.hover_scroll(-1);
                 true
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -206,6 +212,44 @@ impl App {
                 }
             }
             _ => hover_changed,
+        }
+    }
+
+    pub(crate) fn hover_scroll(&mut self, delta: i32) {
+        let Some(pos) = self.mouse_pos else {
+            self.scroll_active(delta);
+            return;
+        };
+        if self.toolbar_max > 0 && rect_contains(self.toolbar_area, pos) {
+            let step = delta * 4;
+            let next = (self.toolbar_target as i32 + step).clamp(0, self.toolbar_max as i32) as u16;
+            self.toolbar_target = next;
+            return;
+        }
+        if self.nav_max > 0 && rect_contains(self.sidebar_area, pos) {
+            let next = (self.nav_target as i32 + delta).clamp(0, self.nav_max as i32) as u16;
+            self.nav_target = next;
+            return;
+        }
+        self.scroll_active(delta);
+    }
+
+    fn ensure_nav_visible(&mut self) {
+        let Some(idx) = Nav::menu().iter().position(|n| *n == self.nav) else {
+            return;
+        };
+        if self.nav_viewport.height == 0 {
+            return;
+        }
+        let top = idx as u16 * NAV_BUTTON_HEIGHT;
+        let bottom = top + NAV_BUTTON_HEIGHT;
+        if top < self.nav_target {
+            self.nav_target = top;
+        } else if bottom > self.nav_target + self.nav_viewport.height {
+            self.nav_target = bottom - self.nav_viewport.height;
+        }
+        if self.nav_target > self.nav_max {
+            self.nav_target = self.nav_max;
         }
     }
 
@@ -315,6 +359,7 @@ impl App {
         }
         self.instance_state.select(Some(idx));
         self.focus = Focus::Content;
+        self.ensure_tile_visible();
         // Refresh per-instance content lists so we never show another
         // instance's mods / packs / worlds / screenshots.
         self.reload_mods();
@@ -384,12 +429,10 @@ impl App {
         }
         match self.nav {
             Nav::Instances => {
-                if self.grid_has_selection() || !self.instances.is_empty() {
-                    // Wheel moves one visual row (section-aware).
-                    let steps = delta.unsigned_abs().min(4) as i32;
-                    let dir = if delta > 0 { steps } else { -steps };
-                    self.move_grid_vert(dir);
-                }
+                let step = delta * 6;
+                let next = (self.tile_target as i64 + step as i64)
+                    .clamp(0, self.tile_max as i64) as usize;
+                self.tile_target = next;
             }
             Nav::Browse => self.browse_scroll(delta),
             Nav::Versions => {}
@@ -445,7 +488,8 @@ impl App {
         }
     }
 
-    pub(crate) fn ensure_tile_visible(&mut self, view_h: usize) {
+    pub(crate) fn ensure_tile_visible(&mut self) {
+        let view_h = self.tile_view_h;
         if view_h == 0 {
             return;
         }
@@ -457,19 +501,14 @@ impl App {
         if let Some(selected) = self.instance_state.selected() {
             if let Some(y) = crate::views::tiles::instance_content_y(&boxes, &sections, selected) {
                 let tile_end = y + crate::views::tiles::TILE_H as usize;
-                if y < self.tile_scroll {
-                    self.tile_scroll = y;
-                } else if tile_end > self.tile_scroll + view_h {
-                    self.tile_scroll = tile_end.saturating_sub(view_h);
+                if y < self.tile_target {
+                    self.tile_target = y;
+                } else if tile_end > self.tile_target + view_h {
+                    self.tile_target = tile_end - view_h;
                 }
             }
         }
-        self.tile_scroll =
-            crate::views::tiles::snap_scroll(&boxes, &sections, self.tile_scroll);
-        self.tile_scroll = self.tile_scroll.min(max_scroll);
-        // Approximate visible tile rows for PageUp/PageDown step size.
-        let row_h = crate::views::tiles::TILE_H as usize + crate::views::tiles::GAP_Y as usize;
-        self.tile_visible_rows = (view_h / row_h).max(1);
+        self.tile_target = self.tile_target.min(max_scroll);
     }
 
     pub(crate) fn ensure_screenshot_visible(&mut self) {

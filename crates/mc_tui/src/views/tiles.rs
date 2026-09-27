@@ -123,13 +123,25 @@ impl App {
         self.tile_columns = full_cols;
         self.tile_body_w = body.width;
         let view_h = body.height as usize;
-        self.ensure_tile_visible(view_h);
+
+        let sections = self.instance_sections();
+        let boxes = layout_panels(&sections, body.width);
+        let total = content_height(&boxes);
+        let max_scroll = total.saturating_sub(view_h);
+        self.tile_view_h = view_h;
+        self.tile_max = max_scroll;
+        let row_h = TILE_H as usize + GAP_Y as usize;
+        self.tile_visible_rows = (view_h / row_h).max(1);
+        if self.tile_target > max_scroll {
+            self.tile_target = max_scroll;
+        }
+        if self.tile_scroll > max_scroll {
+            self.tile_scroll = max_scroll;
+        }
 
         // ASCII on the page bg (panel-coloured); panels redraw it dark on top.
         self.render_ascii_bg(frame, body, None, false, &[]);
 
-        let sections = self.instance_sections();
-        let boxes = layout_panels(&sections, body.width);
         let scroll = self.tile_scroll;
         let selected = self.instance_state.selected();
 
@@ -164,7 +176,7 @@ impl App {
             let cards: Vec<Rect> = self
                 .visible_tiles(section, b.cols, panel_rect, b.y, scroll, body)
                 .into_iter()
-                .map(|(r, _)| r)
+                .map(|(r, _, _)| r)
                 .collect();
             self.render_ascii_bg(frame, body, Some(panel_rect), true, &cards);
 
@@ -215,19 +227,23 @@ impl App {
             return;
         }
 
-        for (rect, idx) in self.visible_tiles(section, cols, panel_rect, panel_top, scroll, body) {
+        for (rect, idx, top_offset) in
+            self.visible_tiles(section, cols, panel_rect, panel_top, scroll, body)
+        {
             if idx >= self.instances.len() {
                 continue;
             }
             let hovered = self.is_hovered(rect);
             let is_selected = selected == Some(idx);
             let instance = self.instances[idx].clone();
-            self.render_tile(frame, rect, &instance, is_selected, hovered);
+            self.render_tile(frame, rect, top_offset, &instance, is_selected, hovered);
             self.push_hitbox(rect, HitAction::InstanceTile(idx));
         }
     }
 
-    /// Screen rects + instance indices of cards visible in `panel_rect`.
+    /// Screen rects (clipped to the viewport) + instance indices + the number
+    /// of card rows cut off above the rect, so content stays anchored to the
+    /// full card while the card itself is only partially visible.
     fn visible_tiles(
         &self,
         section: &Section,
@@ -236,7 +252,7 @@ impl App {
         panel_top: usize,
         scroll: usize,
         body: Rect,
-    ) -> Vec<(Rect, usize)> {
+    ) -> Vec<(Rect, usize, u16)> {
         let mut out = Vec::new();
         if section.collapsed || section.count == 0 {
             return out;
@@ -248,19 +264,18 @@ impl App {
         let inner_w = panel_rect.width.saturating_sub(SIDE_PAD);
         let max_cols = ((inner_w + GAP_X) / (TILE_W + GAP_X)).max(1) as usize;
         let cols = cols.min(max_cols);
+        let body_top = body.y as i32;
+        let body_bottom = body.bottom() as i32;
+        let panel_top_y = panel_rect.y as i32;
+        let panel_bottom = panel_rect.bottom() as i32;
         for r in 0..tile_rows {
             let row_y = tile_base + r * (TILE_H as usize + GAP_Y as usize);
             let row_end = row_y + TILE_H as usize;
             if row_end <= scroll || row_y >= scroll + body.height as usize {
                 continue;
             }
-            if row_y < scroll {
-                continue;
-            }
-            let screen_y = body.y + (row_y - scroll) as u16;
-            if screen_y + TILE_H > body.y + body.height {
-                continue;
-            }
+            let card_top = body.y as i32 + (row_y as i32 - scroll as i32);
+            let card_bottom = card_top + TILE_H as i32;
             for c in 0..cols {
                 let local = r * cols + c;
                 if local >= section.count {
@@ -270,19 +285,22 @@ impl App {
                 if idx >= self.instances.len() {
                     break;
                 }
-                let rect = Rect {
-                    x: inner_x + c as u16 * (TILE_W + GAP_X),
-                    y: screen_y,
-                    width: TILE_W,
-                    height: TILE_H,
-                };
-                if rect.x + rect.width > panel_rect.x + panel_rect.width {
+                let x = inner_x + c as u16 * (TILE_W + GAP_X);
+                if x + TILE_W > panel_rect.x + panel_rect.width {
                     break;
                 }
-                if rect.y + rect.height > panel_rect.y + panel_rect.height {
+                let top = card_top.max(body_top).max(panel_top_y);
+                let bottom = card_bottom.min(body_bottom).min(panel_bottom);
+                if top >= bottom {
                     continue;
                 }
-                out.push((rect, idx));
+                let rect = Rect {
+                    x,
+                    y: top as u16,
+                    width: TILE_W,
+                    height: (bottom - top) as u16,
+                };
+                out.push((rect, idx, (top - card_top) as u16));
             }
         }
         out
@@ -427,6 +445,7 @@ impl App {
         &self,
         frame: &mut Frame,
         rect: Rect,
+        top_offset: u16,
         instance: &Instance,
         selected: bool,
         hovered: bool,
@@ -442,22 +461,23 @@ impl App {
         fill_rect(frame, rect, surface);
         crate::views::accent_bar(frame, rect, &self.theme);
         let pad_left: u16 = 3;
-        if rect.width < pad_left + 3 || rect.height < CONTENT_H {
+        if rect.width < pad_left + 3 {
             return;
         }
 
-        let top = rect.y + rect.height.saturating_sub(CONTENT_H) / 2;
+        let view_top = rect.y as i32;
+        let view_bottom = rect.bottom() as i32;
+        let row_visible = |y: i32| y >= view_top && y < view_bottom;
+        let span_visible = |y: i32, h: i32| y >= view_top && y + h <= view_bottom;
+
+        // Content stays anchored to the full card while `rect` may be clipped.
+        let card_top = rect.y as i32 - top_offset as i32;
+        let top = card_top + (TILE_H as i32 - CONTENT_H as i32) / 2;
         let cw = rect.width - pad_left;
 
         let short = short_name(instance.name());
         let box_w = (short.chars().count() as u16 + 4).max(6).min(cw);
         let box_x = rect.x + rect.width.saturating_sub(box_w) / 2;
-        let box_rect = Rect {
-            x: box_x,
-            y: top,
-            width: box_w,
-            height: 3,
-        };
         let box_border = if selected {
             self.theme.green_bright
         } else {
@@ -468,19 +488,27 @@ impl App {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(box_border))
             .style(surface);
-        let logo_inner = logo_box.inner(box_rect);
-        frame.render_widget(logo_box, box_rect);
-        let short_style = if selected {
-            self.theme.accent_bright()
-        } else {
-            Style::default().fg(self.theme.fg).bg(bg)
-        };
-        frame.render_widget(
-            Paragraph::new(Span::styled(short, short_style))
-                .alignment(Alignment::Center)
-                .style(surface),
-            logo_inner,
-        );
+        if span_visible(top, 3) {
+            let box_rect = Rect {
+                x: box_x,
+                y: top as u16,
+                width: box_w,
+                height: 3,
+            };
+            let logo_inner = logo_box.inner(box_rect);
+            frame.render_widget(logo_box, box_rect);
+            let short_style = if selected {
+                self.theme.accent_bright()
+            } else {
+                Style::default().fg(self.theme.fg).bg(bg)
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(short, short_style))
+                    .alignment(Alignment::Center)
+                    .style(surface),
+                logo_inner,
+            );
+        }
 
         let title_style = if selected {
             self.theme.accent_bright()
@@ -490,40 +518,44 @@ impl App {
                 .bg(bg)
                 .add_modifier(Modifier::BOLD)
         };
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                truncate(instance.name(), cw as usize),
-                title_style,
-            ))
-            .alignment(Alignment::Center)
-            .style(surface),
-            Rect {
-                x: rect.x,
-                y: top + 3,
-                width: rect.width,
-                height: 1,
-            },
-        );
+        if row_visible(top + 3) {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    truncate(instance.name(), cw as usize),
+                    title_style,
+                ))
+                .alignment(Alignment::Center)
+                .style(surface),
+                Rect {
+                    x: rect.x,
+                    y: (top + 3) as u16,
+                    width: rect.width,
+                    height: 1,
+                },
+            );
+        }
 
         let meta = format!(
             "{} / {}",
             instance.metadata.game_version,
             instance.metadata.loader.as_str()
         );
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                truncate(&meta, cw as usize),
-                Style::default().fg(self.theme.muted).bg(bg),
-            ))
-            .alignment(Alignment::Center)
-            .style(surface),
-            Rect {
-                x: rect.x,
-                y: top + 4,
-                width: rect.width,
-                height: 1,
-            },
-        );
+        if row_visible(top + 4) {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    truncate(&meta, cw as usize),
+                    Style::default().fg(self.theme.muted).bg(bg),
+                ))
+                .alignment(Alignment::Center)
+                .style(surface),
+                Rect {
+                    x: rect.x,
+                    y: (top + 4) as u16,
+                    width: rect.width,
+                    height: 1,
+                },
+            );
+        }
 
         let status = if instance.is_linked() {
             match &instance.metadata.modpack {
@@ -536,20 +568,22 @@ impl App {
                 None => self.tr("builds.ready").to_string(),
             }
         };
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                truncate(&status, cw as usize),
-                self.theme.accent(),
-            ))
-            .alignment(Alignment::Center)
-            .style(surface),
-            Rect {
-                x: rect.x,
-                y: top + 5,
-                width: rect.width,
-                height: 1,
-            },
-        );
+        if row_visible(top + 5) {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    truncate(&status, cw as usize),
+                    self.theme.accent(),
+                ))
+                .alignment(Alignment::Center)
+                .style(surface),
+                Rect {
+                    x: rect.x,
+                    y: (top + 5) as u16,
+                    width: rect.width,
+                    height: 1,
+                },
+            );
+        }
     }
 
     /// Keyboard navigation for the instance grid (section-aware, collapse-aware).
@@ -642,6 +676,14 @@ impl App {
     /// Move left/right inside the current section's row; at the edge step to
     /// the adjacent section on the same visual row (flow layout).
     pub(crate) fn move_grid_horiz(&mut self, delta: i32) {
+        let before = self.instance_state.selected();
+        self.step_grid_horiz(delta);
+        if self.instance_state.selected() != before {
+            self.ensure_tile_visible();
+        }
+    }
+
+    fn step_grid_horiz(&mut self, delta: i32) {
         let Some(current) = self.instance_state.selected() else {
             return;
         };
@@ -821,11 +863,6 @@ impl App {
             self.instance_state.select(Some(ps.start + local_t));
         }
     }
-
-    /// True when the vertical wheel should move the grid selection.
-    pub(crate) fn grid_has_selection(&self) -> bool {
-        self.instance_state.selected().is_some() || !self.instances.is_empty()
-    }
 }
 
 /// Sections in display order: ungrouped first (from sorted instances), then
@@ -971,36 +1008,6 @@ pub(crate) fn instance_content_y(
     Some(b.y + HEADER_H + row * (TILE_H as usize + GAP_Y as usize))
 }
 
-/// Snap a scroll offset back to a panel-row top or tile-row start.
-pub(crate) fn snap_scroll(
-    boxes: &[PanelBox],
-    sections: &[Section],
-    scroll: usize,
-) -> usize {
-    let mut ys: Vec<usize> = vec![0];
-    for b in boxes {
-        ys.push(b.y);
-        let s = &sections[b.section];
-        if s.collapsed || s.count == 0 {
-            continue;
-        }
-        ys.push(b.y + HEADER_H);
-        let rows = s.count.div_ceil(b.cols.max(1));
-        for r in 0..rows {
-            ys.push(b.y + HEADER_H + r * (TILE_H as usize + GAP_Y as usize));
-        }
-    }
-    ys.sort_unstable();
-    ys.dedup();
-    let mut best = 0usize;
-    for y in ys {
-        if y > scroll {
-            return best;
-        }
-        best = y;
-    }
-    best
-}
 
 fn intersect_rect(a: Rect, b: Rect) -> Rect {
     let x1 = a.x.max(b.x);

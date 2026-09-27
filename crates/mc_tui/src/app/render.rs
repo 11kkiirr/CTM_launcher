@@ -18,6 +18,8 @@ impl App {
 
 pub(crate) fn render(&mut self, frame: &mut Frame) {
     self.hitboxes.clear();
+    self.toolbar_max = 0;
+    self.toolbar_area = Rect::default();
     let area = frame.area();
     frame.render_widget(Block::default().style(self.theme.base()), area);
 
@@ -96,32 +98,47 @@ pub(crate) fn render_nav_panel(&mut self, frame: &mut Frame, area: Rect) {
     };
 
     let menu = Nav::menu();
-    let nav_height = menu.len() as u16 * NAV_BUTTON_HEIGHT;
+    let nav_content_h = menu.len() as u16 * NAV_BUTTON_HEIGHT;
     let has_build = self.selected_instance().is_some();
     let build_detail_height = if has_build { 5 } else { 0 };
 
-    // Layout: build name (1) → "Navigation" (1) → nav buttons → spacer → build details
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(if has_build { 1 } else { 0 }), // build name
-            Constraint::Length(1),                             // "Navigation" header
-            Constraint::Length(nav_height),                   // nav buttons
-            Constraint::Min(1),                               // spacer
-            Constraint::Length(1),                            // "Build Info" header
-            Constraint::Length(build_detail_height),          // build details
-        ])
-        .split(content);
+    let top_h = has_build as u16 + 1;
+    let mut bottom_h = 1 + build_detail_height;
+    if top_h + bottom_h > content.height {
+        bottom_h = content.height.saturating_sub(top_h);
+    }
+    let info_y = content.y + content.height.saturating_sub(bottom_h);
+    let nav_y = content.y + top_h;
+    let nav_h = info_y.saturating_sub(nav_y).min(nav_content_h);
+
+    self.nav_viewport = Rect {
+        x: content.x,
+        y: nav_y,
+        width: content.width,
+        height: nav_h,
+    };
+    self.nav_max = nav_content_h.saturating_sub(nav_h);
+    if self.nav_target > self.nav_max {
+        self.nav_target = self.nav_max;
+    }
+    self.nav_scroll = self.nav_scroll.min(self.nav_max);
+    let offset = self.nav_scroll;
 
     // Build name pinned above navigation.
     if has_build {
         if let Some(instance) = self.selected_instance() {
-            let name = truncate_str(instance.name(), chunks[0].width as usize);
+            let name_rect = Rect {
+                x: content.x,
+                y: content.y,
+                width: content.width,
+                height: 1,
+            };
+            let name = truncate_str(instance.name(), name_rect.width as usize);
             frame.render_widget(
                 Paragraph::new(Span::styled(name, self.theme.header()))
                     .alignment(ratatui::layout::Alignment::Center)
                     .style(self.theme.card()),
-                chunks[0],
+                name_rect,
             );
         }
     }
@@ -129,38 +146,58 @@ pub(crate) fn render_nav_panel(&mut self, frame: &mut Frame, area: Rect) {
     // Empty space where "Navigation" was.
 
     for (idx, nav) in menu.iter().enumerate() {
-        let y = chunks[2].y + idx as u16 * NAV_BUTTON_HEIGHT;
-        if y + NAV_BUTTON_HEIGHT > chunks[2].y + chunks[2].height {
-            break;
-        }
-        let rect = Rect {
-            x: chunks[2].x,
+        let y = nav_y as i32 + idx as i32 * NAV_BUTTON_HEIGHT as i32 - offset as i32;
+        let Ok(y) = u16::try_from(y) else {
+            continue;
+        };
+        let full = Rect {
+            x: content.x,
             y,
-            width: chunks[2].width,
+            width: content.width,
             height: NAV_BUTTON_HEIGHT,
         };
-        self.render_nav_button(frame, rect, *nav, idx + 1);
+        let clip = full.intersection(self.nav_viewport);
+        if clip.height == 0 {
+            continue;
+        }
+        self.render_nav_button(frame, full, clip, *nav, idx + 1);
     }
 
-    frame.render_widget(
-        Paragraph::new(Span::styled(self.tr("info.build_info"), self.theme.card_comment()))
-            .style(self.theme.card()),
-        chunks[4],
-    );
-    self.render_build_info(frame, chunks[5]);
+    if bottom_h > 0 {
+        let info_header = Rect {
+            x: content.x,
+            y: info_y,
+            width: content.width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(self.tr("info.build_info"), self.theme.card_comment()))
+                .style(self.theme.card()),
+            info_header,
+        );
+        if bottom_h > 1 {
+            let details = Rect {
+                x: content.x,
+                y: info_y + 1,
+                width: content.width,
+                height: bottom_h - 1,
+            };
+            self.render_build_info(frame, details);
+        }
+    }
 }
 
 /// A chunky, padded navigation block button with an index number. The
 /// active entry gets a solid dark-green fill. No borders.
-fn render_nav_button(&mut self, frame: &mut Frame, rect: Rect, nav: Nav, number: usize) {
+fn render_nav_button(&mut self, frame: &mut Frame, full: Rect, clip: Rect, nav: Nav, number: usize) {
     let selected = nav == self.nav;
-    let hovered = self.is_hovered(rect);
+    let hovered = self.is_hovered(clip);
     let bg = if selected || hovered {
         self.theme.selection_bg
     } else {
         self.theme.panel_alt
     };
-    frame.render_widget(Block::default().style(Style::default().bg(bg)), rect);
+    frame.render_widget(Block::default().style(Style::default().bg(bg)), clip);
 
     // Left accent bar: green for active, muted gray for inactive.
     let bar_style = if selected {
@@ -168,14 +205,14 @@ fn render_nav_button(&mut self, frame: &mut Frame, rect: Rect, nav: Nav, number:
     } else {
         Style::default().fg(self.theme.muted).bg(bg)
     };
-    if rect.height > 0 {
+    if clip.height > 0 {
         let bar_rect = Rect {
-            x: rect.x,
-            y: rect.y,
+            x: full.x,
+            y: clip.y,
             width: 1,
-            height: rect.height,
+            height: clip.height,
         };
-        let bar_lines: Vec<Line> = (0..rect.height)
+        let bar_lines: Vec<Line> = (0..clip.height)
             .map(|_| Line::from(Span::styled("▎", bar_style)))
             .collect();
         frame.render_widget(Paragraph::new(bar_lines), bar_rect);
@@ -196,13 +233,14 @@ fn render_nav_button(&mut self, frame: &mut Frame, rect: Rect, nav: Nav, number:
     } else {
         Style::default().fg(self.theme.fg).bg(bg)
     };
-    let row = Rect {
-        x: rect.x + 1,
-        y: rect.y + rect.height / 2,
-        width: rect.width.saturating_sub(1),
-        height: 1,
-    };
-    if rect.height > 0 {
+    let label_y = full.y + NAV_BUTTON_HEIGHT / 2;
+    if label_y >= clip.y && label_y < clip.bottom() {
+        let row = Rect {
+            x: full.x + 1,
+            y: label_y,
+            width: full.width.saturating_sub(1),
+            height: 1,
+        };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(format!(" {number}   "), num_style),
@@ -212,7 +250,7 @@ fn render_nav_button(&mut self, frame: &mut Frame, rect: Rect, nav: Nav, number:
             row,
         );
     }
-    self.push_hitbox(rect, HitAction::NavItem(nav));
+    self.push_hitbox(clip, HitAction::NavItem(nav));
 }
 
 fn render_build_info(&mut self, frame: &mut Frame, area: Rect) {

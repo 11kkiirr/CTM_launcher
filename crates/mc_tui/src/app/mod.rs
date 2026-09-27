@@ -300,6 +300,9 @@ pub struct App {
 
     pub mouse_pos: Option<(u16, u16)>,
     pub tile_scroll: usize,
+    pub tile_target: usize,
+    pub tile_max: usize,
+    pub tile_view_h: usize,
     pub tile_columns: usize,
     pub tile_body_w: u16,
     pub tile_visible_rows: usize,
@@ -309,6 +312,14 @@ pub struct App {
     pub world_scroll: usize,
     pub world_visible_rows: usize,
     pub sidebar_area: Rect,
+    pub toolbar_area: Rect,
+    pub toolbar_max: u16,
+    pub toolbar_scroll: u16,
+    pub toolbar_target: u16,
+    pub nav_viewport: Rect,
+    pub nav_max: u16,
+    pub nav_scroll: u16,
+    pub nav_target: u16,
 
     pub tick: u64,
     pub status: String,
@@ -426,6 +437,9 @@ impl App {
             should_quit: false,
             mouse_pos: None,
             tile_scroll: 0,
+            tile_target: 0,
+            tile_max: 0,
+            tile_view_h: 0,
             tile_columns: 2,
             tile_body_w: 0,
             tile_visible_rows: 1,
@@ -435,6 +449,14 @@ impl App {
             world_scroll: 0,
             world_visible_rows: 1,
             sidebar_area: Rect::default(),
+            toolbar_area: Rect::default(),
+            toolbar_max: 0,
+            toolbar_scroll: 0,
+            toolbar_target: 0,
+            nav_viewport: Rect::default(),
+            nav_max: 0,
+            nav_scroll: 0,
+            nav_target: 0,
             tick: 0,
             status: "Ready".to_string(),
             toast: None,
@@ -566,6 +588,7 @@ impl App {
 
     pub(crate) fn on_tick(&mut self) -> bool {
         self.tick = self.tick.wrapping_add(1);
+        self.animate_scrolls();
         self.drain_process();
         if let Some(toast) = &self.toast {
             if toast.at.elapsed() > Duration::from_secs(6) {
@@ -573,6 +596,12 @@ impl App {
             }
         }
         true
+    }
+
+    fn animate_scrolls(&mut self) {
+        step_toward(&mut self.toolbar_scroll, self.toolbar_target);
+        step_toward(&mut self.nav_scroll, self.nav_target);
+        advance(&mut self.tile_scroll, self.tile_target);
     }
 
     pub(crate) fn drain_process(&mut self) -> bool {
@@ -650,6 +679,28 @@ pub(crate) fn rect_contains(rect: Rect, (x, y): (u16, u16)) -> bool {
         && x < rect.x.saturating_add(rect.width)
         && y >= rect.y
         && y < rect.y.saturating_add(rect.height)
+}
+
+pub(crate) fn step_toward(cur: &mut u16, target: u16) {
+    const SPEED: u16 = 3;
+    if *cur < target {
+        *cur = (*cur + SPEED).min(target);
+    } else if *cur > target {
+        *cur = cur.saturating_sub(SPEED);
+    }
+}
+
+fn advance(cur: &mut usize, target: usize) {
+    let diff = target.abs_diff(*cur);
+    if diff == 0 {
+        return;
+    }
+    let speed = (diff / 4).clamp(3, 12);
+    if *cur < target {
+        *cur = (*cur + speed).min(target);
+    } else {
+        *cur = cur.saturating_sub(speed);
+    }
 }
 
 pub(crate) fn move_selection(state: &mut ListState, len: usize, delta: i32) {
@@ -858,6 +909,11 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    fn buffer_row(terminal: &Terminal<TestBackend>, y: u16, x0: u16, x1: u16) -> String {
+        let buf = terminal.backend().buffer();
+        (x0..x1).map(|x| buf[(x, y)].symbol()).collect()
     }
 
     #[tokio::test]
@@ -1126,6 +1182,171 @@ mod tests {
 
         app.jump_logs(true);
         assert!(app.log_follow, "jump to bottom re-enables follow");
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn hover_scrolls_toolbar_and_sidebar() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.instance_state.select(Some(0));
+
+        let mut terminal = Terminal::new(TestBackend::new(70, 14)).unwrap();
+        app.nav = Nav::Instances;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        assert!(app.toolbar_max > 0, "toolbar must overflow on a narrow window");
+        assert!(app.nav_max > 0, "nav must overflow on a short window");
+
+        app.mouse_pos = Some((app.toolbar_area.x + 1, app.toolbar_area.y));
+        let nav_before = app.nav_target;
+        app.hover_scroll(1);
+        assert!(app.toolbar_target > 0, "toolbar should scroll right");
+        assert_eq!(
+            app.nav_target, nav_before,
+            "hovering the toolbar must not scroll the sidebar"
+        );
+
+        let scroll_before = app.toolbar_scroll;
+        app.on_tick();
+        assert!(
+            app.toolbar_scroll > scroll_before && app.toolbar_scroll <= app.toolbar_target,
+            "toolbar scroll should advance gradually"
+        );
+
+        for _ in 0..100 {
+            app.hover_scroll(1);
+        }
+        app.toolbar_scroll = app.toolbar_target;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let (tx, ty, tr) = (
+            app.toolbar_area.x,
+            app.toolbar_area.y,
+            app.toolbar_area.right(),
+        );
+        let row = buffer_row(&terminal, ty, tx, tr);
+        assert!(!row.contains("Launch"), "first pill should scroll out: {row}");
+        assert!(row.contains("Grp Del"), "last pill should scroll in: {row}");
+
+        app.mouse_pos = Some((app.sidebar_area.x + 5, app.sidebar_area.y + 5));
+        let toolbar_before = app.toolbar_target;
+        app.hover_scroll(1);
+        assert!(app.nav_target > 0, "hovering the sidebar should scroll the nav");
+        assert_eq!(
+            app.toolbar_target, toolbar_before,
+            "hovering the sidebar must not scroll the toolbar"
+        );
+
+        app.nav = Nav::Logs;
+        for i in 0..300 {
+            app.log_buffer.push_line(&format!("line {i}"));
+        }
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        app.scroll_logs(-10_000);
+        let log_before = app.log_scroll;
+        app.mouse_pos = Some((10, 8));
+        app.hover_scroll(1);
+        assert!(app.log_scroll > log_before, "plain content wheel should still scroll the view");
+
+        app.nav_target = 0;
+        app.nav_scroll = 0;
+        app.open_nav(Nav::Logs);
+        assert!(
+            app.nav_target > 0,
+            "keyboard navigation should scroll the sidebar back to the selection"
+        );
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn instances_wheel_scrolls_grid_to_reach_cards() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        for (name, version) in [
+            ("A1", "1.21.1"),
+            ("A2", "1.21.1"),
+            ("B1", "1.20.6"),
+            ("B2", "1.20.6"),
+            ("C1", "1.19.4"),
+            ("C2", "1.19.4"),
+        ] {
+            app.instance_manager
+                .create(name, version, LoaderType::Fabric, Some("0.15.7".into()))
+                .await
+                .unwrap();
+        }
+        app.reload_instances();
+        app.select_instance(0);
+
+        let mut terminal = Terminal::new(TestBackend::new(88, 24)).unwrap();
+        app.nav = Nav::Instances;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        assert!(app.tile_max > 0, "grid must overflow the viewport");
+        let text = buffer_text(&terminal);
+        assert!(text.contains("1.21.1"), "first row of cards must render");
+        assert!(text.contains("B1"), "a clipped card must still render");
+        assert!(
+            !text.contains("1.19.4"),
+            "the last row of cards must stay below the fold"
+        );
+
+        app.mouse_pos = Some((10, 8));
+        let target_before = app.tile_target;
+        let scroll_before = app.tile_scroll;
+        app.hover_scroll(1);
+        assert!(
+            app.tile_target > target_before,
+            "wheel over the grid should scroll it"
+        );
+        assert_eq!(
+            app.tile_scroll, scroll_before,
+            "scroll must animate instead of jumping"
+        );
+        assert_eq!(
+            app.instance_state.selected(),
+            Some(0),
+            "the wheel must not move the selection"
+        );
+
+        app.on_tick();
+        assert!(
+            app.tile_scroll > scroll_before,
+            "grid scroll should advance one tick at a time"
+        );
+
+        for _ in 0..40 {
+            app.hover_scroll(1);
+        }
+        for _ in 0..100 {
+            if app.tile_scroll == app.tile_max {
+                break;
+            }
+            app.on_tick();
+        }
+        assert_eq!(app.tile_scroll, app.tile_max, "animation must settle");
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(
+            buffer_text(&terminal).contains("1.19.4"),
+            "scrolling must reveal the last row of cards"
+        );
+
+        app.tile_scroll = 0;
+        app.tile_target = 0;
+        app.select_instance(2);
+        assert!(
+            app.tile_target > 0,
+            "selecting a hidden card must scroll it into view"
+        );
 
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);
     }

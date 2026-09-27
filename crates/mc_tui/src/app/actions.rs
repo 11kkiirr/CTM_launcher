@@ -89,6 +89,7 @@ pub(crate) fn reload_instances(&mut self) {
     } else if self.instance_state.selected().is_none() {
         self.instance_state.select(Some(0));
     }
+    self.ensure_tile_visible();
 }
 
 pub(crate) fn open_create_instance_form(&mut self) {
@@ -386,6 +387,7 @@ pub(crate) fn toggle_group_collapsed(&mut self, name: &str) {
     if !self.collapsed_groups.remove(name) {
         self.collapsed_groups.insert(name.to_string());
     }
+    self.ensure_tile_visible();
 }
 
 /// Collapse/expand the panel that owns the current selection (or the

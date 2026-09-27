@@ -113,144 +113,189 @@ pub(crate) fn jump(state: &mut ListState, len: usize, to_end: bool) {
     }
 }
 
+fn begin_action_row(app: &mut App, x: u16, y: u16, right: u16, widths: &[u16]) -> (u16, Rect) {
+    let mut content_w = 0u16;
+    for w in widths {
+        content_w = content_w.saturating_add(w.saturating_add(1));
+    }
+    let viewport = Rect {
+        x,
+        y,
+        width: right.saturating_sub(x),
+        height: 1,
+    };
+    let max_scroll = content_w.saturating_sub(viewport.width);
+    app.toolbar_max = max_scroll;
+    app.toolbar_area = viewport;
+    app.toolbar_scroll = app.toolbar_scroll.min(max_scroll);
+    if app.toolbar_target > max_scroll {
+        app.toolbar_target = max_scroll;
+    }
+    (app.toolbar_scroll, viewport)
+}
+
+fn action_cell(viewport: Rect, virtual_x: u16, width: u16, scroll: u16) -> Option<(Rect, u16)> {
+    let start = viewport.x as i32 + virtual_x as i32 - scroll as i32;
+    let vis_start = start.max(viewport.x as i32);
+    let vis_end = (start + width as i32).min(viewport.right() as i32);
+    if vis_start >= vis_end {
+        return None;
+    }
+    let skip = if start < viewport.x as i32 {
+        (viewport.x as i32 - start) as u16
+    } else {
+        0
+    };
+    let rect = Rect {
+        x: vis_start as u16,
+        y: viewport.y,
+        width: (vis_end - vis_start) as u16,
+        height: 1,
+    };
+    Some((rect, skip))
+}
+
+fn row_widths<'a>(items: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<u16> {
+    items
+        .map(|(label, key)| label.chars().count() as u16 + key.chars().count() as u16 + 4)
+        .collect()
+}
+
 /// Render a horizontal row of clickable action buttons and register their
 /// hitboxes. Flat text chips on a dark background, matching pill_row style.
+/// Scrolls horizontally while the mouse hovers over the row.
 pub(crate) fn buttons_row(
     app: &mut App,
     frame: &mut Frame,
-    mut x: u16,
+    x: u16,
     y: u16,
     max_width: u16,
     buttons: &[(&str, &str, ButtonId)],
 ) {
-    for (label, key, id) in buttons {
-        let width = label.chars().count() as u16 + key.chars().count() as u16 + 4;
-        if x + width > max_width {
-            break;
+    let widths = row_widths(buttons.iter().map(|(l, k, _)| (*l, *k)));
+    let (scroll, viewport) = begin_action_row(app, x, y, max_width, &widths);
+    let mut vx = 0u16;
+    for (i, (label, key, id)) in buttons.iter().enumerate() {
+        if let Some((rect, skip)) = action_cell(viewport, vx, widths[i], scroll) {
+            let hovered = app.is_hovered(rect);
+            let bg = if hovered {
+                app.theme.selection_bg
+            } else {
+                app.theme.panel_alt
+            };
+            let label_style = if hovered {
+                app.theme.accent_bright()
+            } else {
+                Style::default().fg(app.theme.fg)
+            };
+            let line = Line::from(vec![
+                Span::styled(format!(" {label}  "), label_style),
+                Span::styled(key.to_string(), app.theme.accent()),
+                Span::styled(" ", app.theme.comment_style()),
+            ]);
+            frame.render_widget(
+                Paragraph::new(line).style(Style::default().bg(bg)).scroll((0, skip)),
+                rect,
+            );
+            app.hitboxes.push(crate::app::Hitbox {
+                rect,
+                action: HitAction::Button(*id),
+            });
         }
-        let rect = Rect {
-            x,
-            y,
-            width,
-            height: 1,
-        };
-        let hovered = app.is_hovered(rect);
-        let bg = if hovered {
-            app.theme.selection_bg
-        } else {
-            app.theme.panel_alt
-        };
-        let label_style = if hovered {
-            app.theme.accent_bright()
-        } else {
-            Style::default().fg(app.theme.fg)
-        };
-        let line = Line::from(vec![
-            Span::styled(format!(" {label}  "), label_style),
-            Span::styled(key.to_string(), app.theme.accent()),
-            Span::styled(" ", app.theme.comment_style()),
-        ]);
-        frame.render_widget(Paragraph::new(line).style(Style::default().bg(bg)), rect);
-        app.hitboxes.push(crate::app::Hitbox {
-            rect,
-            action: HitAction::Button(*id),
-        });
-        x += width + 1;
+        vx = vx.saturating_add(widths[i] + 1);
     }
 }
 
 /// Render a row of tabs. The active tab is bright green, the rest muted.
+/// Scrolls horizontally while the mouse hovers over the row.
 pub(crate) fn tab_row(
     app: &mut App,
     frame: &mut Frame,
-    mut x: u16,
+    x: u16,
     y: u16,
     max_width: u16,
     tabs: &[(&str, &str, ButtonId, bool)],
 ) {
-    for (label, key, id, active) in tabs {
-        let width = label.chars().count() as u16 + key.chars().count() as u16 + 4;
-        if x + width > max_width {
-            break;
+    let widths = row_widths(tabs.iter().map(|(l, k, _, _)| (*l, *k)));
+    let (scroll, viewport) = begin_action_row(app, x, y, max_width, &widths);
+    let mut vx = 0u16;
+    for (i, (label, key, id, active)) in tabs.iter().enumerate() {
+        if let Some((rect, skip)) = action_cell(viewport, vx, widths[i], scroll) {
+            let hovered = app.is_hovered(rect);
+            let bg = if hovered {
+                app.theme.selection_bg
+            } else {
+                app.theme.panel_alt
+            };
+            let label_style = if *active {
+                app.theme.accent_bright()
+            } else if hovered {
+                app.theme.accent()
+            } else {
+                Style::default().fg(app.theme.muted)
+            };
+            let line = Line::from(vec![
+                Span::styled(format!(" {label}  "), label_style),
+                Span::styled(key.to_string(), app.theme.accent()),
+                Span::styled(" ", app.theme.comment_style()),
+            ]);
+            frame.render_widget(
+                Paragraph::new(line).style(Style::default().bg(bg)).scroll((0, skip)),
+                rect,
+            );
+            app.hitboxes.push(crate::app::Hitbox {
+                rect,
+                action: HitAction::Button(*id),
+            });
         }
-        let rect = Rect {
-            x,
-            y,
-            width,
-            height: 1,
-        };
-        let hovered = app.is_hovered(rect);
-        let bg = if hovered {
-            app.theme.selection_bg
-        } else {
-            app.theme.panel_alt
-        };
-        let label_style = if *active {
-            app.theme.accent_bright()
-        } else if hovered {
-            app.theme.accent()
-        } else {
-            Style::default().fg(app.theme.muted)
-        };
-        let line = Line::from(vec![
-            Span::styled(format!(" {label}  "), label_style),
-            Span::styled(key.to_string(), app.theme.accent()),
-            Span::styled(" ", app.theme.comment_style()),
-        ]);
-        frame.render_widget(Paragraph::new(line).style(Style::default().bg(bg)), rect);
-        app.hitboxes.push(crate::app::Hitbox {
-            rect,
-            action: HitAction::Button(*id),
-        });
-        x += width + 1;
+        vx = vx.saturating_add(widths[i] + 1);
     }
 }
 
 /// Render a horizontal row of keybinding "pills", e.g. `Launch  Enter`.
 /// Bracket-free flat blocks on a dark background.
 ///
-/// Used for the modernized top action toolbar.
+/// Used for the modernized top action toolbar. Scrolls horizontally while the
+/// mouse hovers over the row.
 pub(crate) fn pill_row(
     app: &mut App,
     frame: &mut Frame,
-    mut x: u16,
+    x: u16,
     y: u16,
     max_width: u16,
     pills: &[(&str, &str, ButtonId)],
 ) {
-    for (label, key, id) in pills {
-        let width = label.chars().count() as u16 + key.chars().count() as u16 + 4;
-        if x + width > max_width {
-            break;
+    let widths = row_widths(pills.iter().map(|(l, k, _)| (*l, *k)));
+    let (scroll, viewport) = begin_action_row(app, x, y, max_width, &widths);
+    let mut vx = 0u16;
+    for (i, (label, key, id)) in pills.iter().enumerate() {
+        if let Some((rect, skip)) = action_cell(viewport, vx, widths[i], scroll) {
+            let hovered = app.is_hovered(rect);
+            let bg = if hovered {
+                app.theme.selection_bg
+            } else {
+                app.theme.panel_alt
+            };
+            let label_style = if hovered {
+                app.theme.accent_bright()
+            } else {
+                Style::default().fg(app.theme.fg)
+            };
+            let line = Line::from(vec![
+                Span::styled(format!(" {label}  "), label_style),
+                Span::styled(key.to_string(), app.theme.accent()),
+                Span::styled(" ", app.theme.comment_style()),
+            ]);
+            frame.render_widget(
+                Paragraph::new(line).style(Style::default().bg(bg)).scroll((0, skip)),
+                rect,
+            );
+            app.hitboxes.push(crate::app::Hitbox {
+                rect,
+                action: HitAction::Button(*id),
+            });
         }
-        let rect = Rect {
-            x,
-            y,
-            width,
-            height: 1,
-        };
-        let hovered = app.is_hovered(rect);
-        let bg = if hovered {
-            app.theme.selection_bg
-        } else {
-            app.theme.panel_alt
-        };
-        let label_style = if hovered {
-            app.theme.accent_bright()
-        } else {
-            Style::default().fg(app.theme.fg)
-        };
-        let line = Line::from(vec![
-            Span::styled(format!(" {label}  "), label_style),
-            Span::styled(key.to_string(), app.theme.accent()),
-            Span::styled(" ", app.theme.comment_style()),
-        ]);
-        frame.render_widget(Paragraph::new(line).style(Style::default().bg(bg)), rect);
-        app.hitboxes.push(crate::app::Hitbox {
-            rect,
-            action: HitAction::Button(*id),
-        });
-        x += width + 1;
+        vx = vx.saturating_add(widths[i] + 1);
     }
 }
 
