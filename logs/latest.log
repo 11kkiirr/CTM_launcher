@@ -1,0 +1,22 @@
+[14:19:31] [main/INFO]: Loading Minecraft 1.21.1 with Fabric Loader 0.16.14
+[14:19:31] [main/INFO]: Loading 4 mods:
+	- fabricloader 0.16.14
+	   \-- mixinextras 0.4.1
+	- java 21
+	- minecraft 1.21.1
+[14:19:31] [main/INFO]: SpongePowered MIXIN Subsystem Version=0.8.7 Source=file:/tmp/opencode/fabrepro/libs/sponge-mixin-0.15.5+mixin.0.8.7.jar Service=Knot/Fabric Env=CLIENT
+[14:19:31] [main/ERROR]: Minecraft has crashed!
+net.fabricmc.loader.impl.FormattedException: joptsimple.OptionMissingRequiredArgumentException: Option version requires an argument
+	at net.fabricmc.loader.impl.FormattedException.ofLocalized(FormattedException.java:63) ~[fabric-loader-0.16.14.jar:?]
+	at net.fabricmc.loader.impl.game.minecraft.MinecraftGameProvider.launch(MinecraftGameProvider.java:482) ~[fabric-loader-0.16.14.jar:?]
+	at net.fabricmc.loader.impl.launch.knot.Knot.launch(Knot.java:74) [fabric-loader-0.16.14.jar:?]
+	at net.fabricmc.loader.impl.launch.knot.KnotClient.main(KnotClient.java:23) [fabric-loader-0.16.14.jar:?]
+Caused by: joptsimple.OptionMissingRequiredArgumentException: Option version requires an argument
+	at knot/joptsimple.RequiredArgumentOptionSpec.detectOptionArgument(RequiredArgumentOptionSpec.java:48) ~[vanilla_jopt-simple-5.0.4.jar:?]
+	at knot/joptsimple.ArgumentAcceptingOptionSpec.handleOption(ArgumentAcceptingOptionSpec.java:257) ~[vanilla_jopt-simple-5.0.4.jar:?]
+	at knot/joptsimple.OptionParser.handleLongOptionToken(OptionParser.java:513) ~[vanilla_jopt-simple-5.0.4.jar:?]
+	at knot/joptsimple.OptionParserState$2.handleArgument(OptionParserState.java:56) ~[vanilla_jopt-simple-5.0.4.jar:?]
+	at knot/joptsimple.OptionParser.parse(OptionParser.java:396) ~[vanilla_jopt-simple-5.0.4.jar:?]
+	at knot/net.minecraft.client.main.Main.main(Main.java:100) ~[client.jar:?]
+	at net.fabricmc.loader.impl.game.minecraft.MinecraftGameProvider.launch(MinecraftGameProvider.java:480) ~[fabric-loader-0.16.14.jar:?]
+	... 2 more

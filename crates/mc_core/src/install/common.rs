@@ -202,14 +202,15 @@ pub async fn resolve_version(paths: &Paths, id: &str) -> Result<VersionDetails> 
     }
 
     // Mojang omits `downloads.client.path` for newer versions.  After merge
-    // the id is the loader id (e.g. fabric-loader-0.19.5-26.3) but the jar
-    // lives under the root parent's directory (26.3/26.3.jar).  Infer the
-    // path when it is missing — but only for vanilla, because NeoForge's
-    // bootstrap launcher replaces the client jar with its own SRG-mapped
-    // production jar.  Putting the vanilla jar on the classpath alongside
-    // the SRG jar causes a module conflict (both export the same packages).
+    // the id is the loader id (e.g. fabric-loader-0.16.14-1.21.1) but the jar
+    // lives under the root parent's directory (1.21.1/1.21.1.jar).  Infer the
+    // path when it is missing — but only for launchers that run the vanilla
+    // client jar directly (vanilla, Fabric/Quilt Knot).  NeoForge's bootstrap
+    // launcher replaces the client jar with its own SRG-mapped production
+    // jar.  Putting the vanilla jar on the classpath alongside the SRG jar
+    // causes a module conflict (both export the same packages).
     if let Some(ref mut client) = merged.downloads.client {
-        if client.path.is_none() && merged.main_class == "net.minecraft.client.main.Main" {
+        if client.path.is_none() && needs_vanilla_client_jar(&merged.main_class) {
             if let Some(ref root) = root_id {
                 client.path = Some(format!("{root}/{root}.jar"));
             }
@@ -217,6 +218,16 @@ pub async fn resolve_version(paths: &Paths, id: &str) -> Result<VersionDetails> 
     }
 
     Ok(merged)
+}
+
+/// Whether the version's main class runs the vanilla client jar directly, so
+/// the jar must be present on the classpath. Fabric and Quilt launch through
+/// Knot but still need the vanilla jar — without it Knot aborts with
+/// "couldn't locate the game".
+pub(crate) fn needs_vanilla_client_jar(main_class: &str) -> bool {
+    main_class == "net.minecraft.client.main.Main"
+        || main_class == "net.fabricmc.loader.impl.launch.knot.KnotClient"
+        || main_class == "org.quiltmc.loader.impl.launch.knot.KnotClient"
 }
 
 /// Remove duplicate libraries by coordinate (ignoring version), keeping the
@@ -324,6 +335,7 @@ pub fn require_exists(path: &Path, what: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::Paths;
 
     fn lib(name: &str) -> Library {
         Library {
@@ -358,5 +370,117 @@ mod tests {
         ];
         dedup_libraries(&mut libraries);
         assert_eq!(libraries.len(), 2);
+    }
+
+    fn test_paths(tag: &str) -> (Paths, PathBuf) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("ctm-fabric-{tag}-{nanos}"));
+        let paths = Paths::rooted_at(&dir);
+        (paths, dir)
+    }
+
+    fn write_version(paths: &Paths, id: &str, json: &str) {
+        let dir = paths.versions_dir().join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{id}.json")), json).unwrap();
+    }
+
+    const VANILLA_JSON: &str = r#"{
+        "id": "1.21.1",
+        "type": "release",
+        "mainClass": "net.minecraft.client.main.Main",
+        "downloads": {"client": {"sha1": "", "size": 0, "url": "https://example.com/client.jar"}},
+        "libraries": []
+    }"#;
+
+    fn loader_json(id: &str, main_class: &str) -> String {
+        format!(
+            r#"{{"id": "{id}", "inheritsFrom": "1.21.1", "type": "release",
+                "mainClass": "{main_class}", "libraries": []}}"#
+        )
+    }
+
+    #[tokio::test]
+    async fn fabric_resolve_infers_client_jar_path() {
+        let (paths, dir) = test_paths("resolve");
+        write_version(&paths, "1.21.1", VANILLA_JSON);
+        let id = "fabric-loader-0.16.14-1.21.1";
+        write_version(
+            &paths,
+            id,
+            &loader_json(id, "net.fabricmc.loader.impl.launch.knot.KnotClient"),
+        );
+
+        let resolved = resolve_version(&paths, id).await.unwrap();
+        assert_eq!(
+            resolved.downloads.client.as_ref().and_then(|c| c.path.clone()),
+            Some("1.21.1/1.21.1.jar".to_string())
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn quilt_resolve_infers_client_jar_path() {
+        let (paths, dir) = test_paths("quilt");
+        write_version(&paths, "1.21.1", VANILLA_JSON);
+        let id = "quilt-loader-0.28.1-1.21.1";
+        write_version(
+            &paths,
+            id,
+            &loader_json(id, "org.quiltmc.loader.impl.launch.knot.KnotClient"),
+        );
+
+        let resolved = resolve_version(&paths, id).await.unwrap();
+        assert_eq!(
+            resolved.downloads.client.as_ref().and_then(|c| c.path.clone()),
+            Some("1.21.1/1.21.1.jar".to_string())
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_launcher_skips_client_jar_inference() {
+        let (paths, dir) = test_paths("bootstrap");
+        write_version(&paths, "1.21.1", VANILLA_JSON);
+        let id = "neoforge-21.1.248";
+        write_version(
+            &paths,
+            id,
+            &loader_json(id, "cpw.mods.bootstraplauncher.BootstrapLauncher"),
+        );
+
+        let resolved = resolve_version(&paths, id).await.unwrap();
+        assert_eq!(
+            resolved.downloads.client.as_ref().and_then(|c| c.path.clone()),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn fabric_client_jar_lands_on_classpath() {
+        let (paths, dir) = test_paths("classpath");
+        write_version(&paths, "1.21.1", VANILLA_JSON);
+        let id = "fabric-loader-0.16.14-1.21.1";
+        write_version(
+            &paths,
+            id,
+            &loader_json(id, "net.fabricmc.loader.impl.launch.knot.KnotClient"),
+        );
+        let jar = paths.versions_dir().join("1.21.1").join("1.21.1.jar");
+        std::fs::write(&jar, b"fake-client").unwrap();
+
+        let resolved = resolve_version(&paths, id).await.unwrap();
+        let rule_ctx = RuleContext::current();
+        let cp = crate::launch::arguments::classpath(&paths, &resolved, &rule_ctx);
+        assert!(cp.contains(&jar), "client jar missing from classpath: {cp:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

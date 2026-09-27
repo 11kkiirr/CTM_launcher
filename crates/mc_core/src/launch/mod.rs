@@ -102,6 +102,25 @@ impl Launcher {
                 .await?;
 
         let classpath = arguments::classpath(&self.paths, &version, &rule_ctx);
+        if install_common::needs_vanilla_client_jar(&version.main_class) {
+            let jar = arguments::client_jar_path(&self.paths, &version).ok_or_else(|| {
+                CoreError::Launch(format!(
+                    "client jar for '{}' not found on disk; reinstall the instance",
+                    version.id
+                ))
+            })?;
+            if let Some(client) = &version.downloads.client {
+                if !client.sha1.is_empty() {
+                    let actual = crate::util::sha1_file(&jar).await?;
+                    if actual != client.sha1.to_ascii_lowercase() {
+                        return Err(CoreError::Launch(format!(
+                            "client jar for '{}' is corrupted (hash mismatch); reinstall the instance",
+                            version.id
+                        )));
+                    }
+                }
+            }
+        }
         let game_dir = instance.game_dir();
         ensure_dir(&game_dir).await?;
 
