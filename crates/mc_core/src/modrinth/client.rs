@@ -1,7 +1,7 @@
 //! Modrinth API v2 HTTP client.
 
 use crate::error::{CoreError, Result};
-use crate::modrinth::models::{Project, SearchResults, Version};
+use crate::modrinth::models::{Member, Project, SearchResults, Version};
 
 /// Default Modrinth API base URL.
 pub const API_BASE: &str = "https://api.modrinth.com/v2";
@@ -145,6 +145,17 @@ impl ModrinthClient {
             .client
             .get(format!("{}/project/{project_id}/version", self.base))
             .query(&params)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json().await?)
+    }
+
+    /// Fetch the team members of a project.
+    pub async fn members(&self, project_id: &str) -> Result<Vec<Member>> {
+        let response = self
+            .client
+            .get(format!("{}/project/{project_id}/members", self.base))
             .send()
             .await?
             .error_for_status()?;

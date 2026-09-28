@@ -12,9 +12,11 @@ use crate::util::{download_file, sha1_file, ProgressCallback};
 
 pub use client::ModrinthClient;
 pub use models::{
-    Dependency, DependencyType, GalleryImage, InstalledMod, Project, SearchHit, SearchResults,
-    Version, VersionFile,
+    Dependency, DependencyType, GalleryImage, InstalledMod, Member, MemberUser, Project,
+    SearchHit, SearchResults, Version, VersionFile,
 };
+
+pub use models::compact_game_versions;
 
 /// Suffix appended to disabled mod files.
 pub const DISABLED_SUFFIX: &str = ".disabled";

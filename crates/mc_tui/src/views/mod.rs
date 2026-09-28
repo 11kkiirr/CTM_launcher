@@ -113,7 +113,7 @@ pub(crate) fn jump(state: &mut ListState, len: usize, to_end: bool) {
     }
 }
 
-fn begin_action_row(app: &mut App, x: u16, y: u16, right: u16, widths: &[u16]) -> (u16, Rect) {
+pub(crate) fn begin_action_row(app: &mut App, x: u16, y: u16, right: u16, widths: &[u16]) -> (u16, Rect) {
     let mut content_w = 0u16;
     for w in widths {
         content_w = content_w.saturating_add(w.saturating_add(1));
@@ -134,7 +134,7 @@ fn begin_action_row(app: &mut App, x: u16, y: u16, right: u16, widths: &[u16]) -
     (app.toolbar_scroll, viewport)
 }
 
-fn action_cell(viewport: Rect, virtual_x: u16, width: u16, scroll: u16) -> Option<(Rect, u16)> {
+pub(crate) fn action_cell(viewport: Rect, virtual_x: u16, width: u16, scroll: u16) -> Option<(Rect, u16)> {
     let start = viewport.x as i32 + virtual_x as i32 - scroll as i32;
     let vis_start = start.max(viewport.x as i32);
     let vis_end = (start + width as i32).min(viewport.right() as i32);
@@ -155,7 +155,7 @@ fn action_cell(viewport: Rect, virtual_x: u16, width: u16, scroll: u16) -> Optio
     Some((rect, skip))
 }
 
-fn row_widths<'a>(items: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<u16> {
+pub(crate) fn row_widths<'a>(items: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<u16> {
     items
         .map(|(label, key)| label.chars().count() as u16 + key.chars().count() as u16 + 4)
         .collect()
@@ -166,7 +166,7 @@ fn row_widths<'a>(items: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<u16> {
 const PILL_H: u16 = 3;
 
 /// Draw one 3-row toolbar pill (cap / label / toe) and register its hitbox.
-fn pill_cell(
+pub(crate) fn pill_cell(
     app: &mut App,
     frame: &mut Frame,
     rect: Rect,

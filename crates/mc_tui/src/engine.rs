@@ -4,7 +4,7 @@ use mc_core::auth::{Account, DeviceCodePrompt};
 use mc_core::import::ExternalInstance;
 use mc_core::launch::{JavaInstallation, LogReceiver, ProcessHandle};
 use mc_core::logs::CrashAnalysis;
-use mc_core::modrinth::{InstalledMod, Project, SearchResults, Version};
+use mc_core::modrinth::{InstalledMod, Member, Project, SearchResults, Version};
 use mc_core::util::Progress;
 
 /// An event produced by an asynchronous engine task.
@@ -43,6 +43,7 @@ pub enum EngineEvent {
     BrowseProject {
         project: Box<Project>,
         versions: Vec<Version>,
+        members: Vec<Member>,
     },
     /// A fetched browser image (icon / gallery preview). The raw bytes are
     /// kept so terminals with image support can display the original file.

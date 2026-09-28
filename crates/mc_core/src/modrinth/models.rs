@@ -109,6 +109,83 @@ pub struct Project {
     pub gallery: Vec<GalleryImage>,
 }
 
+/// A team member of a project (`/project/{id}/members`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Member {
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub user: MemberUser,
+}
+
+/// The user behind a team membership.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemberUser {
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+}
+
+/// Compact a Modrinth `game_versions` list for display: snapshots and
+/// pre-releases are dropped, bare `1.21` becomes `1.21.x`, and consecutive
+/// patches collapse into ranges (`1.21.4-1.21.8`).
+pub fn compact_game_versions(versions: &[String]) -> Vec<String> {
+    let mut parsed: Vec<(u64, u64, Option<u64>)> = Vec::new();
+    for v in versions {
+        let parts: Vec<&str> = v.split('.').collect();
+        let nums: Option<Vec<u64>> = parts.iter().map(|p| p.parse().ok()).collect();
+        let Some(nums) = nums else { continue };
+        match nums.as_slice() {
+            [major, minor] => parsed.push((*major, *minor, None)),
+            [major, minor, patch] => parsed.push((*major, *minor, Some(*patch))),
+            _ => continue,
+        }
+    }
+    parsed.sort();
+    parsed.dedup();
+
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < parsed.len() {
+        let (major, minor, _) = parsed[i];
+        let mut j = i;
+        while j < parsed.len() && parsed[j].0 == major && parsed[j].1 == minor {
+            j += 1;
+        }
+        let group = &parsed[i..j];
+        if group.iter().any(|(_, _, p)| p.is_none()) {
+            out.push(format!("{major}.{minor}.x"));
+        } else {
+            let mut patches: Vec<u64> = group.iter().map(|(_, _, p)| p.unwrap_or(0)).collect();
+            patches.sort();
+            patches.dedup();
+            let mut start = patches[0];
+            let mut prev = patches[0];
+            for &p in &patches[1..] {
+                if p == prev + 1 {
+                    prev = p;
+                } else {
+                    push_patch_run(&mut out, major, minor, start, prev);
+                    start = p;
+                    prev = p;
+                }
+            }
+            push_patch_run(&mut out, major, minor, start, prev);
+        }
+        i = j;
+    }
+    out
+}
+
+fn push_patch_run(out: &mut Vec<String>, major: u64, minor: u64, start: u64, end: u64) {
+    if start == end {
+        out.push(format!("{major}.{minor}.{start}"));
+    } else {
+        out.push(format!("{major}.{minor}.{start}-{major}.{minor}.{end}"));
+    }
+}
+
 /// A screenshot/preview attached to a project.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GalleryImage {
@@ -242,4 +319,50 @@ pub struct InstalledMod {
     pub mod_id: String,
     /// File modification time used as install/update date (YYYY-MM-DD HH:MM).
     pub install_date: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn versions(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn compacts_consecutive_patches_into_ranges() {
+        assert_eq!(
+            compact_game_versions(&versions(&["1.21.4", "1.21.8", "1.21.5", "1.21.6", "1.21.7"])),
+            vec!["1.21.4-1.21.8"]
+        );
+        assert_eq!(
+            compact_game_versions(&versions(&["1.20.1", "1.20.4", "1.20.6", "1.20.5"])),
+            vec!["1.20.1", "1.20.4-1.20.6"]
+        );
+    }
+
+    #[test]
+    fn drops_snapshots_and_prereleases() {
+        assert_eq!(
+            compact_game_versions(&versions(&["24w14a", "1.20.1", "1.21.1", "1.20.1-rc1", "3D Shareware v1.34"])),
+            vec!["1.20.1", "1.21.1"]
+        );
+    }
+
+    #[test]
+    fn bare_minor_becomes_x() {
+        assert_eq!(
+            compact_game_versions(&versions(&["1.21", "1.21.4"])),
+            vec!["1.21.x"]
+        );
+    }
+
+    #[test]
+    fn parses_members() {
+        let raw = r#"[{"role":"Owner","user":{"username":"jellysquid3","avatar_url":"https://cdn.modrinth.com/u.png"}}]"#;
+        let members: Vec<Member> = serde_json::from_str(raw).unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].role, "Owner");
+        assert_eq!(members[0].user.username, "jellysquid3");
+    }
 }

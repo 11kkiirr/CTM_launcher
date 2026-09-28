@@ -330,6 +330,9 @@ impl App {
             HitAction::Button(button) => self.dispatch_button(button),
             HitAction::BrowseResult(idx) => self.browse_select_result(idx),
             HitAction::BrowseVersion(idx) => self.browse_select_version(idx),
+            HitAction::BrowseDetailTab(idx) => self.browse_select_tab(idx),
+            HitAction::BrowseGallery(idx) => self.browse_select_gallery(idx),
+            HitAction::BrowseLink(idx) => self.open_project_link(idx),
             HitAction::BrowseInstall => self.browse_install(),
             HitAction::BrowseQuickInstall(idx) => self.browse_quick_install(idx),
             HitAction::BrowseSearchBar => {
@@ -350,6 +353,10 @@ impl App {
                 }
             }
             HitAction::Overlay(action) => self.dispatch_overlay_action(action),
+            HitAction::Crumb(crumb) => match crumb {
+                crate::app::Crumb::Page(nav) => self.open_nav(nav),
+                crate::app::Crumb::BrowseList => self.browse_close_detail(),
+            },
         }
     }
 

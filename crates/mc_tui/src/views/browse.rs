@@ -9,9 +9,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent};
-use mc_core::modrinth::{Project, SearchHit, Version};
+use mc_core::modrinth::{Member, Project, SearchHit, Version};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
@@ -19,7 +19,9 @@ use ratatui_image::{Resize, StatefulImage};
 
 use crate::app::{App, HitAction};
 use crate::md::render_md;
-use crate::views::truncate;
+use crate::views::{
+    action_cell, begin_action_row, pill_cell, row_widths, truncate,
+};
 
 /// The content category the browser covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -79,6 +81,36 @@ impl BrowseKind {
             BrowseKind::Shaders => &[
                 "performance", "realistic", "fantasy", "vanilla", "toon",
             ],
+        }
+    }
+}
+
+/// Tabs of the project detail page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DetailTab {
+    #[default]
+    Description,
+    Gallery,
+    Changelog,
+    Versions,
+}
+
+impl DetailTab {
+    pub fn all() -> [DetailTab; 4] {
+        [
+            DetailTab::Description,
+            DetailTab::Gallery,
+            DetailTab::Changelog,
+            DetailTab::Versions,
+        ]
+    }
+
+    pub fn label_key(self) -> &'static str {
+        match self {
+            DetailTab::Description => "browse.tab_description",
+            DetailTab::Gallery => "browse.tab_gallery",
+            DetailTab::Changelog => "browse.tab_changelog",
+            DetailTab::Versions => "browse.versions",
         }
     }
 }
@@ -174,6 +206,7 @@ pub struct BrowseCache {
     pub total: u32,
     pub loading: bool,
     pub detail: Option<Project>,
+    pub members: Vec<Member>,
     pub versions: Vec<Version>,
     pub version_selected: usize,
     pub focus: BrowseFocus,
@@ -183,6 +216,14 @@ pub struct BrowseCache {
     pub body_scroll: usize,
     pub body_visible: usize,
     pub image_requested: HashSet<String>,
+    pub detail_tab: DetailTab,
+    pub gallery_selected: usize,
+    pub gallery_scroll: usize,
+    pub gallery_cols: usize,
+    pub changelog_scroll: usize,
+    pub changelog_visible: usize,
+    pub link_hover: Option<usize>,
+    pub link_marquee: u64,
     pub filter_compat: bool,
     pub filter_side: SideFilter,
     pub filter_categories: Vec<String>,
@@ -202,6 +243,7 @@ impl Default for BrowseCache {
             total: 0,
             loading: false,
             detail: None,
+            members: Vec::new(),
             versions: Vec::new(),
             version_selected: 0,
             focus: BrowseFocus::List,
@@ -211,6 +253,14 @@ impl Default for BrowseCache {
             body_scroll: 0,
             body_visible: 0,
             image_requested: HashSet::new(),
+            detail_tab: DetailTab::Description,
+            gallery_selected: 0,
+            gallery_scroll: 0,
+            gallery_cols: 1,
+            changelog_scroll: 0,
+            changelog_visible: 0,
+            link_hover: None,
+            link_marquee: 0,
             filter_compat: true,
             filter_side: SideFilter::All,
             filter_categories: Vec::new(),
@@ -237,6 +287,7 @@ pub struct Browse {
     pub total: u32,
     pub loading: bool,
     pub detail: Option<Project>,
+    pub members: Vec<Member>,
     pub versions: Vec<Version>,
     pub version_selected: usize,
     pub focus: BrowseFocus,
@@ -246,6 +297,14 @@ pub struct Browse {
     pub body_scroll: usize,
     pub body_visible: usize,
     pub image_requested: HashSet<String>,
+    pub detail_tab: DetailTab,
+    pub gallery_selected: usize,
+    pub gallery_scroll: usize,
+    pub gallery_cols: usize,
+    pub changelog_scroll: usize,
+    pub changelog_visible: usize,
+    pub link_hover: Option<usize>,
+    pub link_marquee: u64,
     pub filter_compat: bool,
     pub filter_side: SideFilter,
     pub filter_categories: Vec<String>,
@@ -267,6 +326,7 @@ impl Default for Browse {
             total: 0,
             loading: false,
             detail: None,
+            members: Vec::new(),
             versions: Vec::new(),
             version_selected: 0,
             focus: BrowseFocus::List,
@@ -276,6 +336,14 @@ impl Default for Browse {
             body_scroll: 0,
             body_visible: 0,
             image_requested: HashSet::new(),
+            detail_tab: DetailTab::Description,
+            gallery_selected: 0,
+            gallery_scroll: 0,
+            gallery_cols: 1,
+            changelog_scroll: 0,
+            changelog_visible: 0,
+            link_hover: None,
+            link_marquee: 0,
             filter_compat: true,
             filter_side: SideFilter::All,
             filter_categories: Vec::new(),
@@ -298,6 +366,7 @@ impl Browse {
             total: self.total,
             loading: self.loading,
             detail: self.detail.clone(),
+            members: self.members.clone(),
             versions: self.versions.clone(),
             version_selected: self.version_selected,
             focus: self.focus,
@@ -307,6 +376,14 @@ impl Browse {
             body_scroll: self.body_scroll,
             body_visible: self.body_visible,
             image_requested: self.image_requested.clone(),
+            detail_tab: self.detail_tab,
+            gallery_selected: self.gallery_selected,
+            gallery_scroll: self.gallery_scroll,
+            gallery_cols: self.gallery_cols,
+            changelog_scroll: self.changelog_scroll,
+            changelog_visible: self.changelog_visible,
+            link_hover: self.link_hover,
+            link_marquee: self.link_marquee,
             filter_compat: self.filter_compat,
             filter_side: self.filter_side,
             filter_categories: self.filter_categories.clone(),
@@ -329,6 +406,7 @@ impl Browse {
             self.total = cache.total;
             self.loading = cache.loading;
             self.detail = cache.detail;
+            self.members = cache.members;
             self.versions = cache.versions;
             self.version_selected = cache.version_selected;
             self.focus = cache.focus;
@@ -338,6 +416,14 @@ impl Browse {
             self.body_scroll = cache.body_scroll;
             self.body_visible = cache.body_visible;
             self.image_requested = cache.image_requested;
+            self.detail_tab = cache.detail_tab;
+            self.gallery_selected = cache.gallery_selected;
+            self.gallery_scroll = cache.gallery_scroll;
+            self.gallery_cols = cache.gallery_cols;
+            self.changelog_scroll = cache.changelog_scroll;
+            self.changelog_visible = cache.changelog_visible;
+            self.link_hover = cache.link_hover;
+            self.link_marquee = cache.link_marquee;
             self.filter_compat = cache.filter_compat;
             self.filter_side = cache.filter_side;
             self.filter_categories = cache.filter_categories;
@@ -354,6 +440,7 @@ impl Browse {
             self.total = 0;
             self.loading = false;
             self.detail = None;
+            self.members = Vec::new();
             self.versions = Vec::new();
             self.version_selected = 0;
             self.focus = BrowseFocus::List;
@@ -363,6 +450,14 @@ impl Browse {
             self.body_scroll = 0;
             self.body_visible = 0;
             self.image_requested = HashSet::new();
+            self.detail_tab = DetailTab::Description;
+            self.gallery_selected = 0;
+            self.gallery_scroll = 0;
+            self.gallery_cols = 1;
+            self.changelog_scroll = 0;
+            self.changelog_visible = 0;
+            self.link_hover = None;
+            self.link_marquee = 0;
             self.filter_compat = matches!(kind, BrowseKind::Mods);
             self.filter_side = SideFilter::All;
             self.filter_categories = Vec::new();
@@ -378,6 +473,83 @@ impl Browse {
     pub fn in_detail(&self) -> bool {
         self.detail.is_some()
     }
+}
+
+fn format_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// Strip the URL scheme for compact display (`https://x` → `x`).
+fn short_url(url: &str) -> &str {
+    url.strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url)
+}
+
+/// Ping-pong marquee offset: pause at both ends, `step` advances the phase.
+fn marquee_offset(step: u64, max: usize) -> usize {
+    if max == 0 {
+        return 0;
+    }
+    const PAUSE: u64 = 12;
+    let max = max as u64;
+    let period = 2 * PAUSE + 2 * max;
+    match step % period {
+        t if t < PAUSE => 0,
+        t if t < PAUSE + max => (t - PAUSE) as usize,
+        t if t < 2 * PAUSE + max => max as usize,
+        t => (2 * PAUSE + 2 * max - t) as usize,
+    }
+}
+
+/// Wrap `items` into chip rows (` item ` on a raised background).
+fn chip_lines(
+    items: &[String],
+    width: usize,
+    bg: Color,
+    fg: impl Fn(&str) -> Color,
+) -> Vec<Line<'static>> {
+    if items.is_empty() || width == 0 {
+        return vec![Line::from(Span::styled(
+            "—",
+            Style::default().fg(fg("")),
+        ))];
+    }
+    let mut rows: Vec<Line> = Vec::new();
+    let mut current: Vec<Span> = Vec::new();
+    let mut used = 0usize;
+    for item in items {
+        let chip = format!(" {item} ");
+        let w = chip.chars().count() + 1;
+        if !current.is_empty() && used + w > width {
+            rows.push(Line::from(std::mem::take(&mut current)));
+            used = 0;
+        }
+        current.push(Span::styled(chip, Style::default().fg(fg(item)).bg(bg)));
+        current.push(Span::styled(" ", Style::default()));
+        used += w;
+    }
+    if !current.is_empty() {
+        rows.push(Line::from(current));
+    }
+    rows
+}
+
+/// Localized environment support value, or `None` when unknown.
+fn env_label(raw: &str, lang: crate::i18n::Lang) -> Option<String> {
+    let key = match raw {
+        "required" => "browse.env_required",
+        "optional" => "browse.env_optional",
+        "unsupported" => "browse.env_unsupported",
+        _ => return None,
+    };
+    Some(crate::i18n::tr_string(lang, key))
 }
 
 impl App {
@@ -1110,38 +1282,875 @@ impl App {
         let Some(project) = self.browse.detail.clone() else {
             return;
         };
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(5)])
-            .split(area);
-
-        self.render_browse_detail_header(frame, chunks[0], &project);
-
-        let left_w = (area.width as usize * 2 / 5).clamp(24, 38) as u16;
-        let columns = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(left_w), Constraint::Length(1), Constraint::Min(1)])
-            .split(chunks[1]);
-        self.render_browse_detail_left(frame, columns[0]);
-        self.render_browse_detail_body(frame, columns[2]);
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let area = Rect {
+            x: area.x + 2,
+            width: area.width.saturating_sub(2),
+            ..area
+        };
+        if area.width == 0 {
+            return;
+        }
+        if area.height > 0 {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "▀".repeat(area.width as usize),
+                    Style::default().fg(self.theme.bg).bg(self.theme.panel),
+                ))
+                .style(Style::default().bg(self.theme.panel)),
+                Rect { height: 1, ..area },
+            );
+        }
+        let area = Rect {
+            y: area.y + 1,
+            height: area.height.saturating_sub(1),
+            ..area
+        };
+        if area.height == 0 {
+            return;
+        }
+        let text_w = (area.width as usize).saturating_sub(9 + 1);
+        let summary_rows = if project.description.trim().is_empty() {
+            0
+        } else if project.description.chars().count() > text_w {
+            2
+        } else {
+            1
+        };
+        let header_h = (2 + summary_rows as u16).clamp(3, 4).min(area.height);
+        let rest = area.height.saturating_sub(header_h);
+        let tabs_h = 3u16.min(rest);
+        let header = Rect {
+            height: header_h,
+            ..area
+        };
+        let tabs = Rect {
+            y: header.y + header_h,
+            height: tabs_h,
+            ..area
+        };
+        let body = Rect {
+            y: tabs.y + tabs_h,
+            height: rest.saturating_sub(tabs_h),
+            ..area
+        };
+        self.render_detail_header(frame, header, &project);
+        self.render_detail_tabs(frame, tabs, &project);
+        if body.height == 0 || body.width == 0 {
+            return;
+        }
+        const SIDE_W: u16 = 30;
+        if body.width >= 64 {
+            let side = Rect {
+                width: SIDE_W.min(body.width),
+                ..body
+            };
+            let main = Rect {
+                x: side.right() + 2,
+                width: body.width.saturating_sub(side.width + 2),
+                ..body
+            };
+            self.render_detail_sidebar(frame, side, &project);
+            if main.width > 0 {
+                self.render_detail_main(frame, main, &project);
+            }
+        } else {
+            self.render_detail_main(frame, body, &project);
+        }
     }
 
-    fn render_browse_detail_header(&mut self, frame: &mut Frame, area: Rect, project: &Project) {
+    fn render_detail_header(&mut self, frame: &mut Frame, area: Rect, project: &Project) {
+        if area.height == 0 || area.width == 0 {
+            return;
+        }
+        frame.render_widget(Block::default().style(self.theme.card()), area);
+        // Square icon in pixels so the fitted image has no padding offset:
+        // width_cells = height_rows * cell_h / cell_w.
+        let (font_w, font_h) = self.picker.font_size();
+        let square_w = if font_w == 0 {
+            area.height.saturating_mul(2)
+        } else {
+            ((area.height as u32 * font_h.max(1) as u32).div_ceil(font_w as u32)) as u16
+        };
+        let icon = Rect {
+            width: square_w.clamp(2, area.width),
+            height: area.height,
+            ..area
+        };
+        self.render_browse_icon(frame, icon, project);
+
+        let text = Rect {
+            x: icon.right() + 1,
+            width: area.width.saturating_sub(icon.width + 1),
+            ..area
+        };
+        if text.width == 0 {
+            return;
+        }
+        let mut ty = text.y;
+        let bottom = text.y + text.height;
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                truncate(&project.title, text.width as usize),
+                self.theme.header(),
+            ))
+            .style(self.theme.card()),
+            Rect { y: ty, height: 1, ..text },
+        );
+        ty += 1;
+        if !project.description.trim().is_empty() {
+            let w = text.width as usize;
+            let first: String = project.description.chars().take(w).collect();
+            let rest: String = project.description.chars().skip(w).take(w).collect();
+            for line in [first, rest] {
+                if line.trim().is_empty() || ty >= bottom {
+                    continue;
+                }
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        truncate(&line, w),
+                        self.theme.card_dim(),
+                    ))
+                    .style(self.theme.card()),
+                    Rect { y: ty, height: 1, ..text },
+                );
+                ty += 1;
+            }
+        }
+        if ty < bottom {
+            let stats = Line::from(vec![
+                Span::styled(
+                    format!("\u{2b73} {}", format_count(project.downloads)),
+                    self.theme.accent(),
+                ),
+                Span::styled(
+                    format!("  \u{2661} {}  ", format_count(project.followers)),
+                    self.theme.card_dim(),
+                ),
+                Span::styled(project.project_type.clone(), self.theme.card_comment()),
+            ]);
+            frame.render_widget(
+                Paragraph::new(stats).style(self.theme.card()),
+                Rect { y: ty, height: 1, ..text },
+            );
+        }
+    }
+
+    fn render_download_pill(&mut self, frame: &mut Frame, pill: Rect, project: &Project) {
+        if pill.width == 0 || pill.height != 3 {
+            return;
+        }
+        let installed = self.is_modrinth_installed(&project.id, &project.slug, &project.title);
+        let hovered = self.is_hovered(pill);
+        let bg = if installed && !hovered {
+            self.theme.panel_alt
+        } else if installed {
+            self.theme.selection_bg
+        } else {
+            self.theme.green
+        };
+        let fg = if installed || hovered {
+            self.theme.fg
+        } else {
+            self.theme.panel
+        };
+        let label = if installed {
+            self.tr("browse.installed").to_string()
+        } else {
+            self.tr("browse.download").to_string()
+        };
+        let pad = pill.width.saturating_sub(label.chars().count() as u16) as usize;
         let line = Line::from(vec![
-            Span::styled(self.tr("browse.back"), self.theme.accent()),
-            Span::styled(truncate(&project.title, 28), self.theme.header()),
-            Span::styled(format!("  {}  ", project.project_type), self.theme.card_comment()),
-            Span::styled(format!("\u{2913} {}", project.downloads), self.theme.accent()),
-            Span::styled(format!("  \u{2661} {}", project.followers), self.theme.card_dim()),
             Span::styled(
-                format!("  {} version(s)", self.browse.versions.len()),
-                self.theme.card_comment(),
+                " ".repeat(pad / 2),
+                Style::default().fg(fg).bg(bg),
+            ),
+            Span::styled(label, Style::default().fg(fg).bg(bg)),
+            Span::styled(
+                " ".repeat(pad - pad / 2),
+                Style::default().fg(fg).bg(bg),
             ),
         ]);
-        frame.render_widget(Paragraph::new(line).style(self.theme.card()), area);
+        pill_cell(self, frame, pill, 0, line, bg, HitAction::BrowseInstall);
     }
 
-    fn render_browse_detail_left(&mut self, frame: &mut Frame, area: Rect) {
+    fn render_detail_tabs(&mut self, frame: &mut Frame, area: Rect, project: &Project) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        const PILL_W: u16 = 14;
+        let pill_w = if area.height >= 3 {
+            PILL_W.min(area.width)
+        } else {
+            0
+        };
+        if pill_w > 0 {
+            let pill = Rect {
+                x: area.x + area.width - pill_w,
+                width: pill_w,
+                height: 3,
+                ..area
+            };
+            self.render_download_pill(frame, pill, project);
+        }
+        let items: Vec<(String, String, usize)> = DetailTab::all()
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                (
+                    self.tr(t.label_key()).to_string(),
+                    (i + 1).to_string(),
+                    i,
+                )
+            })
+            .collect();
+        let widths = row_widths(items.iter().map(|(l, k, _)| (l.as_str(), k.as_str())));
+        let max_x = area.x + area.width.saturating_sub(pill_w + (pill_w > 0) as u16);
+        let (scroll, viewport) = begin_action_row(self, area.x, area.y, max_x, &widths);
+        self.toolbar_area.height = 3;
+        let mut vx = 0u16;
+        for (i, (label, key, idx)) in items.iter().enumerate() {
+            if let Some((cell, skip)) = action_cell(viewport, vx, widths[i], scroll) {
+                let rect = Rect {
+                    y: viewport.y,
+                    height: 3,
+                    ..cell
+                };
+                let active = *idx == self.browse.detail_tab as usize;
+                let hovered = self.is_hovered(rect);
+                let bg = if hovered {
+                    self.theme.selection_bg
+                } else {
+                    self.theme.panel_alt
+                };
+                let label_style = if active {
+                    self.theme.accent_bright()
+                } else if hovered {
+                    self.theme.accent()
+                } else {
+                    Style::default().fg(self.theme.muted)
+                };
+                let line = Line::from(vec![
+                    Span::styled(format!(" {label}  "), label_style),
+                    Span::styled(key.clone(), self.theme.accent()),
+                    Span::styled(" ", self.theme.comment_style()),
+                ]);
+                pill_cell(
+                    self,
+                    frame,
+                    rect,
+                    skip,
+                    line,
+                    bg,
+                    HitAction::BrowseDetailTab(*idx),
+                );
+            }
+            vx = vx.saturating_add(widths[i] + 1);
+        }
+    }
+
+    fn render_detail_sidebar(&mut self, frame: &mut Frame, area: Rect, project: &Project) {
+        if area.width < 4 || area.height == 0 {
+            return;
+        }
+        frame.render_widget(Block::default().style(self.theme.card()), area);
+        self.browse.link_hover = None;
+        let card_bg = Style::default().bg(self.theme.panel_alt);
+        let card_x = area.x + 1;
+        let card_w = area.width.saturating_sub(2);
+        let cx = card_x + 1;
+        let cw = card_w.saturating_sub(1);
+        let mut y = area.y;
+        let bottom = area.y + area.height;
+        macro_rules! panel {
+            ($h:expr, $body:block) => {{
+                let want: u16 = $h;
+                if y >= bottom || want == 0 {
+                    return;
+                }
+                let cap_style = Style::default()
+                    .fg(self.theme.panel_alt)
+                    .bg(self.theme.panel);
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        "▄".repeat(card_w as usize),
+                        cap_style,
+                    ))
+                    .style(self.theme.card()),
+                    Rect {
+                        x: card_x,
+                        y,
+                        width: card_w,
+                        height: 1,
+                    },
+                );
+                y += 1;
+                let h = want.min(bottom.saturating_sub(y));
+                if h == 0 {
+                    return;
+                }
+                let rect = Rect {
+                    x: card_x,
+                    y,
+                    width: card_w,
+                    height: h,
+                };
+                frame.render_widget(Block::default().style(card_bg), rect);
+                $body
+                if y + h < bottom {
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            "▀".repeat(card_w as usize),
+                            cap_style,
+                        ))
+                        .style(self.theme.card()),
+                        Rect {
+                            x: card_x,
+                            y: y + h,
+                            width: card_w,
+                            height: 1,
+                        },
+                    );
+                }
+                y += h + 1;
+            }};
+        }
+
+        let chip_bg = self.theme.panel_alt;
+        let chip_fg = self.theme.fg;
+        let compact = mc_core::modrinth::compact_game_versions(&project.game_versions);
+        let gv_lines = chip_lines(&compact, cw as usize, chip_bg, |_| chip_fg);
+        let ld_lines = chip_lines(&project.loaders, cw as usize, chip_bg, |l| {
+            self.theme.loader_color(l)
+        });
+        let client = env_label(&project.client_side, self.lang());
+        let server = env_label(&project.server_side, self.lang());
+        let mut compat: Vec<Line> = vec![
+            Line::from(Span::styled(
+                self.tr("browse.side_compat"),
+                self.theme.header(),
+            )),
+            Line::from(Span::styled(
+                self.tr("browse.mc_java"),
+                self.theme.dim(),
+            )),
+        ];
+        compat.extend(gv_lines);
+        compat.push(Line::from(Span::styled(
+            self.tr("browse.platforms"),
+            self.theme.dim(),
+        )));
+        compat.extend(ld_lines);
+        if client.is_some() || server.is_some() {
+            compat.push(Line::from(Span::styled(
+                self.tr("browse.environments"),
+                self.theme.dim(),
+            )));
+            if let Some(c) = client {
+                compat.push(Line::from(vec![
+                    Span::styled("Client: ", self.theme.dim()),
+                    Span::styled(c, self.theme.accent()),
+                ]));
+            }
+            if let Some(s) = server {
+                compat.push(Line::from(vec![
+                    Span::styled("Server: ", self.theme.dim()),
+                    Span::styled(s, self.theme.accent()),
+                ]));
+            }
+        }
+        panel!(compat.len() as u16, {
+            for (i, line) in compat.into_iter().enumerate() {
+                frame.render_widget(
+                    Paragraph::new(line).style(card_bg),
+                    Rect {
+                        x: cx,
+                        y: y + i as u16,
+                        width: cw,
+                        height: 1,
+                    },
+                );
+            }
+        });
+
+        let links = self.project_links(project);
+        if !links.is_empty() {
+            let h = 1 + links.len() as u16;
+            panel!(h, {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        self.tr("browse.links"),
+                        self.theme.header(),
+                    ))
+                    .style(card_bg),
+                    Rect {
+                        x: cx,
+                        y,
+                        width: cw,
+                        height: 1,
+                    },
+                );
+                for (idx, (label, url)) in links.iter().enumerate() {
+                    let row_y = y + 1 + idx as u16;
+                    let chip = format!(" {label} ");
+                    let chip_w = (chip.chars().count() as u16).min(cw);
+                    let chip_rect = Rect {
+                        x: cx,
+                        y: row_y,
+                        width: chip_w,
+                        height: 1,
+                    };
+                    let chip_hovered = self.is_hovered(chip_rect);
+                    let bg = if chip_hovered {
+                        self.theme.selection_bg
+                    } else {
+                        self.theme.panel_alt
+                    };
+                    let fg = if chip_hovered {
+                        self.theme.green_bright
+                    } else {
+                        self.theme.green
+                    };
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(chip, Style::default().fg(fg).bg(bg)))
+                            .style(card_bg),
+                        chip_rect,
+                    );
+                    let url_w = cw.saturating_sub(chip_w + 2);
+                    if url_w > 4 {
+                        let url_rect = Rect {
+                            x: chip_rect.right() + 1,
+                            y: row_y,
+                            width: url_w,
+                            height: 1,
+                        };
+                        let url_hovered = self.is_hovered(url_rect);
+                        if url_hovered {
+                            self.browse.link_hover = Some(idx);
+                        }
+                        let shown = short_url(url);
+                        let text = if shown.chars().count() > url_w as usize {
+                            if url_hovered {
+                                let max =
+                                    shown.chars().count().saturating_sub(url_w as usize);
+                                let off = marquee_offset(self.tick / 6, max);
+                                shown.chars().skip(off).take(url_w as usize).collect()
+                            } else {
+                                truncate(shown, url_w as usize)
+                            }
+                        } else {
+                            shown.to_string()
+                        };
+                        let url_style = if url_hovered {
+                            Style::default()
+                                .fg(self.theme.muted)
+                                .bg(Color::Rgb(0x28, 0x28, 0x28))
+                        } else {
+                            self.theme.dim()
+                        };
+                        frame.render_widget(
+                            Paragraph::new(Span::styled(text, url_style)).style(card_bg),
+                            url_rect,
+                        );
+                        self.push_hitbox(url_rect, HitAction::BrowseLink(idx));
+                    }
+                    self.push_hitbox(chip_rect, HitAction::BrowseLink(idx));
+                }
+            });
+        }
+
+        let mut tags = project.categories.clone();
+        tags.extend(project.additional_categories.clone());
+        if !tags.is_empty() {
+            let tag_lines = chip_lines(&tags, cw as usize, chip_bg, |_| chip_fg);
+            let h = 1 + tag_lines.len() as u16;
+            panel!(h, {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        self.tr("browse.tags"),
+                        self.theme.header(),
+                    ))
+                    .style(card_bg),
+                    Rect {
+                        x: cx,
+                        y,
+                        width: cw,
+                        height: 1,
+                    },
+                );
+                for (i, line) in tag_lines.into_iter().enumerate() {
+                    frame.render_widget(
+                        Paragraph::new(line).style(card_bg),
+                        Rect {
+                            x: cx,
+                            y: y + 1 + i as u16,
+                            width: cw,
+                            height: 1,
+                        },
+                    );
+                }
+            });
+        }
+        if let Some(license) = project.license.as_ref() {
+            let name = truncate(&license.name, cw as usize);
+            panel!(2, {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        self.tr("browse.license"),
+                        self.theme.header(),
+                    ))
+                    .style(card_bg),
+                    Rect {
+                        x: cx,
+                        y,
+                        width: cw,
+                        height: 1,
+                    },
+                );
+                frame.render_widget(
+                    Paragraph::new(Span::styled(name, self.theme.dim())).style(card_bg),
+                    Rect {
+                        x: cx,
+                        y: y + 1,
+                        width: cw,
+                        height: 1,
+                    },
+                );
+            });
+        }
+        if !self.browse.members.is_empty() {
+            let members = self.browse.members.clone();
+            let h = 1 + 2 * members.len() as u16;
+            panel!(h, {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        self.tr("browse.creators"),
+                        self.theme.header(),
+                    ))
+                    .style(card_bg),
+                    Rect {
+                        x: cx,
+                        y,
+                        width: cw,
+                        height: 1,
+                    },
+                );
+                for (i, member) in members.iter().enumerate() {
+                    let my = y + 1 + 2 * i as u16;
+                    let avatar = Rect {
+                        x: cx,
+                        y: my,
+                        width: 5.min(cw),
+                        height: 2,
+                    };
+                    let name_rect = Rect {
+                        x: avatar.right() + 1,
+                        y: my,
+                        width: cw.saturating_sub(avatar.width + 1),
+                        height: 1,
+                    };
+                    let role_rect = Rect { y: my + 1, ..name_rect };
+                    let initial = member
+                        .user
+                        .username
+                        .chars()
+                        .next()
+                        .map(|c| c.to_string())
+                        .unwrap_or_default();
+                    match member.user.avatar_url.clone() {
+                        Some(url) => self.render_gallery_image(frame, avatar, &url, &initial),
+                        None => {
+                            frame.render_widget(
+                            Paragraph::new(Span::styled(
+                                format!("  {initial}  "),
+                                Style::default().fg(self.theme.muted).bg(self.theme.panel_alt),
+                            ))
+                                .style(card_bg),
+                                avatar,
+                            );
+                        }
+                    }
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            truncate(&member.user.username, name_rect.width as usize),
+                            Style::default().fg(self.theme.fg),
+                        ))
+                        .style(card_bg),
+                        name_rect,
+                    );
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            truncate(&member.role, role_rect.width as usize),
+                            self.theme.dim(),
+                        ))
+                        .style(card_bg),
+                        role_rect,
+                    );
+                }
+            });
+        }
+        let _ = y;
+    }
+
+    pub(crate) fn project_links(&self, project: &Project) -> Vec<(String, String)> {
+        [
+            ("browse.link_issues", project.issues_url.clone()),
+            ("browse.link_source", project.source_url.clone()),
+            ("browse.link_wiki", project.wiki_url.clone()),
+            ("browse.link_discord", project.discord_url.clone()),
+        ]
+        .into_iter()
+        .filter_map(|(key, url)| url.map(|u| (self.tr(key).to_string(), u)))
+        .collect()
+    }
+
+    fn render_detail_main(&mut self, frame: &mut Frame, area: Rect, project: &Project) {
+        match self.browse.detail_tab {
+            DetailTab::Description => self.render_detail_description(frame, area, project),
+            DetailTab::Gallery => self.render_detail_gallery(frame, area, project),
+            DetailTab::Changelog => self.render_detail_changelog(frame, area),
+            DetailTab::Versions => self.render_detail_versions(frame, area, project),
+        }
+    }
+
+    fn render_detail_description(&mut self, frame: &mut Frame, area: Rect, project: &Project) {
+        let inner = crate::views::card(self, frame, area, self.browse.focus == BrowseFocus::Body);
+        if inner.height == 0 {
+            return;
+        }
+        let body_w = (inner.width as usize).saturating_sub(2).max(10);
+        if self.browse.body_for != project.id || self.browse.body_width != body_w {
+            self.browse.body = render_md(&project.body, body_w, &self.theme);
+            self.browse.body_for = project.id.clone();
+            self.browse.body_width = body_w;
+            self.browse.body_scroll = self
+                .browse
+                .body_scroll
+                .min(self.browse.body.len().saturating_sub(1));
+        }
+        let visible = inner.height as usize;
+        self.browse.body_visible = visible;
+        self.browse.body_scroll = self
+            .browse
+            .body_scroll
+            .min(self.browse.body.len().saturating_sub(visible).max(0));
+        let start = self.browse.body_scroll;
+        let end = (start + visible).min(self.browse.body.len().max(1));
+
+        frame.render_widget(Clear, inner);
+        if self.browse.body.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    self.tr("empty.no_description_long"),
+                    self.theme.card_dim(),
+                ))
+                .style(self.theme.card()),
+                inner,
+            );
+            return;
+        }
+        let lines: Vec<Line> = self
+            .browse
+            .body
+            .iter()
+            .skip(start)
+            .take(end - start)
+            .map(Line::clone)
+            .collect();
+        frame.render_widget(Paragraph::new(lines).style(self.theme.card()), inner);
+    }
+
+    fn render_detail_changelog(&mut self, frame: &mut Frame, area: Rect) {
+        let inner = crate::views::card(self, frame, area, self.browse.focus == BrowseFocus::Body);
+        if inner.height == 0 {
+            return;
+        }
+        let version = self.browse.versions.get(self.browse.version_selected).cloned();
+        let w = (inner.width as usize).saturating_sub(2).max(10);
+        let head = match &version {
+            Some(v) => format!(
+                "{}  {}",
+                truncate(&v.version_number, 24),
+                truncate(&v.date_published, 10)
+            ),
+            None => self.tr("browse.versions").to_string(),
+        };
+        let head_rect = Rect {
+            height: 1,
+            ..inner
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(head, self.theme.header())).style(self.theme.card()),
+            head_rect,
+        );
+        let list = Rect {
+            y: inner.y + 1,
+            height: inner.height.saturating_sub(1),
+            ..inner
+        };
+        if list.height == 0 {
+            return;
+        }
+        let lines = self.browse_changelog_lines(w);
+        let visible = list.height as usize;
+        self.browse.changelog_visible = visible;
+        self.browse.changelog_scroll = self
+            .browse
+            .changelog_scroll
+            .min(lines.len().saturating_sub(visible));
+        let start = self.browse.changelog_scroll;
+        frame.render_widget(Clear, list);
+        if lines.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    self.tr("browse.no_changelog"),
+                    self.theme.card_dim(),
+                ))
+                .style(self.theme.card()),
+                list,
+            );
+            return;
+        }
+        let shown: Vec<Line> = lines.into_iter().skip(start).take(visible).collect();
+        frame.render_widget(Paragraph::new(shown).style(self.theme.card()), list);
+    }
+
+    fn render_detail_gallery(&mut self, frame: &mut Frame, area: Rect, project: &Project) {
+        let inner = crate::views::card(self, frame, area, false);
+        if inner.height == 0 || inner.width == 0 {
+            return;
+        }
+        if project.gallery.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    self.tr("browse.no_gallery"),
+                    self.theme.card_dim(),
+                ))
+                .style(self.theme.card()),
+                inner,
+            );
+            return;
+        }
+        self.browse.gallery_selected = self
+            .browse
+            .gallery_selected
+            .min(project.gallery.len() - 1);
+        let preview_h = (inner.height / 2).clamp(6, 12).min(inner.height);
+        let preview = Rect {
+            height: preview_h,
+            ..inner
+        };
+        let grid = Rect {
+            y: preview.y + preview_h,
+            height: inner.height.saturating_sub(preview_h),
+            ..inner
+        };
+        let sel = self.browse.gallery_selected;
+        if let Some(image) = project.gallery.get(sel) {
+            let caption = image
+                .description
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| format!("#{sel}"));
+            self.render_gallery_image(frame, preview, &image.url, &caption);
+        }
+        const THUMB_W: u16 = 18;
+        const THUMB_H: u16 = 7;
+        let cols = (grid.width / THUMB_W).max(1) as usize;
+        self.browse.gallery_cols = cols;
+        let rows = (grid.height / THUMB_H) as usize;
+        if rows == 0 {
+            return;
+        }
+        let row_count = project.gallery.len().div_ceil(cols);
+        self.browse.gallery_scroll = self
+            .browse
+            .gallery_scroll
+            .min(row_count.saturating_sub(rows));
+        for row in 0..rows {
+            let gi_row = self.browse.gallery_scroll + row;
+            for col in 0..cols {
+                let gi = gi_row * cols + col;
+                let Some(image) = project.gallery.get(gi) else {
+                    break;
+                };
+                let cell = Rect {
+                    x: grid.x + col as u16 * THUMB_W,
+                    y: grid.y + row as u16 * THUMB_H,
+                    width: THUMB_W.min(grid.width.saturating_sub(col as u16 * THUMB_W)),
+                    height: THUMB_H,
+                };
+                if cell.width == 0 {
+                    continue;
+                }
+                let selected = gi == sel;
+                if selected {
+                    frame.render_widget(
+                        Block::default().style(Style::default().bg(self.theme.selection_bg)),
+                        cell,
+                    );
+                }
+                let img_area = if selected {
+                    Rect {
+                        x: cell.x + 1,
+                        y: cell.y,
+                        width: cell.width.saturating_sub(2),
+                        ..cell
+                    }
+                } else {
+                    cell
+                };
+                if img_area.width > 0 {
+                    self.render_gallery_image(frame, img_area, &image.url, &format!("#{gi}"));
+                }
+                self.push_hitbox(cell, HitAction::BrowseGallery(gi));
+            }
+        }
+    }
+
+    fn render_gallery_image(&mut self, frame: &mut Frame, area: Rect, url: &str, fallback: &str) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        if self.ensure_image_protocol(url) {
+            if let Some(proto) = self.browse_protocols.get_mut(url) {
+                frame.render_stateful_widget(
+                    StatefulImage::default().resize(Resize::Fit(None)),
+                    area,
+                    proto,
+                );
+                return;
+            }
+        }
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                format!("  {}  ", truncate(fallback, area.width as usize)),
+                Style::default().fg(self.theme.muted).bg(self.theme.panel),
+            ))
+            .style(self.theme.card()),
+            area,
+        );
+    }
+
+    fn ensure_image_protocol(&mut self, url: &str) -> bool {
+        if self.browse_protocols.contains_key(url) {
+            return true;
+        }
+        let Some(img) = self.browse_images.get(url) else {
+            return false;
+        };
+        let Some(dynamic) = crate::images::to_dynamic_image(img) else {
+            return false;
+        };
+        let protocol = self.picker.new_resize_protocol(dynamic);
+        self.browse_protocols.insert(url.to_string(), protocol);
+        true
+    }
+
+    fn render_detail_versions(&mut self, frame: &mut Frame, area: Rect, project: &Project) {
+        let _ = project;
         let inner = crate::views::card(
             self,
             frame,
@@ -1151,27 +2160,7 @@ impl App {
         if inner.height == 0 {
             return;
         }
-        let Some(project) = self.browse.detail.clone() else {
-            return;
-        };
 
-        // Full-width icon at the top
-        let icon_h = (inner.height / 3).clamp(6, 12);
-        let icon_area = Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: icon_h,
-        };
-        self.render_browse_icon(frame, icon_area, &project);
-
-        // Version list below icon
-        let remaining_h = inner.height.saturating_sub(icon_h);
-        if remaining_h == 0 {
-            return;
-        }
-
-        // Separate compatible vs all versions
         let instance_gv = self
             .selected_instance()
             .map(|i| i.metadata.game_version.clone());
@@ -1197,11 +2186,9 @@ impl App {
             }
         }
 
-        // Version header
-        let header_y = inner.y + icon_h;
         let header_rect = Rect {
             x: inner.x,
-            y: header_y,
+            y: inner.y,
             width: inner.width,
             height: 1,
         };
@@ -1219,12 +2206,10 @@ impl App {
             header_rect,
         );
 
-        // Version list (compatible first, then incompatible)
-        let list_y = header_y + 1;
-        let list_h = remaining_h.saturating_sub(1);
+        let list_y = inner.y + 1;
+        let list_h = inner.height.saturating_sub(1);
         let visible = list_h as usize;
 
-        // Build ordered list: compatible first, then incompatible
         let mut ordered: Vec<usize> = compatible.clone();
         ordered.extend(incompatible.iter());
 
@@ -1261,24 +2246,26 @@ impl App {
                 .first()
                 .cloned()
                 .unwrap_or_default();
-            let compat_marker = " ";
+            let mut spans = vec![
+                Span::styled(" ", style),
+                Span::styled(truncate(&version.version_number, 16), style),
+                Span::styled(format!("  {game}  "), self.theme.card_dim()),
+            ];
+            for (i, loader) in version.loaders.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::styled("+", self.theme.card_dim()));
+                }
+                spans.push(Span::styled(
+                    loader.clone(),
+                    Style::default().fg(self.theme.loader_color(loader)),
+                ));
+            }
+            spans.push(Span::styled(
+                format!("  {}", truncate(&version.date_published, 10)),
+                self.theme.card_dim(),
+            ));
             frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(compat_marker, style),
-                    Span::styled(
-                        truncate(&version.version_number, 12),
-                        style,
-                    ),
-                    Span::styled(
-                        format!("  {game}"),
-                        self.theme.card_dim(),
-                    ),
-                    Span::styled(
-                        format!("  {}", version.loaders.join("+")),
-                        self.theme.card_comment(),
-                    ),
-                ]))
-                .style(self.theme.card()),
+                Paragraph::new(Line::from(spans)).style(self.theme.card()),
                 rect,
             );
             self.push_hitbox(rect, HitAction::BrowseVersion(idx));
@@ -1295,34 +2282,6 @@ impl App {
                 },
             );
         }
-
-        // Install button — shows Installed when the project is already present.
-        let installed = self.is_modrinth_installed(&project.id, &project.slug, &project.title);
-        let install_y = inner.y + inner.height - 1;
-        let install_rect = Rect {
-            x: inner.x,
-            y: install_y,
-            width: inner.width,
-            height: 1,
-        };
-        let install_style = if installed {
-            self.theme.dim()
-        } else if self.is_hovered(install_rect) {
-            self.theme.hover()
-        } else {
-            self.theme.accent()
-        };
-        let install_label = if installed {
-            "  [ Installed — Install anyway ]"
-        } else {
-            "  [ Install selected version ]"
-        };
-        frame.render_widget(
-            Paragraph::new(Span::styled(install_label, install_style))
-                .style(self.theme.card()),
-            install_rect,
-        );
-        self.push_hitbox(install_rect, HitAction::BrowseInstall);
     }
 
     fn render_browse_icon(&mut self, frame: &mut Frame, area: Rect, project: &Project) {
@@ -1334,29 +2293,15 @@ impl App {
             self.render_browse_icon_fallback(frame, area, project, color);
             return;
         };
-        let Some(img) = self.browse_images.get(url) else {
-            self.render_browse_icon_fallback(frame, area, project, color);
-            return;
-        };
-
-        // Build the render state once per image: it encodes the pixels for the
-        // negotiated protocol (kitty/sixel/iterm2/halfblocks) and re-uses the
-        // encoding while the area stays the same.
-        if self.browse_protocols.get(url).is_none() {
-            let Some(dynamic) = crate::images::to_dynamic_image(&img) else {
-                self.render_browse_icon_fallback(frame, area, project, color);
+        if self.ensure_image_protocol(url) {
+            if let Some(proto) = self.browse_protocols.get_mut(url) {
+                frame.render_stateful_widget(
+                    StatefulImage::default().resize(Resize::Fit(None)),
+                    area,
+                    proto,
+                );
                 return;
-            };
-            let protocol = self.picker.new_resize_protocol(dynamic);
-            self.browse_protocols.insert(url.to_string(), protocol);
-        }
-        if let Some(proto) = self.browse_protocols.get_mut(url) {
-            frame.render_stateful_widget(
-                StatefulImage::default().resize(Resize::Fit(None)),
-                area,
-                proto,
-            );
-            return;
+            }
         }
         self.render_browse_icon_fallback(frame, area, project, color);
     }
@@ -1384,69 +2329,6 @@ impl App {
             .style(self.theme.card()),
             area,
         );
-    }
-
-    fn render_browse_detail_body(&mut self, frame: &mut Frame, area: Rect) {
-        let inner = crate::views::card(self, frame, area, self.browse.focus == BrowseFocus::Body);
-        if inner.height == 0 {
-            return;
-        }
-        let Some(project) = self.browse.detail.clone() else {
-            return;
-        };
-
-        let header = Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: 1,
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(self.tr("browse.description"), self.theme.header()),
-                Span::styled(self.tr("browse.scroll_hint"), self.theme.card_dim()),
-            ]))
-            .style(self.theme.card()),
-            header,
-        );
-
-        let body_area = Rect {
-            x: inner.x,
-            y: inner.y + 1,
-            width: inner.width,
-            height: inner.height.saturating_sub(1),
-        };
-        let body_w = (inner.width as usize).saturating_sub(2).max(10);
-
-        // Re-render the cached body when the project or the width changed.
-        if self.browse.body_for != project.id || self.browse.body_width != body_w {
-            self.browse.body = render_md(&project.body, body_w, &self.theme);
-            self.browse.body_for = project.id.clone();
-            self.browse.body_width = body_w;
-            self.browse.body_scroll = self.browse.body_scroll.min(self.browse.body.len().saturating_sub(1));
-        }
-        let visible = body_area.height as usize;
-        self.browse.body_visible = visible;
-        self.browse.body_scroll = self.browse.body_scroll.min(
-            self.browse.body.len().saturating_sub(visible).max(0),
-        );
-        let start = self.browse.body_scroll;
-        let end = (start + visible).min(self.browse.body.len().max(1));
-
-        frame.render_widget(Clear, body_area);
-        if self.browse.body.is_empty() {
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    self.tr("empty.no_description_long"),
-                    self.theme.card_dim(),
-                ))
-                .style(self.theme.card()),
-                body_area,
-            );
-            return;
-        }
-        let lines: Vec<Line> = self.browse.body.iter().skip(start).take(end - start).map(Line::clone).collect();
-        frame.render_widget(Paragraph::new(lines).style(self.theme.card()), body_area);
     }
 
     // ---------------------------------------------------------------------
@@ -1544,33 +2426,50 @@ impl App {
     }
 
     fn key_browse_detail(&mut self, key: KeyEvent) {
-        match self.browse.focus {
-            BrowseFocus::Body => match key.code {
-                KeyCode::Down | KeyCode::Char('j') => self.browse_scroll_body(1),
-                KeyCode::Up | KeyCode::Char('k') => self.browse_scroll_body(-1),
-                KeyCode::PageDown => self.browse_scroll_body(10),
-                KeyCode::PageUp => self.browse_scroll_body(-10),
-                KeyCode::Tab | KeyCode::Char('v') => self.browse.focus = BrowseFocus::Versions,
-                _ => {}
-            },
-            BrowseFocus::Versions => match key.code {
-                KeyCode::Down | KeyCode::Char('j') => self.browse_version_move(1),
-                KeyCode::Up | KeyCode::Char('k') => self.browse_version_move(-1),
-                KeyCode::Tab | KeyCode::Char('v') => self.browse.focus = BrowseFocus::Body,
-                KeyCode::Enter | KeyCode::Char('i') => self.browse_install(),
-                _ => {}
-            },
+        match key.code {
+            KeyCode::Char('1') => self.browse_select_tab(0),
+            KeyCode::Char('2') => self.browse_select_tab(1),
+            KeyCode::Char('3') => self.browse_select_tab(2),
+            KeyCode::Char('4') => self.browse_select_tab(3),
+            KeyCode::Tab => {
+                let next = (self.browse.detail_tab as usize + 1) % DetailTab::all().len();
+                self.browse_select_tab(next);
+            }
+            KeyCode::Char('v') => self.browse_select_tab(3),
+            KeyCode::Enter | KeyCode::Char('i') => self.browse_install(),
+            KeyCode::Down | KeyCode::Char('j') => self.browse_detail_move(1),
+            KeyCode::Up | KeyCode::Char('k') => self.browse_detail_move(-1),
+            KeyCode::Left | KeyCode::Char('h') => self.browse_gallery_move(-1),
+            KeyCode::Right | KeyCode::Char('l') => self.browse_gallery_move(1),
+            KeyCode::PageDown => self.browse_detail_move(10),
+            KeyCode::PageUp => self.browse_detail_move(-10),
             _ => {}
+        }
+    }
+
+    fn browse_detail_move(&mut self, delta: i32) {
+        match self.browse.detail_tab {
+            DetailTab::Versions => self.browse_version_move(delta),
+            DetailTab::Description => self.browse_scroll_body(delta),
+            DetailTab::Changelog => self.browse_scroll_changelog(delta),
+            DetailTab::Gallery => {
+                let cols = self.browse.gallery_cols.max(1) as i32;
+                self.browse_gallery_move(delta * cols);
+            }
         }
     }
 
     /// Mouse wheel / page scroll routing.
     pub(crate) fn browse_scroll(&mut self, delta: i32) {
         if self.browse.in_detail() {
-            if self.browse.focus == BrowseFocus::Versions {
-                self.browse_version_move(delta * 3);
-            } else {
-                self.browse_scroll_body(delta * 3);
+            match self.browse.detail_tab {
+                DetailTab::Versions => self.browse_version_move(delta * 3),
+                DetailTab::Description => self.browse_scroll_body(delta * 3),
+                DetailTab::Changelog => self.browse_scroll_changelog(delta * 3),
+                DetailTab::Gallery => {
+                    let next = (self.browse.gallery_scroll as i32 + delta).max(0) as usize;
+                    self.browse.gallery_scroll = next;
+                }
             }
         } else {
             self.browse_move(delta * 4);
@@ -1657,4 +2556,131 @@ impl App {
         }
     }
 
+    pub(crate) fn browse_select_tab(&mut self, idx: usize) {
+        let tabs = DetailTab::all();
+        let Some(tab) = tabs.get(idx).copied() else {
+            return;
+        };
+        self.browse.detail_tab = tab;
+        self.browse.focus = match tab {
+            DetailTab::Versions => BrowseFocus::Versions,
+            _ => BrowseFocus::Body,
+        };
+        if tab == DetailTab::Gallery {
+            self.browse_fetch_gallery();
+        }
+    }
+
+    pub(crate) fn browse_select_gallery(&mut self, idx: usize) {
+        let Some(project) = self.browse.detail.as_ref() else {
+            return;
+        };
+        if idx < project.gallery.len() {
+            self.browse.gallery_selected = idx;
+            self.browse_gallery_ensure_visible();
+        }
+    }
+
+    /// Advance the link marquee while a truncated link is hovered.
+    pub(crate) fn browse_link_tick(&mut self) -> bool {
+        if self.browse.link_hover.is_none() {
+            return false;
+        }
+        self.browse.link_marquee = self.browse.link_marquee.wrapping_add(1);
+        true
+    }
+
+    fn browse_gallery_move(&mut self, delta: i32) {
+        if self.browse.detail_tab != DetailTab::Gallery {
+            return;
+        }
+        let Some(project) = self.browse.detail.as_ref() else {
+            return;
+        };
+        let len = project.gallery.len();
+        if len == 0 {
+            return;
+        }
+        let next = (self.browse.gallery_selected as i32 + delta).clamp(0, len as i32 - 1) as usize;
+        self.browse.gallery_selected = next;
+        self.browse_gallery_ensure_visible();
+    }
+
+    fn browse_gallery_ensure_visible(&mut self) {
+        let Some(project) = self.browse.detail.as_ref() else {
+            return;
+        };
+        let len = project.gallery.len();
+        if len == 0 {
+            return;
+        }
+        let cols = self.browse.gallery_cols.max(1);
+        let sel_row = self.browse.gallery_selected / cols;
+        if sel_row < self.browse.gallery_scroll {
+            self.browse.gallery_scroll = sel_row;
+        }
+    }
+
+    fn browse_changelog_lines(&self, width: usize) -> Vec<Line<'static>> {
+        let Some(version) = self.browse.versions.get(self.browse.version_selected) else {
+            return Vec::new();
+        };
+        let Some(body) = version
+            .changelog
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        else {
+            return Vec::new();
+        };
+        render_md(body, width.max(10), &self.theme)
+    }
+
+    fn browse_changelog_len(&self) -> usize {
+        self.browse_changelog_lines(80).len()
+    }
+
+    fn browse_scroll_changelog(&mut self, delta: i32) {
+        let max = self
+            .browse_changelog_len()
+            .saturating_sub(self.browse.changelog_visible);
+        let next = (self.browse.changelog_scroll as i32 + delta).clamp(0, max as i32) as usize;
+        self.browse.changelog_scroll = next;
+    }
+
+    pub(crate) fn browse_fetch_gallery(&mut self) {
+        let Some(project) = self.browse.detail.clone() else {
+            return;
+        };
+        for image in &project.gallery {
+            self.browse_fetch_image(image.url.as_str());
+        }
+    }
+
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_url_strips_scheme() {
+        assert_eq!(short_url("https://github.com/x"), "github.com/x");
+        assert_eq!(short_url("http://a/b"), "a/b");
+        assert_eq!(short_url("github.com/x"), "github.com/x");
+    }
+
+    #[test]
+    fn marquee_pauses_at_both_ends() {
+        assert_eq!(marquee_offset(0, 0), 0);
+        assert_eq!(marquee_offset(0, 5), 0);
+        assert_eq!(marquee_offset(11, 5), 0);
+        assert_eq!(marquee_offset(12, 5), 0);
+        assert_eq!(marquee_offset(13, 5), 1);
+        assert_eq!(marquee_offset(16, 5), 4);
+        assert_eq!(marquee_offset(17, 5), 5);
+        assert_eq!(marquee_offset(28, 5), 5);
+        assert_eq!(marquee_offset(29, 5), 5);
+        assert_eq!(marquee_offset(30, 5), 4);
+        assert_eq!(marquee_offset(33, 5), 1);
+        assert_eq!(marquee_offset(34, 5), 0);
+    }
 }

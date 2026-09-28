@@ -194,6 +194,9 @@ pub enum HitAction {
     Button(ButtonId),
     BrowseResult(usize),
     BrowseVersion(usize),
+    BrowseDetailTab(usize),
+    BrowseGallery(usize),
+    BrowseLink(usize),
     BrowseInstall,
     BrowseQuickInstall(usize),
     BrowseSearchBar,
@@ -202,6 +205,14 @@ pub enum HitAction {
     BrowsePageNext,
     GroupHeader(usize),
     Overlay(OverlayAction),
+    Crumb(Crumb),
+}
+
+/// A clickable breadcrumb segment in the header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Crumb {
+    Page(Nav),
+    BrowseList,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -601,6 +612,7 @@ impl App {
             }
         }
         changed |= self.progress.is_some();
+        changed |= self.browse_link_tick();
         changed |= self.running.is_some() && self.tick % 30 == 0;
         changed
     }
@@ -988,6 +1000,305 @@ mod tests {
 
         app.stop_selected_game();
         assert!(!app.stop_requested);
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn header_breadcrumbs_navigate() {
+        let mut app = App::new(temp_paths(), reqwest::Client::new()).await.unwrap();
+        app.instance_manager
+            .create("industrial", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+
+        app.nav = Nav::Mods;
+        let crumbs = app.breadcrumbs();
+        assert_eq!(crumbs.len(), 3);
+        assert_eq!(crumbs[0].0, "CTMLauncher");
+        assert_eq!(crumbs[1].0, "industrial");
+        assert_eq!(crumbs[1].1, Some(Crumb::Page(Nav::Instances)));
+
+        app.nav = Nav::Browse;
+        app.browse_return = Nav::Mods;
+        app.browse.detail = Some(Project {
+            id: "s".into(),
+            slug: "sodium".into(),
+            title: "Sodium".into(),
+            description: String::new(),
+            body: String::new(),
+            project_type: "mod".into(),
+            categories: Vec::new(),
+            additional_categories: Vec::new(),
+            client_side: String::new(),
+            server_side: String::new(),
+            downloads: 0,
+            followers: 0,
+            icon_url: None,
+            color: None,
+            issues_url: None,
+            source_url: None,
+            wiki_url: None,
+            discord_url: None,
+            game_versions: Vec::new(),
+            loaders: Vec::new(),
+            versions: Vec::new(),
+            published: String::new(),
+            updated: String::new(),
+            license: None,
+            gallery: Vec::new(),
+        });
+        let crumbs = app.breadcrumbs();
+        assert!(crumbs.iter().any(|(l, _)| l == "Sodium"));
+        let kind = crumbs
+            .iter()
+            .find(|(_, a)| *a == Some(Crumb::BrowseList))
+            .unwrap();
+        assert_eq!(
+            kind.0,
+            format!("{} {}", app.tr("nav.browse"), app.browse.kind.label_lang(app.lang()))
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let header = buffer_row(&terminal, 0, 0, 120);
+        assert!(header.contains("Sodium"), "header must show the project: {header}");
+        assert!(
+            app.hitboxes
+                .iter()
+                .any(|h| h.action == HitAction::Crumb(Crumb::BrowseList)),
+            "kind segment must be clickable back to the list"
+        );
+
+        app.dispatch_hit(HitAction::Crumb(Crumb::BrowseList));
+        assert!(app.browse.detail.is_none());
+        app.dispatch_hit(HitAction::Crumb(Crumb::Page(Nav::Mods)));
+        assert_eq!(app.nav, Nav::Mods);
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn browse_detail_tabs_layout() {
+        let mut app = App::new(temp_paths(), reqwest::Client::new()).await.unwrap();
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+        app.nav = Nav::Browse;
+        for i in 0..3 {
+            app.browse_images.insert(
+                format!("https://img.modrinth.com/g{i}.png"),
+                mc_core::img::RgbaImage {
+                    width: 2,
+                    height: 2,
+                    pixels: vec![
+                        255, 0, 0, 255, 0, 255, 0, 255,
+                        0, 0, 255, 255, 255, 255, 255, 255,
+                    ],
+                },
+            );
+        }
+        app.browse.detail = Some(Project {
+            id: "p1".into(),
+            slug: "sodium".into(),
+            title: "Sodium".into(),
+            description: "A high-performance rendering engine.".into(),
+            body: "# Sodium\n\nFast **renderer**.".into(),
+            project_type: "mod".into(),
+            categories: vec!["optimization".into()],
+            additional_categories: Vec::new(),
+            client_side: "required".into(),
+            server_side: "unsupported".into(),
+            downloads: 232_300_000,
+            followers: 41_100,
+            icon_url: Some("https://img.modrinth.com/g0.png".into()),
+            color: Some(0x00FF00),
+            issues_url: Some("https://github.com/issues".into()),
+            source_url: None,
+            wiki_url: None,
+            discord_url: None,
+            game_versions: vec![
+                "1.21.4".into(),
+                "1.21.5".into(),
+                "1.21.6".into(),
+                "1.21.7".into(),
+                "1.21.8".into(),
+                "24w14a".into(),
+            ],
+            loaders: vec!["fabric".into()],
+            versions: vec!["v1".into()],
+            published: String::new(),
+            updated: String::new(),
+            license: None,
+            gallery: vec![
+                mc_core::modrinth::GalleryImage {
+                    url: "https://img.modrinth.com/g1.png".into(),
+                    description: None,
+                    featured: true,
+                },
+                mc_core::modrinth::GalleryImage {
+                    url: "https://img.modrinth.com/g2.png".into(),
+                    description: None,
+                    featured: false,
+                },
+            ],
+        });
+        app.browse.versions.push(Version {
+            id: "ver1".into(),
+            project_id: "p1".into(),
+            name: "Sodium 0.9".into(),
+            version_number: "0.9".into(),
+            changelog: Some("## Changes\n\n- faster".into()),
+            date_published: "2026-01-01T00:00:00Z".into(),
+            downloads: 42,
+            version_type: "release".into(),
+            status: "listed".into(),
+            files: Vec::new(),
+            dependencies: Vec::new(),
+            game_versions: vec!["1.21.1".into()],
+            loaders: vec!["fabric".into()],
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 34)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Sodium"), "header title missing");
+        assert!(text.contains("232.3M"), "compact stats missing");
+        assert!(text.contains("Download"), "download pill missing");
+        assert!(text.contains("Compatibility"), "sidebar missing");
+        assert!(text.contains("Issues"), "sidebar links missing");
+        assert!(
+            text.contains("1.21.4-1.21.8"),
+            "compact version range missing: {text}"
+        );
+        assert!(!text.contains("24w14a"), "snapshots must be hidden");
+        assert!(
+            app.hitboxes
+                .iter()
+                .any(|h| h.action == HitAction::BrowseInstall),
+            "download hitbox missing"
+        );
+        assert!(
+            app.hitboxes
+                .iter()
+                .any(|h| matches!(h.action, HitAction::BrowseLink(_))),
+            "link hitbox missing"
+        );
+
+        app.browse.members.push(mc_core::modrinth::Member {
+            role: "Owner".into(),
+            user: mc_core::modrinth::MemberUser {
+                username: "jellysquid3".into(),
+                avatar_url: None,
+            },
+        });
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Creators"), "creators section missing");
+        assert!(text.contains("jellysquid3"), "creator name missing");
+
+        app.browse_select_tab(2);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(
+            buffer_text(&terminal).contains("faster"),
+            "changelog tab missing content"
+        );
+
+        app.browse_select_tab(3);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(
+            buffer_text(&terminal).contains("0.9"),
+            "versions tab missing list"
+        );
+
+        app.browse_select_tab(1);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert_eq!(
+            app.hitboxes
+                .iter()
+                .filter(|h| matches!(h.action, HitAction::BrowseGallery(_)))
+                .count(),
+            2,
+            "gallery thumbs missing hitboxes"
+        );
+        app.dispatch_hit(HitAction::BrowseGallery(1));
+        assert_eq!(app.browse.gallery_selected, 1);
+
+        app.dispatch_hit(HitAction::BrowseDetailTab(0));
+        assert_eq!(
+            app.browse.detail_tab,
+            crate::views::browse::DetailTab::Description
+        );
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn browse_link_marquee_on_hover() {
+        let mut app = App::new(temp_paths(), reqwest::Client::new()).await.unwrap();
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+        app.nav = Nav::Browse;
+        app.browse.detail = Some(Project {
+            id: "p1".into(),
+            slug: "sodium".into(),
+            title: "Sodium".into(),
+            description: String::new(),
+            body: String::new(),
+            project_type: "mod".into(),
+            categories: Vec::new(),
+            additional_categories: Vec::new(),
+            client_side: String::new(),
+            server_side: String::new(),
+            downloads: 0,
+            followers: 0,
+            icon_url: None,
+            color: None,
+            issues_url: Some("https://github.com/very/long/path/that/does/not/fit".into()),
+            source_url: None,
+            wiki_url: None,
+            discord_url: None,
+            game_versions: Vec::new(),
+            loaders: Vec::new(),
+            versions: Vec::new(),
+            published: String::new(),
+            updated: String::new(),
+            license: None,
+            gallery: Vec::new(),
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(!text.contains("https://"), "scheme must be stripped");
+        assert!(text.contains("github.com"), "short url missing");
+        let chip = app
+            .hitboxes
+            .iter()
+            .filter(|h| matches!(h.action, HitAction::BrowseLink(0)))
+            .min_by_key(|h| h.rect.x)
+            .unwrap()
+            .rect;
+        let before: String = buffer_row(&terminal, chip.y, chip.right() + 1, chip.right() + 21);
+
+        app.mouse_pos = Some((chip.x + chip.width + 1, chip.y));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert_eq!(app.browse.link_hover, Some(0));
+        assert!(app.on_tick());
+        assert!(app.browse.link_marquee > 0);
+        app.tick += 400;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let after: String = buffer_row(&terminal, chip.y, chip.right() + 1, chip.right() + 21);
+        assert_ne!(before, after, "marquee must scroll the url");
 
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);
     }
@@ -1591,7 +1902,6 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("Demo Mod"), "detail title missing");
         assert!(text.contains("Heading"), "markdown body missing");
-        assert!(text.contains("1.0.0"), "version list missing");
         assert!(
             app.browse_protocols.get("https://img.modrinth.com/demo.png").is_some(),
             "icon render state was not created"
@@ -1599,6 +1909,13 @@ mod tests {
         assert!(
             text.contains('\u{2580}') || text.contains('\u{2584}'),
             "half-block icon did not render"
+        );
+
+        app.browse_select_tab(3);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(
+            buffer_text(&terminal).contains("1.0.0"),
+            "version list missing"
         );
 
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);

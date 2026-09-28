@@ -97,14 +97,21 @@ impl App {
                     self.browse.selected = self.browse.results.len().saturating_sub(1);
                 }
             }
-            EngineEvent::BrowseProject { project, versions } => {
+            EngineEvent::BrowseProject { project, versions, members } => {
                 self.browse.detail = Some(*project);
+                self.browse.members = members;
                 self.browse.versions = versions;
                 self.browse.version_selected = 0;
                 self.browse.focus = crate::views::browse::BrowseFocus::Body;
                 self.browse.body = Vec::new();
                 self.browse.body_for = String::new();
                 self.browse.body_scroll = 0;
+                self.browse.detail_tab = crate::views::browse::DetailTab::Description;
+                self.browse.gallery_selected = 0;
+                self.browse.gallery_scroll = 0;
+                self.browse.changelog_scroll = 0;
+                self.browse.link_hover = None;
+                self.browse.link_marquee = 0;
                 self.browse_protocols.clear();
                 self.browse_fetch_images();
             }

@@ -5,8 +5,8 @@ use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
 use super::{
-    footer_hints, info_line, truncate_str, App, ButtonId, Focus, HitAction, Nav, OverlayAction,
-    NAV_BUTTON_HEIGHT,
+    footer_hints, info_line, truncate_str, App, ButtonId, Crumb, Focus, HitAction, Nav,
+    OverlayAction, NAV_BUTTON_HEIGHT,
 };
 use crate::forms::Overlay;
 
@@ -362,22 +362,7 @@ pub(crate) fn render_header(&mut self, frame: &mut Frame, area: Rect) {
         .map(|a| a.username.clone())
         .unwrap_or_else(|| self.tr("info.no_account").to_string());
 
-    let subtitle = match self.nav {
-        Nav::Instances => self.tr("nav.instances").to_string(),
-        Nav::Browse => format!("{} {}", self.tr("nav.browse"), self.browse.kind.label_lang(self.lang())),
-        Nav::Accounts => self.tr("nav.accounts").to_string(),
-        Nav::Launcher => self.tr("nav.launcher").to_string(),
-        _ => self
-            .selected_instance()
-            .map(|i| i.name().to_string())
-            .unwrap_or_else(|| self.tr("info.no_build").to_string()),
-    };
-    let left = Line::from(vec![
-        Span::styled(" CTMLauncher", self.theme.accent_bright()),
-        Span::styled("  ›  ", self.theme.comment_style()),
-        Span::styled(subtitle, self.theme.dim()),
-    ]);
-    frame.render_widget(Paragraph::new(left).style(self.theme.bar()), area);
+    self.render_crumbs(frame, area);
 
     // Top-right: the account badge and the launcher settings button side by
     // side. Both remain reachable now that they are out of the nav menu.
@@ -428,6 +413,101 @@ pub(crate) fn render_header(&mut self, frame: &mut Frame, area: Rect) {
         self.push_hitbox(set_rect, HitAction::NavItem(Nav::Launcher));
     }
 }
+
+    fn render_crumbs(&mut self, frame: &mut Frame, area: Rect) {
+        let crumbs = self.breadcrumbs();
+        let account_w = self
+            .accounts
+            .active()
+            .map(|a| a.username.chars().count() as u16)
+            .unwrap_or(0);
+        let settings_w = self.tr("btn.settings").chars().count() as u16;
+        let reserved = account_w + 2 + settings_w + 2;
+        let avail = area.width.saturating_sub(reserved);
+
+        let mut spans = vec![Span::styled(" ", self.theme.bar())];
+        let mut x = area.x + 1;
+        for (idx, (label, action)) in crumbs.iter().enumerate() {
+            if idx > 0 {
+                if x + 3 > area.x + avail {
+                    break;
+                }
+                spans.push(Span::styled(" › ", self.theme.comment_style()));
+                x += 3;
+            }
+            let w = label.chars().count() as u16;
+            if w == 0 || x + w > area.x + avail {
+                break;
+            }
+            let rect = Rect {
+                x,
+                y: area.y,
+                width: w,
+                height: 1,
+            };
+            let hovered = action.is_some() && self.is_hovered(rect);
+            let dim = self.theme.dim();
+            let style = if idx == 0 {
+                self.theme.accent_bright()
+            } else if hovered {
+                dim.bg(self.theme.hover_bg)
+            } else {
+                dim
+            };
+            spans.push(Span::styled(label.clone(), style));
+            if let Some(crumb) = action {
+                self.push_hitbox(rect, HitAction::Crumb(*crumb));
+            }
+            x += w;
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)).style(self.theme.bar()), area);
+    }
+
+    /// Breadcrumb trail for the header: `(label, click target)` per segment.
+    /// The last segment is the current location and is never clickable.
+    pub(crate) fn breadcrumbs(&self) -> Vec<(String, Option<Crumb>)> {
+        let mut crumbs = vec![("CTMLauncher".to_string(), Some(Crumb::Page(Nav::Instances)))];
+        if let Some(Overlay::Wizard(wizard)) = self.overlay.as_ref() {
+            crumbs.push((self.tr("wizard.new_build").to_string(), None));
+            crumbs.push((wizard.kind.label_lang(self.lang()), None));
+            if wizard.step == crate::wizard::WizardStep::ModrinthProject {
+                if let Some(project) = wizard.project.as_ref() {
+                    crumbs.push((project.title.clone(), None));
+                }
+            }
+            return crumbs;
+        }
+    if self.nav == Nav::Browse {
+        if let Some(instance) = self.selected_instance() {
+            crumbs.push((instance.name().to_string(), Some(Crumb::Page(Nav::Instances))));
+        }
+        if self.browse_return != Nav::Browse {
+            crumbs.push((
+                self.browse_return.menu_label_lang(self.lang()),
+                Some(Crumb::Page(self.browse_return)),
+            ));
+        }
+        crumbs.push((
+            format!(
+                "{} {}",
+                self.tr("nav.browse"),
+                self.browse.kind.label_lang(self.lang())
+            ),
+            self.browse.detail.is_some().then_some(Crumb::BrowseList),
+        ));
+        if let Some(project) = self.browse.detail.as_ref() {
+            crumbs.push((project.title.clone(), None));
+        }
+        return crumbs;
+    }
+        if self.nav.is_build_scoped() {
+            if let Some(instance) = self.selected_instance() {
+                crumbs.push((instance.name().to_string(), Some(Crumb::Page(Nav::Instances))));
+            }
+        }
+        crumbs.push((self.nav.menu_label_lang(self.lang()), None));
+        crumbs
+    }
 
 /// A one-line status bar: status message on the left, green-hotkey hints on
 /// the right.

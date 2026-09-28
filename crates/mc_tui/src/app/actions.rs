@@ -1284,15 +1284,17 @@ fn browse_open_project(&mut self, id: &str) {
         let result = async {
             let project = modrinth.project(&id).await?;
             let versions = modrinth.versions_filtered(&project.id, None, None).await?;
-            Ok::<_, CoreError>((project, versions))
+            let members = modrinth.members(&project.id).await.unwrap_or_default();
+            Ok::<_, CoreError>((project, versions, members))
         }
         .await;
         let _ = tx.send(EngineEvent::ProgressDone);
         match result {
-            Ok((project, versions)) => {
+            Ok((project, versions, members)) => {
                 let _ = tx.send(EngineEvent::BrowseProject {
                     project: Box::new(project),
                     versions,
+                    members,
                 });
             }
             Err(err) => {
@@ -1302,17 +1304,40 @@ fn browse_open_project(&mut self, id: &str) {
     });
 }
 
+pub(crate) fn open_project_link(&mut self, idx: usize) {
+    let Some(project) = self.browse.detail.clone() else {
+        return;
+    };
+    let links = self.project_links(&project);
+    let Some((_, url)) = links.get(idx) else {
+        return;
+    };
+    if open::that(url).is_err() {
+        self.set_toast(
+            crate::i18n::tr_string(self.lang(), "browse.open_failed").replace("{}", url),
+            true,
+        );
+    }
+}
+
 pub(crate) fn browse_close_detail(&mut self) {
     self.browse.detail = None;
+    self.browse.members.clear();
     self.browse.versions.clear();
     self.browse.version_selected = 0;
     self.browse.focus = BrowseFocus::List;
     self.browse.body.clear();
     self.browse.body_for = String::new();
     self.browse.body_scroll = 0;
+    self.browse.detail_tab = crate::views::browse::DetailTab::Description;
+    self.browse.gallery_selected = 0;
+    self.browse.gallery_scroll = 0;
+    self.browse.changelog_scroll = 0;
+    self.browse.link_hover = None;
+    self.browse.link_marquee = 0;
 }
 
-/// Kick off fetches for the project icon and a couple of gallery images.
+/// Kick off fetches for the project icon, gallery images and member avatars.
 pub(crate) fn browse_fetch_images(&mut self) {
     let Some(project) = self.browse.detail.clone() else {
         return;
@@ -1321,8 +1346,13 @@ pub(crate) fn browse_fetch_images(&mut self) {
     if let Some(url) = project.icon_url {
         urls.push(url);
     }
-    for image in project.gallery.iter().take(2) {
+    for image in project.gallery.iter() {
         urls.push(image.url.clone());
+    }
+    for member in self.browse.members.iter() {
+        if let Some(url) = member.user.avatar_url.clone() {
+            urls.push(url);
+        }
     }
     for url in urls {
         self.browse_fetch_image(url.as_str());

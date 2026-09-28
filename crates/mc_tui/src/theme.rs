@@ -183,4 +183,49 @@ impl Theme {
             Unknown => self.muted,
         }
     }
+
+    /// Brand colour of a Modrinth loader tag (dark-theme platform colours
+    /// from modrinth.com; unknown loaders fall back to muted grey).
+    pub fn loader_color(&self, loader: &str) -> Color {
+        match loader.to_ascii_lowercase().as_str() {
+            "fabric" => Color::Rgb(0xDB, 0xB6, 0x9B),
+            "quilt" => Color::Rgb(0xC7, 0x96, 0xF9),
+            "forge" => Color::Rgb(0x95, 0x9E, 0xEF),
+            "neoforge" => Color::Rgb(0xF9, 0x9E, 0x6B),
+            "paper" => Color::Rgb(0xE6, 0x7E, 0x7E),
+            "purpur" => Color::Rgb(0xC3, 0xAB, 0xF7),
+            "bukkit" => Color::Rgb(0xF6, 0xAF, 0x7B),
+            "bungeecord" => Color::Rgb(0xD2, 0xC0, 0x80),
+            "folia" => Color::Rgb(0xA5, 0xE3, 0x88),
+            "liteloader" => Color::Rgb(0x7A, 0xB0, 0xEE),
+            "nilloader" => Color::Rgb(0xF4, 0x5E, 0x9A),
+            "ornithe" => Color::Rgb(0x87, 0xC7, 0xFF),
+            "spigot" => Color::Rgb(0xF1, 0xCC, 0x84),
+            "sponge" => Color::Rgb(0xF9, 0xE5, 0x80),
+            "velocity" => Color::Rgb(0x83, 0xD5, 0xEF),
+            "waterfall" => Color::Rgb(0x78, 0xA4, 0xFB),
+            "bta-babric" => Color::Rgb(0x72, 0xCC, 0x4A),
+            _ => self.comment,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loader_colors_match_modrinth() {
+        let theme = Theme::default();
+        assert_eq!(
+            theme.loader_color("fabric"),
+            Color::Rgb(0xDB, 0xB6, 0x9B)
+        );
+        assert_eq!(
+            theme.loader_color("neoforge"),
+            Color::Rgb(0xF9, 0x9E, 0x6B)
+        );
+        assert_eq!(theme.loader_color("Fabric"), theme.loader_color("fabric"));
+        assert_eq!(theme.loader_color("nope"), theme.comment);
+    }
 }
