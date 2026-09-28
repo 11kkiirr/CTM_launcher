@@ -135,6 +135,9 @@ pub enum FilterItem {
     Category(usize),
 }
 
+/// One selectable row in the filter sidebar: label, value, active, selected, hit action.
+type FilterRow = (String, String, bool, bool, Option<HitAction>);
+
 /// Client / server side filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SideFilter {
@@ -628,31 +631,65 @@ impl App {
     }
 
     fn render_browse_list(&mut self, frame: &mut Frame, area: Rect) {
+        let area = Rect {
+            x: area.x + 2,
+            width: area.width.saturating_sub(2),
+            ..area
+        };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1), // search bar
-                Constraint::Length(1), // status
+                Constraint::Length(3), // search pill: cap / bar / toe
                 Constraint::Min(5),   // sidebar + list
             ])
             .split(area);
 
-        // ── Search bar (row 0) ──
+        // ── Search bar (3-row pill) ──
         let search_focused = self.browse.focus == BrowseFocus::Search;
         let search_bg = if search_focused {
             self.theme.panel_alt
         } else {
             self.theme.panel
         };
+        let search_w = chunks[0].width;
+        let bar_row = chunks[0].y + 1;
+        if search_w > 0 {
+            let edge = Style::default().fg(search_bg).bg(self.theme.bg);
+            frame.render_widget(
+                Paragraph::new(Span::styled("▄".repeat(search_w as usize), edge))
+                    .style(Style::default().bg(self.theme.bg)),
+                Rect {
+                    x: chunks[0].x,
+                    y: chunks[0].y,
+                    width: search_w,
+                    height: 1,
+                },
+            );
+            frame.render_widget(
+                Paragraph::new(Span::styled("▀".repeat(search_w as usize), edge))
+                    .style(Style::default().bg(self.theme.bg)),
+                Rect {
+                    x: chunks[0].x,
+                    y: chunks[0].y + 2,
+                    width: search_w,
+                    height: 1,
+                },
+            );
+        }
         let search_rect = Rect {
             x: chunks[0].x,
             y: chunks[0].y,
-            width: chunks[0].width,
-            height: 1,
+            width: search_w,
+            height: 3,
         };
         // Green accent bar on the left when focused
         if search_focused && search_rect.width > 0 {
-            let bar = Rect { x: search_rect.x, y: search_rect.y, width: 1, height: 1 };
+            let bar = Rect {
+                x: search_rect.x,
+                y: bar_row,
+                width: 1,
+                height: 1,
+            };
             frame.render_widget(
                 Paragraph::new(Span::styled(" ", self.theme.accent()))
                     .style(Style::default().bg(search_bg)),
@@ -692,269 +729,369 @@ impl App {
         let bar_w = if search_focused { search_rect.width.saturating_sub(1) } else { search_rect.width };
         frame.render_widget(
             Paragraph::new(search_line).style(Style::default().bg(search_bg)),
-            Rect { x: bar_x, y: search_rect.y, width: bar_w, height: 1 },
+            Rect {
+                x: bar_x,
+                y: bar_row,
+                width: bar_w,
+                height: 1,
+            },
         );
         self.push_hitbox(search_rect, HitAction::BrowseSearchBar);
 
-        // ── Status / filter line (row 1) ──
-        let page_size = 30u32;
-        let current_page = self.browse.offset / page_size + 1;
-        let total_pages = if self.browse.total == 0 {
-            1
-        } else {
-            (self.browse.total + page_size - 1) / page_size
-        };
-        let status = if self.browse.query.is_empty() {
-            format!(
-                "{}  ·  page {}/{}  ·  {} results",
-                self.browse.sort.label(),
-                current_page,
-                total_pages,
-                self.browse.total
-            )
-        } else {
-            format!(
-                "'{}'  ·  page {}/{}  ·  {} results",
-                self.browse.query,
-                current_page,
-                total_pages,
-                self.browse.total
-            )
-        };
-        let mut filter_parts: Vec<String> = Vec::new();
-        if self.browse.filter_compat {
-            if let Some(inst) = self.selected_instance() {
-                filter_parts.push(format!(
-                    "{} {}",
-                    inst.metadata.game_version,
-                    inst.metadata.loader
-                ));
-            }
-        }
-        match self.browse.filter_side {
-            SideFilter::Client => filter_parts.push("client".to_string()),
-            SideFilter::Server => filter_parts.push("server".to_string()),
-            SideFilter::All => {}
-        }
-        if !self.browse.filter_categories.is_empty() {
-            filter_parts.push(self.browse.filter_categories.join("+"));
-        }
-        let filter_str = if filter_parts.is_empty() {
-            String::new()
-        } else {
-            format!("  [{}]", filter_parts.join(" · "))
-        };
-        let status_line = Line::from(vec![
-            Span::styled(status, self.theme.card()),
-            Span::styled(filter_str, self.theme.accent()),
-        ]);
-        frame.render_widget(
-            Paragraph::new(status_line).style(self.theme.card()),
-            chunks[1],
-        );
-
-        // Page navigation buttons on the right side of the status line.
-        let nav_w = 16u16; // " « prev  next » " width
-        if chunks[1].width > nav_w + 2 {
-            let nav_x = chunks[1].x + chunks[1].width - nav_w;
-            let nav_rect = Rect { x: nav_x, y: chunks[1].y, width: nav_w, height: 1 };
-            let has_prev = self.browse.offset > 0;
-            let has_next = self.browse.offset + 30 < self.browse.total;
-            let prev_style = if has_prev { self.theme.accent() } else { self.theme.dim() };
-            let next_style = if has_next { self.theme.accent() } else { self.theme.dim() };
-            let nav_line = Line::from(vec![
-                Span::styled(self.tr("browse.prev_only"), prev_style),
-                Span::styled("│", self.theme.card_dim()),
-                Span::styled(self.tr("browse.next_only"), next_style),
-            ]);
-            frame.render_widget(Paragraph::new(nav_line).style(self.theme.card()), nav_rect);
-            // Hit areas for the two halves.
-            let mid = nav_x + nav_w / 2;
-            let prev_rect = Rect { x: nav_x, y: chunks[1].y, width: nav_w / 2, height: 1 };
-            let next_rect = Rect { x: mid, y: chunks[1].y, width: nav_w - nav_w / 2, height: 1 };
-            self.push_hitbox(prev_rect, HitAction::BrowsePagePrev);
-            self.push_hitbox(next_rect, HitAction::BrowsePageNext);
-        }
-
-        // Split the remaining area: sidebar (22 chars) | results
+        // Split the remaining area: sidebar (22) | 2-char dark gap | results
         const SIDEBAR_W: u16 = 22;
-        let body_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(SIDEBAR_W),
-                Constraint::Min(10),
-            ])
-            .split(chunks[2]);
-        self.render_browse_filter_sidebar(frame, body_chunks[0]);
-        self.render_browse_results(frame, body_chunks[1]);
+        const GAP_W: u16 = 2;
+        let side_w = SIDEBAR_W.min(chunks[1].width);
+        let gap_w = (chunks[1].width.saturating_sub(side_w)).min(GAP_W);
+        let side = Rect {
+            x: chunks[1].x,
+            y: chunks[1].y,
+            width: side_w,
+            height: chunks[1].height,
+        };
+        let gap = Rect {
+            x: side.right(),
+            y: chunks[1].y,
+            width: gap_w,
+            height: chunks[1].height,
+        };
+        let list = Rect {
+            x: gap.right(),
+            y: chunks[1].y,
+            width: chunks[1].width.saturating_sub(side_w + gap_w),
+            height: chunks[1].height,
+        };
+        if gap.width > 0 {
+            frame.render_widget(
+                Block::default().style(Style::default().bg(self.theme.bg)),
+                gap,
+            );
+        }
+        self.render_browse_filter_sidebar(frame, side);
+        self.render_browse_results(frame, list);
     }
 
     fn render_browse_filter_sidebar(&mut self, frame: &mut Frame, area: Rect) {
-        let inner = crate::views::card(self, frame, area, self.browse.focus == BrowseFocus::Sidebar);
-        if inner.height == 0 {
+        if area.width < 4 || area.height == 0 {
             return;
         }
+        frame.render_widget(Block::default().style(self.theme.card()), area);
         let is_focused = self.browse.focus == BrowseFocus::Sidebar;
-        let max_w = inner.width as usize;
-        let mut y = inner.y;
-
-        // ── General section ──
-        let general_header = Rect { x: inner.x, y, width: inner.width, height: 1 };
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(" \u{258e}", self.theme.accent()),
-                Span::styled(self.tr("browse.general"), self.theme.header()),
-            ])).style(self.theme.card()),
-            general_header,
-        );
-        y += 1;
-
-        // Sort row
-        {
-            let style = if is_focused && matches!(self.browse.sidebar_selected, FilterItem::Sort) {
-                self.theme.row_selected()
-            } else {
-                self.theme.card()
-            };
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(self.tr("browse.sort"), self.theme.card_dim()),
-                    Span::styled(self.browse.sort.label().to_string(), style),
-                ]))
-                .style(self.theme.card()),
-                Rect { x: inner.x, y, width: inner.width, height: 1 },
-            );
-            self.push_hitbox(Rect { x: inner.x, y, width: inner.width, height: 1 }, HitAction::BrowseFilter(FilterItem::Sort));
-            y += 1;
+        let card_bg = Style::default().bg(self.theme.panel_alt);
+        let card_x = area.x + 1;
+        let card_w = area.width.saturating_sub(2);
+        if card_w < 4 {
+            return;
         }
-
-        // Side row
-        {
-            let side_label = match self.browse.filter_side {
-                SideFilter::All => "all",
-                SideFilter::Client => "client",
-                SideFilter::Server => "server",
-            };
-            let style = if is_focused && matches!(self.browse.sidebar_selected, FilterItem::Side) {
-                self.theme.row_selected()
-            } else {
-                self.theme.card()
-            };
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(self.tr("browse.side"), self.theme.card_dim()),
-                    Span::styled(side_label.to_string(), style),
-                ]))
-                .style(self.theme.card()),
-                Rect { x: inner.x, y, width: inner.width, height: 1 },
-            );
-            self.push_hitbox(Rect { x: inner.x, y, width: inner.width, height: 1 }, HitAction::BrowseFilter(FilterItem::Side));
-            y += 1;
-        }
-
-        // Compat row
-        {
-            let compat_text = if self.browse.filter_compat { "on" } else { "off" };
-            let style = if is_focused && matches!(self.browse.sidebar_selected, FilterItem::Compat) {
-                self.theme.row_selected()
-            } else {
-                self.theme.card()
-            };
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(self.tr("browse.compat"), self.theme.card_dim()),
-                    Span::styled(format!("  {compat_text}"), style),
-                ]))
-                .style(self.theme.card()),
-                Rect { x: inner.x, y, width: inner.width, height: 1 },
-            );
-            self.push_hitbox(Rect { x: inner.x, y, width: inner.width, height: 1 }, HitAction::BrowseFilter(FilterItem::Compat));
-            y += 1;
-        }
-
-        // ── Loaders section ──
+        let cx = card_x + 1;
+        let cw = card_w.saturating_sub(2);
+        let side_name = match self.browse.filter_side {
+            SideFilter::All => "all",
+            SideFilter::Client => "client",
+            SideFilter::Server => "server",
+        };
+        let sort_name = self.browse.sort.label();
+        let compat_name = if self.browse.filter_compat {
+            "on"
+        } else {
+            "off"
+        };
+        let mut sections: Vec<(String, Vec<FilterRow>)> = Vec::new();
+        let page_size = 30u32;
+        sections.push((
+            self.trs("browse.info"),
+            vec![
+                (
+                    format!("{} ", self.tr("browse.results")),
+                    self.browse.total.to_string(),
+                    false,
+                    false,
+                    None,
+                ),
+                (
+                    format!("{} ", self.tr("browse.page")),
+                    format!(
+                        "{}/{}",
+                        self.browse.offset / page_size + 1,
+                        self.browse.total.div_ceil(page_size).max(1)
+                    ),
+                    false,
+                    false,
+                    None,
+                ),
+            ],
+        ));
+        sections.push((
+            self.trs("browse.general"),
+            vec![
+                (
+                    format!("{} ", self.tr("browse.sort")),
+                    sort_name.to_string(),
+                    false,
+                    is_focused && matches!(self.browse.sidebar_selected, FilterItem::Sort),
+                    Some(HitAction::BrowseFilter(FilterItem::Sort)),
+                ),
+                (
+                    format!("{} ", self.tr("browse.side")),
+                    side_name.to_string(),
+                    !matches!(self.browse.filter_side, SideFilter::All),
+                    is_focused && matches!(self.browse.sidebar_selected, FilterItem::Side),
+                    Some(HitAction::BrowseFilter(FilterItem::Side)),
+                ),
+                (
+                    format!("{} ", self.tr("browse.compat")),
+                    compat_name.to_string(),
+                    self.browse.filter_compat,
+                    is_focused && matches!(self.browse.sidebar_selected, FilterItem::Compat),
+                    Some(HitAction::BrowseFilter(FilterItem::Compat)),
+                ),
+            ],
+        ));
         let loaders = self.browse.kind.loaders();
         if !loaders.is_empty() {
-            y += 1;
-            let loader_header = Rect { x: inner.x, y, width: inner.width, height: 1 };
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                Span::styled(" \u{258e}", self.theme.accent()),
-                Span::styled(self.tr("browse.loaders"), self.theme.header()),
-                ])).style(self.theme.card()),
-                loader_header,
-            );
-            y += 1;
+            let mut rows = Vec::with_capacity(loaders.len());
             for (i, loader) in loaders.iter().enumerate() {
-                let is_active = self.browse.filter_loaders.contains(&loader.to_string());
-                let is_selected = matches!(self.browse.sidebar_selected, FilterItem::Loader(idx) if idx == i);
-                let marker = if is_active { "x" } else { " " };
-                let style = if is_focused && is_selected {
-                    self.theme.row_selected()
-                } else if is_active {
-                    self.theme.accent()
-                } else {
-                    self.theme.card()
-                };
-                let label = format!("   [{marker}] {loader}");
-                let truncated = truncate(&label, max_w);
-                frame.render_widget(
-                    Paragraph::new(Span::styled(truncated, style)).style(self.theme.card()),
-                    Rect { x: inner.x, y, width: inner.width, height: 1 },
-                );
-                self.push_hitbox(Rect { x: inner.x, y, width: inner.width, height: 1 }, HitAction::BrowseFilter(FilterItem::Loader(i)));
-                y += 1;
+                let active = self.browse.filter_loaders.contains(&loader.to_string());
+                rows.push((
+                    format!("[{}] ", if active { "x" } else { " " }),
+                    (*loader).to_string(),
+                    active,
+                    is_focused
+                        && matches!(self.browse.sidebar_selected, FilterItem::Loader(idx) if idx == i),
+                    Some(HitAction::BrowseFilter(FilterItem::Loader(i))),
+                ));
             }
+            sections.push((self.trs("browse.loaders"), rows));
         }
-
-        // ── Categories section ──
         let cats = self.browse.kind.categories();
         if !cats.is_empty() {
-            y += 1;
-            let cat_header = Rect { x: inner.x, y, width: inner.width, height: 1 };
+            let mut rows = Vec::with_capacity(cats.len());
+            for (i, cat) in cats.iter().enumerate() {
+                let active = self.browse.filter_categories.contains(&cat.to_string());
+                rows.push((
+                    format!("[{}] ", if active { "x" } else { " " }),
+                    (*cat).to_string(),
+                    active,
+                    is_focused
+                        && matches!(self.browse.sidebar_selected, FilterItem::Category(idx) if idx == i),
+                    Some(HitAction::BrowseFilter(FilterItem::Category(i))),
+                ));
+            }
+            sections.push((self.trs("browse.categories"), rows));
+        }
+
+        let cap_style = Style::default()
+            .fg(self.theme.panel_alt)
+            .bg(self.theme.panel);
+        let mut y = area.y;
+        let bottom = area.y + area.height;
+        // ── Prev / Next side by side on one row ──
+        let has_prev = self.browse.offset > 0;
+        let has_next = self.browse.offset + page_size < self.browse.total;
+        if card_w >= 12 && y + 2 < bottom {
+            let gap_n = 2u16;
+            let prev_w = (card_w - gap_n) / 2;
+            let next_w = card_w - prev_w - gap_n;
+            let nav_buttons = [
+                (
+                    Rect { x: card_x, y, width: prev_w, height: 3 },
+                    self.tr("browse.prev_only").to_string(),
+                    has_prev,
+                    HitAction::BrowsePagePrev,
+                ),
+                (
+                    Rect {
+                        x: card_x + prev_w + gap_n,
+                        y,
+                        width: next_w,
+                        height: 3,
+                    },
+                    self.tr("browse.next_only").to_string(),
+                    has_next,
+                    HitAction::BrowsePageNext,
+                ),
+            ];
+            for (rect, text, active, hit) in nav_buttons {
+                if rect.width < 4 {
+                    continue;
+                }
+                let hovered = self.is_hovered(rect);
+                let bg = if hovered {
+                    self.theme.selection_bg
+                } else {
+                    self.theme.panel_alt
+                };
+                let edge = Style::default().fg(bg).bg(self.theme.panel);
+                frame.render_widget(
+                    Paragraph::new(Span::styled("▄".repeat(rect.width as usize), edge))
+                        .style(self.theme.card()),
+                    Rect { height: 1, ..rect },
+                );
+                frame.render_widget(
+                    Block::default().style(Style::default().bg(bg)),
+                    Rect {
+                        y: rect.y + 1,
+                        height: 1,
+                        ..rect
+                    },
+                );
+                let cw_n = rect.width.saturating_sub(2);
+                let label = truncate(text.trim(), cw_n as usize);
+                let text_fg = if active {
+                    self.theme.green
+                } else {
+                    self.theme.muted
+                };
+                let pad = (cw_n as usize).saturating_sub(label.chars().count()) / 2;
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(" ".repeat(pad), Style::default().bg(bg)),
+                        Span::styled(label, Style::default().fg(text_fg).bg(bg)),
+                    ]))
+                    .style(Style::default().bg(bg)),
+                    Rect {
+                        x: rect.x + 1,
+                        y: rect.y + 1,
+                        width: cw_n,
+                        height: 1,
+                    },
+                );
+                frame.render_widget(
+                    Paragraph::new(Span::styled("▀".repeat(rect.width as usize), edge))
+                        .style(self.theme.card()),
+                    Rect {
+                        y: rect.y + 2,
+                        height: 1,
+                        ..rect
+                    },
+                );
+                self.push_hitbox(rect, hit);
+            }
+            y += 3;
+        }
+        for (title, rows) in sections {
+            let want = 1 + rows.len() as u16;
+            if y >= bottom {
+                return;
+            }
             frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                Span::styled(" \u{258e}", self.theme.accent()),
-                Span::styled(self.tr("browse.categories"), self.theme.header()),
-                ])).style(self.theme.card()),
-                cat_header,
+                Paragraph::new(Span::styled("▄".repeat(card_w as usize), cap_style))
+                    .style(self.theme.card()),
+                Rect {
+                    x: card_x,
+                    y,
+                    width: card_w,
+                    height: 1,
+                },
             );
             y += 1;
-            for (i, cat) in cats.iter().enumerate() {
-                let is_active = self.browse.filter_categories.contains(&cat.to_string());
-                let is_selected = matches!(self.browse.sidebar_selected, FilterItem::Category(idx) if idx == i);
-                let marker = if is_active { "x" } else { " " };
-                let style = if is_focused && is_selected {
-                    self.theme.row_selected()
-                } else if is_active {
-                    self.theme.accent()
-                } else {
-                    self.theme.card()
-                };
-                let label = format!("   [{marker}] {cat}");
-                let truncated = truncate(&label, max_w);
-                frame.render_widget(
-                    Paragraph::new(Span::styled(truncated, style)).style(self.theme.card()),
-                    Rect { x: inner.x, y, width: inner.width, height: 1 },
-                );
-                self.push_hitbox(Rect { x: inner.x, y, width: inner.width, height: 1 }, HitAction::BrowseFilter(FilterItem::Category(i)));
-                y += 1;
+            let h = want.min(bottom.saturating_sub(y));
+            if h == 0 {
+                return;
             }
+            frame.render_widget(
+                Block::default().style(card_bg),
+                Rect {
+                    x: card_x,
+                    y,
+                    width: card_w,
+                    height: h,
+                },
+            );
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    truncate(&title, cw as usize),
+                    self.theme.header(),
+                ))
+                .style(card_bg),
+                Rect {
+                    x: cx,
+                    y,
+                    width: cw,
+                    height: 1,
+                },
+            );
+            for (i, row) in rows.into_iter().enumerate().take(h as usize - 1) {
+                self.browse_filter_row(frame, cx, cw, y + 1 + i as u16, &row);
+            }
+            if y + h < bottom {
+                frame.render_widget(
+                    Paragraph::new(Span::styled("▀".repeat(card_w as usize), cap_style))
+                        .style(self.theme.card()),
+                    Rect {
+                        x: card_x,
+                        y: y + h,
+                        width: card_w,
+                        height: 1,
+                    },
+                );
+            }
+            y += h + 1;
+        }
+    }
+
+    fn browse_filter_row(
+        &mut self,
+        frame: &mut Frame,
+        x: u16,
+        w: u16,
+        row_y: u16,
+        row: &FilterRow,
+    ) {
+        let (label, value, active, sel, hit) = row;
+        let bg = if *sel {
+            self.theme.selection_bg
+        } else {
+            self.theme.panel_alt
+        };
+        let rect = Rect {
+            x,
+            y: row_y,
+            width: w,
+            height: 1,
+        };
+        frame.render_widget(Block::default().style(Style::default().bg(bg)), rect);
+        let label_w = label.chars().count().min(w as usize);
+        let val_w = (w as usize).saturating_sub(label_w);
+        let val_fg = if *sel {
+            self.theme.green_bright
+        } else if *active {
+            self.theme.green
+        } else {
+            self.theme.fg
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    truncate(label, label_w),
+                    Style::default().fg(self.theme.muted).bg(bg),
+                ),
+                Span::styled(
+                    truncate(value, val_w),
+                    Style::default().fg(val_fg).bg(bg),
+                ),
+            ]))
+            .style(Style::default().bg(bg)),
+            rect,
+        );
+        if let Some(hit) = hit {
+            self.push_hitbox(rect, *hit);
         }
     }
 
     fn render_browse_results(&mut self, frame: &mut Frame, area: Rect) {
         const CARD_H: u16 = 5;
-        const ICON_W: u16 = 12;
-        const GAP: u16 = 1;
+        const ICON_W: u16 = 8;
+        const PILL_W: u16 = 14;
 
-        let inner = crate::views::card(self, frame, area, self.browse.focus == BrowseFocus::List);
-        if inner.height == 0 {
+        // Darkest background anywhere there is no content.
+        let page = Style::default().bg(self.theme.bg);
+        frame.render_widget(Block::default().style(page), area);
+        if area.width == 0 || area.height == 0 {
             return;
         }
         let hits = self.browse.results.clone();
-        let step = CARD_H + GAP;
-        let visible_items = (inner.height / step) as usize;
+        let visible_items = (area.height / CARD_H) as usize;
         let first_visible_item =
             self.browse.selected.saturating_sub(visible_items.saturating_sub(1));
 
@@ -971,11 +1108,11 @@ impl App {
             let Some(hit) = hits.get(idx).cloned() else {
                 break;
             };
-            let card_y = inner.y + (item as u16) * step;
+            let card_y = area.y + (item as u16) * CARD_H;
             let card_rect = Rect {
-                x: inner.x,
+                x: area.x,
                 y: card_y,
-                width: inner.width,
+                width: area.width,
                 height: CARD_H,
             };
             let is_selected = idx == self.browse.selected;
@@ -987,44 +1124,59 @@ impl App {
             } else if is_hovered {
                 self.theme.hover_bg
             } else {
-                self.theme.panel_alt
+                self.theme.panel
             };
             let surface = Style::default().bg(bg);
-            frame.render_widget(Block::default().style(surface), card_rect);
+            let edge = Style::default().fg(bg).bg(self.theme.bg);
+            frame.render_widget(
+                Paragraph::new(Span::styled("▄".repeat(area.width as usize), edge))
+                    .style(page),
+                Rect {
+                    x: area.x,
+                    y: card_y,
+                    width: area.width,
+                    height: 1,
+                },
+            );
+            frame.render_widget(
+                Paragraph::new(Span::styled("▀".repeat(area.width as usize), edge))
+                    .style(page),
+                Rect {
+                    x: area.x,
+                    y: card_y + CARD_H - 1,
+                    width: area.width,
+                    height: 1,
+                },
+            );
+            frame.render_widget(
+                Block::default().style(surface),
+                Rect {
+                    x: area.x,
+                    y: card_y + 1,
+                    width: area.width,
+                    height: CARD_H - 2,
+                },
+            );
 
-            // Icon area (full card height) on the left
+            // Icon column confined to the content rows so it never
+            // overlaps the card caps, with a 1 cell left margin.
+            // Drawn after the caps.
+            let left_pad: u16 = if area.width > 1 { 1 } else { 0 };
+            let icon_x = area.x + left_pad;
+            let icon_w = ICON_W.min(area.width.saturating_sub(left_pad));
             let icon_rect = Rect {
-                x: inner.x,
-                y: card_y,
-                width: ICON_W,
-                height: CARD_H,
+                x: icon_x,
+                y: card_y + 1,
+                width: icon_w,
+                height: CARD_H - 2,
             };
             self.render_browse_card_icon(frame, icon_rect, &hit, bg);
 
-            // Green accent bar on the left, just right of the icon
-            if is_selected && card_rect.width > ICON_W {
-                let bar = Rect {
-                    x: inner.x + ICON_W,
-                    y: card_rect.y,
-                    width: 1,
-                    height: CARD_H,
-                };
-                let bar_lines: Vec<Line> = (0..CARD_H)
-                    .map(|_| {
-                        Line::from(Span::styled(
-                            "\u{258e}",
-                            Style::default().fg(self.theme.green),
-                        ))
-                    })
-                    .collect();
-                frame.render_widget(Paragraph::new(bar_lines).style(surface), bar);
-            }
-
-            // Text content (right of icon + bar)
-            let bar_w: u16 = if is_selected && card_rect.width > ICON_W { 1 } else { 0 };
-            let install_w: u16 = 12; // width reserved for the Install/Installed label
-            let text_x = inner.x + ICON_W + bar_w;
-            let text_w = card_rect.width.saturating_sub(ICON_W + bar_w + install_w);
+            // Text content (right of icon, pill zone reserved
+            // with a 2 cell margin from the card edge)
+            let text_x = icon_x + icon_w;
+            let pill_x = area.x + area.width.saturating_sub(PILL_W + 2);
+            let text_w = pill_x.saturating_sub(text_x + 1);
 
             let title_style = if is_selected {
                 Style::default()
@@ -1034,7 +1186,7 @@ impl App {
             } else if is_hovered {
                 Style::default().fg(self.theme.green).bg(bg)
             } else {
-                self.theme.row()
+                Style::default().fg(self.theme.fg).bg(bg)
             };
             let dim_style = if is_selected {
                 Style::default().fg(self.theme.green).bg(bg)
@@ -1051,7 +1203,7 @@ impl App {
                 .style(surface),
                 Rect {
                     x: text_x,
-                    y: card_y,
+                    y: card_y + 1,
                     width: text_w,
                     height: 1,
                 },
@@ -1071,13 +1223,13 @@ impl App {
                 .style(surface),
                 Rect {
                     x: text_x,
-                    y: card_y + 1,
+                    y: card_y + 2,
                     width: text_w,
                     height: 1,
                 },
             );
 
-            // Row 3: version + downloads + follows
+            // Row 3: version + stats + side
             let version = hit.latest_version.as_deref().unwrap_or("--");
             let mut line3: Vec<Span> = Vec::new();
             line3.push(Span::styled(format!("v{version}"), dim_style));
@@ -1089,31 +1241,12 @@ impl App {
                 format!("  \u{2661} {}", hit.follows),
                 dim_style,
             ));
-            let categories = if hit.display_categories.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "  {}",
-                    hit.display_categories.first().cloned().unwrap_or_default()
-                )
-            };
-            if !categories.is_empty() {
+            if let Some(cat) = hit.display_categories.first() {
                 line3.push(Span::styled(
-                    categories,
+                    format!("  {cat}"),
                     Style::default().fg(self.theme.comment).bg(bg),
                 ));
             }
-            frame.render_widget(
-                Paragraph::new(Line::from(line3)).style(surface),
-                Rect {
-                    x: text_x,
-                    y: card_y + 2,
-                    width: text_w,
-                    height: 1,
-                },
-            );
-
-            // Row 4: client/server side
             let side_label = match (hit.client_side.as_str(), hit.server_side.as_str()) {
                 ("required", "required") => self.tr("browse.both"),
                 ("required", _) => self.tr("browse.client_only"),
@@ -1124,52 +1257,83 @@ impl App {
                 _ => "",
             };
             if !side_label.is_empty() {
-                frame.render_widget(
-                    Paragraph::new(Span::styled(
-                        side_label,
-                        Style::default().fg(self.theme.comment).bg(bg),
-                    ))
-                    .style(surface),
-                    Rect {
-                        x: text_x,
-                        y: card_y + 3,
-                        width: text_w,
-                        height: 1,
-                    },
-                );
+                line3.push(Span::styled(
+                    format!("  \u{00B7} {side_label}"),
+                    Style::default().fg(self.theme.comment).bg(bg),
+                ));
             }
-
-            // Minimal install affordance on the right of the middle row.
-            let installed = self.is_hit_installed(&hit);
-            let install_rect = Rect {
-                x: inner.x + ICON_W + bar_w + text_w,
-                y: card_y + 2,
-                width: install_w,
-                height: 1,
-            };
-            let label = if installed {
-                self.tr("browse.installed")
-            } else {
-                self.tr("browse.install")
-            };
-            let install_hover = self.is_hovered(install_rect);
-            let label_style = if installed {
-                Style::default().fg(self.theme.muted).bg(bg)
-            } else if install_hover {
-                Style::default()
-                    .fg(self.theme.green_bright)
-                    .bg(bg)
-                    .add_modifier(ratatui::style::Modifier::BOLD)
-            } else {
-                Style::default().fg(self.theme.green).bg(bg)
-            };
             frame.render_widget(
-                Paragraph::new(Span::styled(label, label_style))
-                    .style(surface)
-                    .alignment(ratatui::layout::Alignment::Right),
-                install_rect,
+                Paragraph::new(Line::from(line3)).style(surface),
+                Rect {
+                    x: text_x,
+                    y: card_y + 3,
+                    width: text_w,
+                    height: 1,
+                },
             );
-            self.push_hitbox(install_rect, HitAction::BrowseQuickInstall(idx));
+
+            // Install pill on the right, spanning all 3 content rows.
+            let installed = self.is_hit_installed(&hit);
+            let install_label = truncate(
+                &if installed {
+                    self.tr("browse.installed").to_string()
+                } else {
+                    self.tr("browse.install").to_string()
+                },
+                PILL_W as usize,
+            );
+            let pill_rect = Rect {
+                x: pill_x,
+                y: card_y + 1,
+                width: PILL_W.min(area.width.saturating_sub(pill_x - area.x)),
+                height: CARD_H - 2,
+            };
+            let pill_hover = self.is_hovered(pill_rect);
+            let pill_bg = if !installed && pill_hover {
+                self.theme.selection_bg
+            } else {
+                self.theme.panel_alt
+            };
+            let pill_fg = if installed {
+                self.theme.muted
+            } else if pill_hover {
+                self.theme.green_bright
+            } else {
+                self.theme.green
+            };
+            let pill_edge = Style::default().fg(pill_bg).bg(bg);
+            let label_w = install_label.chars().count();
+            let pad_left = (PILL_W as usize).saturating_sub(label_w) / 2;
+            let pad_right = (PILL_W as usize).saturating_sub(label_w + pad_left);
+            let pill_style = Style::default().fg(pill_fg).bg(pill_bg);
+            frame.render_widget(
+                Paragraph::new(Span::styled("▄".repeat(pill_rect.width as usize), pill_edge))
+                    .style(Style::default().bg(bg)),
+                Rect { height: 1, ..pill_rect },
+            );
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(" ".repeat(pad_left), pill_style),
+                    Span::styled(install_label, pill_style),
+                    Span::styled(" ".repeat(pad_right), pill_style),
+                ]))
+                .style(pill_style),
+                Rect {
+                    y: pill_rect.y + 1,
+                    height: 1,
+                    ..pill_rect
+                },
+            );
+            frame.render_widget(
+                Paragraph::new(Span::styled("▀".repeat(pill_rect.width as usize), pill_edge))
+                    .style(Style::default().bg(bg)),
+                Rect {
+                    y: pill_rect.y + 2,
+                    height: 1,
+                    ..pill_rect
+                },
+            );
+            self.push_hitbox(pill_rect, HitAction::BrowseQuickInstall(idx));
 
             self.push_hitbox(card_rect, HitAction::BrowseResult(idx));
         }
@@ -1184,8 +1348,12 @@ impl App {
                     .replace("{}", &self.browse.query)
             };
             frame.render_widget(
-                Paragraph::new(Span::styled(hint, self.theme.card_dim())).style(self.theme.card()),
-                inner,
+                Paragraph::new(Span::styled(
+                    hint,
+                    Style::default().fg(self.theme.muted).bg(self.theme.bg),
+                ))
+                .style(page),
+                area,
             );
         }
     }
