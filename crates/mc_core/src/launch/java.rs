@@ -219,10 +219,60 @@ pub async fn discover() -> Vec<JavaInstallation> {
     installations
 }
 
-/// Pick the best runtime satisfying `required_major`, if any.
+/// Pick the best local runtime for a version requiring `required_major`.
+///
+/// The *lowest* qualifying runtime in `[required, 21]` wins (`21` is the
+/// ceiling for games that declare ≤ 21): newer JVMs are not automatically
+/// better — instrumenters bundled with older loaders break on recent class
+/// file versions (Forge 1.20.1 ships ASM 9.5, which rejects the Java 25
+/// bytecode of the JDK itself with "Unsupported class file major version 69").
+/// Games that declare a newer Java (e.g. 25) still get it, since the band
+/// never goes below the requirement.
+///
+/// Returns `None` when nothing local fits the band so callers can provision
+/// the Mojang-provided runtime instead.
 pub async fn find_for_major(required_major: u32) -> Option<JavaInstallation> {
     let all = discover().await;
-    all.into_iter().find(|j| j.satisfies(required_major))
+    best_local(required_major, all)
+}
+
+/// Pure selection rule behind [`find_for_major`]: the lowest runtime in
+/// `[required, 21]`, ignoring anything outside the band.
+pub(crate) fn best_local(
+    required_major: u32,
+    candidates: Vec<JavaInstallation>,
+) -> Option<JavaInstallation> {
+    let cap = required_major.max(21);
+    candidates
+        .into_iter()
+        .filter(|j| j.satisfies(required_major) && j.major <= cap)
+        .min_by_key(|j| j.major)
+}
+
+/// Pick a JVM for running a modloader *installer*.
+///
+/// Installers bundle their own bytecode processors (same ASM family as the
+/// loaders), so they get the same band as the game; when nothing local
+/// qualifies the Mojang runtime for the game's Java version is provisioned.
+pub async fn find_for_installer(
+    client: &reqwest::Client,
+    paths: &Paths,
+    required_major: u32,
+    progress: Option<ProgressCallback>,
+) -> Result<JavaInstallation> {
+    if let Some(found) = find_for_major(required_major).await {
+        return Ok(found);
+    }
+    if let Ok(found) = ensure_runtime(client, paths, None, required_major, progress).await {
+        return Ok(found);
+    }
+    discover()
+        .await
+        .into_iter()
+        .find(|j| j.satisfies(required_major))
+        .ok_or_else(|| {
+            CoreError::Launch(format!("no Java {required_major}+ runtime available for install"))
+        })
 }
 
 // -------------------------------------------------------------------------
@@ -539,5 +589,41 @@ mod tests {
         let entry = &manifest["linux"]["java-runtime-epsilon"][0];
         assert!(entry.availability.as_ref().unwrap().is_available());
         assert_eq!(entry.version.as_ref().unwrap().name, "25.0.1");
+    }
+
+    #[test]
+    fn best_local_prefers_lowest_within_band() {
+        fn jvm(major: u32) -> JavaInstallation {
+            JavaInstallation {
+                path: PathBuf::from(format!("/java/{major}")),
+                version: format!("{major}.0.1"),
+                major,
+                vendor: None,
+            }
+        }
+
+        // The declared Java wins when present.
+        assert_eq!(
+            best_local(17, vec![jvm(25), jvm(21), jvm(17)]).map(|j| j.major),
+            Some(17)
+        );
+        // Newer than the game wants, but still ≤ 21: pick the lowest of the band.
+        assert_eq!(
+            best_local(17, vec![jvm(25), jvm(21)]).map(|j| j.major),
+            Some(21)
+        );
+        // Too new for the band: nothing local, caller provisions a runtime.
+        assert_eq!(best_local(17, vec![jvm(25)]).map(|j| j.major), None);
+        // Games that declare a newer Java still get it.
+        assert_eq!(
+            best_local(25, vec![jvm(21), jvm(25)]).map(|j| j.major),
+            Some(25)
+        );
+        // Ancient versions keep their Java 8.
+        assert_eq!(
+            best_local(8, vec![jvm(8), jvm(21), jvm(25)]).map(|j| j.major),
+            Some(8)
+        );
+        assert_eq!(best_local(17, vec![jvm(8)]).map(|j| j.major), None);
     }
 }

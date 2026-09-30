@@ -18,6 +18,7 @@ impl App {
 
 pub(crate) fn render(&mut self, frame: &mut Frame) {
     self.hitboxes.clear();
+    self.browse.hover_link = None;
     self.toolbar_max = 0;
     self.toolbar_area = Rect::default();
     let area = frame.area();
@@ -547,6 +548,9 @@ pub(crate) fn render_footer(&mut self, frame: &mut Frame, area: Rect) {
                 self.theme.accent()
             };
             (style, toast.message.clone())
+        } else if self.overlay.is_none() && self.browse.hover_link.is_some() {
+            let url = self.browse.hover_link.clone().unwrap_or_default();
+            (self.theme.accent(), format!("↗ {url}"))
         } else {
             (self.theme.dim(), self.status.clone())
         };

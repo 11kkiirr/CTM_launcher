@@ -88,6 +88,7 @@ impl App {
             width: inner.width,
             height: inner.height.saturating_sub(1),
         };
+        self.search_visible = list_area.height as usize;
         let selected = self.search_state.selected();
         let hovered = hovered_index(
             self,
@@ -165,6 +166,7 @@ impl App {
             width: inner.width,
             height: inner.height.saturating_sub(1),
         };
+        self.project_visible = list_area.height as usize;
         let selected = self.project_state.selected();
         let hovered = hovered_index(
             self,

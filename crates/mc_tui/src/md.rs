@@ -6,7 +6,7 @@
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme::Theme;
 
@@ -15,14 +15,95 @@ use crate::theme::Theme;
 struct Frag {
     text: String,
     style: Style,
+    link: Option<String>,
 }
 
-/// Render a markdown document into wrapped, styled lines.
+/// A clickable inline link found while rendering markdown, in output
+/// coordinates of [`render_md_full`].
+#[derive(Debug, Clone)]
+pub struct MdLink {
+    /// Index of the output line containing the link text.
+    pub line: usize,
+    /// First column of the link text (0-based, exclusive end in `end`).
+    pub start: usize,
+    /// Column just past the last character of the link text.
+    pub end: usize,
+    /// Link target URL.
+    pub url: String,
+}
+
+/// Link range inside a single [`wrap_inline`] result, offset-adjusted by the
+/// block renderer that prepends prefixes (quote bars, list markers).
+#[derive(Debug, Clone)]
+struct WrapLink {
+    line: usize,
+    start: usize,
+    end: usize,
+    url: String,
+}
+
+/// Append wrapped lines and their link ranges to the block output, rebasing
+/// link line indices onto `out`.
+fn push_wrapped(out: &mut Vec<Line<'static>>, links: &mut Vec<WrapLink>, wrapped: Vec<Line<'static>>, wl: Vec<WrapLink>) {
+    let base = out.len();
+    for mut l in wl {
+        l.line += base;
+        links.push(l);
+    }
+    out.extend(wrapped);
+}
+
+/// Horizontal alignment of a block inside the description body, taken from
+/// HTML wrapper tags (`<p align="center">`, `<center>`, `text-align` styles).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MdAlign {
+    Left,
+    Center,
+    Right,
+}
+
+/// A standalone image block found while rendering markdown.
+#[derive(Debug, Clone)]
+pub struct MdImage {
+    /// Index of the placeholder line in the rendered output.
+    pub line: usize,
+    /// Absolute URL of the image.
+    pub url: String,
+    /// Alignment requested by the surrounding HTML wrapper, if any.
+    pub align: MdAlign,
+    /// Link target when the image is wrapped in a link
+    /// (`[![alt](url)](target)` or `<a href="target"><img/></a>`).
+    pub link: Option<String>,
+}
+
+/// Render markdown to styled lines, ignoring standalone image blocks.
+#[allow(dead_code)]
 pub fn render_md(text: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    render_md_ex(text, width, theme).0
+}
+
+/// Render markdown, also reporting standalone `![alt](url)` blocks so the
+/// caller can replace their placeholder lines with real images.
+#[allow(dead_code)]
+pub fn render_md_ex(text: &str, width: usize, theme: &Theme) -> (Vec<Line<'static>>, Vec<MdImage>) {
+    let (lines, images, _) = render_md_full(text, width, theme);
+    (lines, images)
+}
+
+/// Like [`render_md_ex`], also reporting clickable inline links
+/// (`[label](url)`, `<a href="…">`) with their line/column ranges.
+pub fn render_md_full(
+    text: &str,
+    width: usize,
+    theme: &Theme,
+) -> (Vec<Line<'static>>, Vec<MdImage>, Vec<MdLink>) {
     let clean = strip_html(text);
-    let lines: Vec<&str> = clean.lines().collect();
+    let lines: Vec<&str> = clean.iter().map(|l| l.text.as_str()).collect();
+    let aligns: Vec<MdAlign> = clean.iter().map(|l| l.align).collect();
     let base = theme.card();
     let mut out: Vec<Line> = Vec::new();
+    let mut images: Vec<MdImage> = Vec::new();
+    let mut raw_links: Vec<WrapLink> = Vec::new();
     let mut i = 0usize;
     let mut prev_blank = false;
 
@@ -41,7 +122,7 @@ pub fn render_md(text: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> 
             }
             out.push(Line::from(Span::styled(
                 (0..width).map(|_| '─').collect::<String>(),
-                Style::default().fg(theme.green_dim),
+                Style::default().fg(theme.panel_alt),
             )));
             prev_blank = true;
             i += 1;
@@ -72,7 +153,34 @@ pub fn render_md(text: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> 
             }
             let text = trimmed.chars().skip(level).collect::<String>().trim_start().to_string();
             let heading_style = theme.header();
-            out.extend(wrap_inline(parse_inline(&text, heading_style, theme), width, heading_style));
+            let (wrapped, wl) = wrap_inline(parse_inline(&text, heading_style, theme), width, heading_style);
+            push_wrapped(&mut out, &mut raw_links, wrapped, wl);
+            prev_blank = true;
+            i += 1;
+            continue;
+        }
+        if let Some(block_imgs) = block_images(trimmed) {
+            if prev_blank {
+                out.push(Line::default());
+            }
+            let align = aligns[i];
+            for (alt, url, link) in block_imgs {
+                let label = if alt.trim().is_empty() {
+                    image_label(&url)
+                } else {
+                    alt
+                };
+                images.push(MdImage {
+                    line: out.len(),
+                    url,
+                    align,
+                    link,
+                });
+                out.push(Line::from(Span::styled(
+                    format!("▣ {label}"),
+                    Style::default().fg(theme.green_dim),
+                )));
+            }
             prev_blank = true;
             i += 1;
             continue;
@@ -102,7 +210,8 @@ pub fn render_md(text: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> 
             if prev_blank {
                 out.push(Line::default());
             }
-            out.extend(render_blockquote(&quote, width, theme));
+            let (quoted, ql) = render_blockquote(&quote, width, theme);
+            push_wrapped(&mut out, &mut raw_links, quoted, ql);
             prev_blank = true;
             i = j;
             continue;
@@ -128,7 +237,8 @@ pub fn render_md(text: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> 
             if prev_blank {
                 out.push(Line::default());
             }
-            out.extend(render_list(&items, marker, width, theme));
+            let (listed, ll) = render_list(&items, marker, width, theme);
+            push_wrapped(&mut out, &mut raw_links, listed, ll);
             prev_blank = true;
             i = j;
             continue;
@@ -200,7 +310,8 @@ pub fn render_md(text: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> 
             out.push(Line::default());
         }
         let joined = para.join(" ");
-        out.extend(wrap_inline(parse_inline(&joined, base, theme), width, base));
+        let (wrapped, wl) = wrap_inline(parse_inline(&joined, base, theme), width, base);
+        push_wrapped(&mut out, &mut raw_links, wrapped, wl);
         prev_blank = false;
         i = j;
     }
@@ -208,7 +319,16 @@ pub fn render_md(text: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> 
     while !out.is_empty() && line_blank(out.last().unwrap()) {
         out.pop();
     }
-    out
+    let links = raw_links
+        .into_iter()
+        .map(|l| MdLink {
+            line: l.line,
+            start: l.start,
+            end: l.end,
+            url: l.url,
+        })
+        .collect();
+    (out, images, links)
 }
 
 // ---------------------------------------------------------------------------
@@ -229,12 +349,20 @@ fn code_block(lines: &[String], width: usize, theme: &Theme) -> Vec<Line<'static
     out
 }
 
-fn render_blockquote(lines: &[String], width: usize, theme: &Theme) -> Vec<Line<'static>> {
+fn render_blockquote(lines: &[String], width: usize, theme: &Theme) -> (Vec<Line<'static>>, Vec<WrapLink>) {
     let style = Style::default().fg(theme.comment);
     let inner_w = width.saturating_sub(2).max(1);
     let mut out = Vec::new();
+    let mut links = Vec::new();
     for line in lines {
-        let wrapped = wrap_inline(parse_inline(line, style, theme), inner_w, style);
+        let (wrapped, wl) = wrap_inline(parse_inline(line, style, theme), inner_w, style);
+        let base = out.len();
+        for mut l in wl {
+            l.line += base;
+            l.start += 2;
+            l.end += 2;
+            links.push(l);
+        }
         for (idx, wrapped_line) in wrapped.iter().enumerate() {
             let prefix = if idx == 0 { "│ " } else { "  " };
             let mut spans = vec![Span::styled(prefix.to_string(), style)];
@@ -244,14 +372,15 @@ fn render_blockquote(lines: &[String], width: usize, theme: &Theme) -> Vec<Line<
             out.push(Line::from(spans));
         }
     }
-    out
+    (out, links)
 }
 
-fn render_list(items: &[String], marker: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+fn render_list(items: &[String], marker: &str, width: usize, theme: &Theme) -> (Vec<Line<'static>>, Vec<WrapLink>) {
     let ordered = marker != "-" && marker != "*" && marker != "+";
     let indent = 3usize;
     let inner_w = width.saturating_sub(indent).max(1);
     let mut out = Vec::new();
+    let mut links = Vec::new();
     for (idx, item) in items.iter().enumerate() {
         let marker_text = if ordered {
             let mut m = format!("{}", idx + 1);
@@ -260,7 +389,15 @@ fn render_list(items: &[String], marker: &str, width: usize, theme: &Theme) -> V
         } else {
             "• ".to_string()
         };
-        let wrapped = wrap_inline(parse_inline(item, theme.card(), theme), inner_w, theme.card());
+        let (wrapped, wl) = wrap_inline(parse_inline(item, theme.card(), theme), inner_w, theme.card());
+        let base = out.len();
+        for mut l in wl {
+            l.line += base;
+            let offset = if l.line == base { marker_text.width() } else { indent };
+            l.start += offset;
+            l.end += offset;
+            links.push(l);
+        }
         for (wi, wrapped_line) in wrapped.iter().enumerate() {
             let prefix = if wi == 0 {
                 marker_text.clone()
@@ -275,7 +412,7 @@ fn render_list(items: &[String], marker: &str, width: usize, theme: &Theme) -> V
             out.push(Line::from(spans));
         }
     }
-    out
+    (out, links)
 }
 
 fn render_table(rows: &[String], width: usize, theme: &Theme) -> Vec<Line<'static>> {
@@ -296,26 +433,52 @@ fn render_table(rows: &[String], width: usize, theme: &Theme) -> Vec<Line<'stati
     }
     let cols = max_cols.max(1);
     let gutter = 2usize;
-    let cell_w = (width.saturating_sub(cols.saturating_sub(1) * gutter) / cols).max(3);
-    let mut sep_parts: Vec<String> = Vec::new();
-    for _ in 0..cols {
-        sep_parts.push((0..cell_w).map(|_| '─').collect::<String>());
+    let min_w = 3usize;
+
+    let mut col_w = vec![0usize; cols];
+    for row in &cells {
+        for (ci, cell) in row.iter().enumerate().take(cols) {
+            col_w[ci] = col_w[ci].max(cell.width());
+        }
     }
-    let sep = sep_parts.join("  ");
+    let table_w = |col_w: &[usize]| -> usize {
+        col_w.iter().sum::<usize>() + gutter * cols.saturating_sub(1)
+    };
+    while table_w(&col_w) > width {
+        let widest = col_w
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| **w > min_w)
+            .max_by_key(|(_, w)| **w)
+            .map(|(ci, _)| ci);
+        match widest {
+            Some(ci) => col_w[ci] -= 1,
+            None => break,
+        }
+    }
+
+    let sep: String = col_w
+        .iter()
+        .map(|w| (0..*w).map(|_| '─').collect::<String>())
+        .collect::<Vec<_>>()
+        .join(&" ".repeat(gutter));
+
     let mut out = Vec::new();
     for (ri, row) in cells.iter().enumerate() {
         if ri == 1 {
-            out.push(Line::from(Span::styled(sep.clone(), Style::default().fg(theme.green_dim))));
+            out.push(Line::from(Span::styled(sep.clone(), Style::default().fg(theme.panel_alt))));
         }
         let mut line_spans: Vec<Span> = Vec::new();
-        for ci in 0..cols {
+        for (ci, w) in col_w.iter().enumerate() {
             let text = row.get(ci).cloned().unwrap_or_default();
-            let shown = truncate_cols(&text, cell_w);
+            let mut shown = truncate_cols(&text, *w);
+            let pad = w.saturating_sub(shown.width());
+            shown.push_str(&" ".repeat(pad));
             let cell_style = if ri == 0 { theme.header() } else { theme.card() };
             line_spans.push(Span::styled(shown, cell_style));
             if ci + 1 < cols {
                 line_spans.push(Span::styled(
-                    (0..gutter).map(|_| ' ').collect::<String>(),
+                    " ".repeat(gutter),
                     theme.card_dim(),
                 ));
             }
@@ -338,25 +501,27 @@ fn parse_inline(text: &str, base: Style, theme: &Theme) -> Vec<Frag> {
     while i < chars.len() {
         let c = chars[i];
         if c == '\\' && i + 1 < chars.len() {
-            push_frag(&mut out, format!("{}", chars[i + 1]), base);
+            push_frag(&mut out, format!("{}", chars[i + 1]), base, None);
             i += 2;
             continue;
         }
         if c == '!' && i + 1 < chars.len() && chars[i + 1] == '[' {
-            if let Some((alt, rest)) = link_target(&chars, i + 1) {
-                push_frag(&mut out, format!("▣ {alt}"), Style::default().fg(theme.green_dim));
+            if let Some((alt, _url, rest)) = link_target(&chars, i + 1) {
+                push_frag(&mut out, format!("▣ {alt}"), Style::default().fg(theme.green_dim), None);
                 i = rest;
                 continue;
             }
         }
         if c == '[' {
-            if let Some((label, rest)) = link_target(&chars, i) {
+            if let Some((label, url, rest)) = link_target(&chars, i) {
+                let url = normalize_img_url(&url);
                 let inner = parse_inline(&label, base, theme);
                 for frag in inner {
                     push_frag(
                         &mut out,
                         frag.text.clone(),
                         frag.style.clone().add_modifier(Modifier::UNDERLINED),
+                        frag.link.clone().or_else(|| Some(url.clone())),
                     );
                 }
                 i = rest;
@@ -365,7 +530,7 @@ fn parse_inline(text: &str, base: Style, theme: &Theme) -> Vec<Frag> {
         }
         if c == '`' {
             if let Some((code, rest)) = code_span(&chars, i) {
-                push_frag(&mut out, code, Style::default().fg(theme.info));
+                push_frag(&mut out, code, Style::default().fg(theme.info), None);
                 i = rest;
                 continue;
             }
@@ -388,34 +553,35 @@ fn parse_inline(text: &str, base: Style, theme: &Theme) -> Vec<Frag> {
                 };
                 let inner = parse_inline(&inner_text, inner_style, theme);
                 for frag in inner {
-                    push_frag(&mut out, frag.text.clone(), frag.style.clone());
+                    push_frag(&mut out, frag.text.clone(), frag.style.clone(), frag.link.clone());
                 }
                 i = closer + run;
                 continue;
             }
         }
-        push_frag(&mut out, format!("{}", c), base);
+        push_frag(&mut out, format!("{}", c), base, None);
         i += 1;
     }
     out
 }
 
-/// Push a fragment, merging with the previous when the style matches.
-fn push_frag(out: &mut Vec<Frag>, text: String, style: Style) {
+/// Push a fragment, merging with the previous when style and link match.
+fn push_frag(out: &mut Vec<Frag>, text: String, style: Style, link: Option<String>) {
     if text.is_empty() {
         return;
     }
     if let Some(last) = out.last_mut() {
-        if last.style == style {
+        if last.style == style && last.link == link {
             last.text.push_str(text.as_str());
             return;
         }
     }
-    out.push(Frag { text, style });
+    out.push(Frag { text, style, link });
 }
 
-/// For a `[` at `i`, find the closing `](url)` and return `(label, next_index)`.
-fn link_target(chars: &[char], i: usize) -> Option<(String, usize)> {
+/// For a `[` at `i`, find the closing `](url)` and return
+/// `(label, url, next_index)`.
+fn link_target(chars: &[char], i: usize) -> Option<(String, String, usize)> {
     let mut depth = 0;
     let mut j = i;
     while j < chars.len() {
@@ -437,13 +603,192 @@ fn link_target(chars: &[char], i: usize) -> Option<(String, usize)> {
                             .take(j - i - 1)
                             .map(|ch| *ch)
                             .collect::<String>();
-                        return Some((label, k + 1));
+                        let url: String = chars[j + 2..k].iter().collect();
+                        return Some((label, url, k + 1));
                     }
                 }
                 return None;
             }
         }
         j += 1;
+    }
+    None
+}
+
+/// Parse `![alt](url)` starting at `start` (index of `!`). Returns
+/// `(alt, url, next_index_after_closing_paren)`.
+fn parse_image_at(chars: &[char], start: usize) -> Option<(String, String, usize)> {
+    if start + 1 >= chars.len() || chars[start] != '!' || chars[start + 1] != '[' {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut j = start + 1;
+    while j < chars.len() {
+        match chars[j] {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    if depth != 0 || j + 1 >= chars.len() || chars[j + 1] != '(' {
+        return None;
+    }
+    let alt: String = chars[start + 2..j].iter().collect();
+    let mut k = j + 2;
+    while k < chars.len() && chars[k] != ')' {
+        k += 1;
+    }
+    if k >= chars.len() {
+        return None;
+    }
+    let url: String = chars[j + 2..k].iter().collect();
+    let url = normalize_img_url(&url);
+    if url.is_empty() {
+        return None;
+    }
+    Some((alt, url, k + 1))
+}
+
+/// Parse a line consisting solely of image tokens — `![alt](url)`, optionally
+/// wrapped in a link (`[![alt](url)](target)`), separated by whitespace — so
+/// badge rows become image blocks. Returns `(alt, url, link)` triples; `link`
+/// is the wrapping link target when present. Returns `None` when any non-image
+/// text is present, leaving the line to normal inline rendering.
+fn block_images(line: &str) -> Option<Vec<(String, String, Option<String>)>> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0usize;
+    let mut out: Vec<(String, String, Option<String>)> = Vec::new();
+    loop {
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i >= chars.len() {
+            break;
+        }
+        let linked = chars[i] == '[';
+        if linked {
+            i += 1;
+            while i < chars.len() && chars[i].is_whitespace() {
+                i += 1;
+            }
+        }
+        let (alt, url, next) = parse_image_at(&chars, i)?;
+        i = next;
+        let mut link = None;
+        if linked {
+            while i < chars.len() && chars[i].is_whitespace() {
+                i += 1;
+            }
+            if i >= chars.len() || chars[i] != ']' {
+                return None;
+            }
+            i += 1;
+            while i < chars.len() && chars[i].is_whitespace() {
+                i += 1;
+            }
+            if i < chars.len() && chars[i] == '(' {
+                let open = i;
+                let mut depth = 0i32;
+                let mut close = usize::MAX;
+                while i < chars.len() {
+                    match chars[i] {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                close = i;
+                                i += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                if depth != 0 || close == usize::MAX {
+                    return None;
+                }
+                let target: String = chars[open + 1..close].iter().collect();
+                let target = target.trim().to_string();
+                if !target.is_empty() {
+                    link = Some(target);
+                }
+            }
+        }
+        out.push((alt, url, link));
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Placeholder label for an image with an empty alt: the URL's file name
+/// without query string or extension (`…/banner.png?x=1` → `banner`).
+fn image_label(url: &str) -> String {
+    let path = url.split('?').next().unwrap_or(url);
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let stem = name.split('.').next().unwrap_or(name);
+    if stem.trim().is_empty() {
+        "image".to_string()
+    } else {
+        stem.to_string()
+    }
+}
+
+/// Normalize an image URL for fetching (`//host/…` → `https://host/…`).
+fn normalize_img_url(url: &str) -> String {
+    let url = url.trim().replace(['[', ']'], "");
+    match url.strip_prefix("//") {
+        Some(rest) => format!("https://{rest}"),
+        None => url,
+    }
+}
+
+/// Extract `name="value"` (or `name='value'`) from an HTML tag body,
+/// matching the attribute name case-insensitively at a word boundary.
+fn html_attr(tag: &str, name: &str) -> Option<String> {
+    let t = tag.as_bytes();
+    let n = name.as_bytes();
+    let mut i = 0usize;
+    while i + n.len() <= t.len() {
+        let is_match = t[i..i + n.len()].eq_ignore_ascii_case(n)
+            && (i == 0 || t[i - 1].is_ascii_whitespace());
+        if is_match {
+            let mut k = i + n.len();
+            while k < t.len() && t[k].is_ascii_whitespace() {
+                k += 1;
+            }
+            if k < t.len() && t[k] == b'=' {
+                k += 1;
+                while k < t.len() && t[k].is_ascii_whitespace() {
+                    k += 1;
+                }
+                if k >= t.len() {
+                    return None;
+                }
+                let quote = t[k];
+                if quote == b'"' || quote == b'\'' {
+                    let start = k + 1;
+                    let end = t[start..].iter().position(|&c| c == quote)? + start;
+                    return Some(tag[start..end].to_string());
+                }
+                let end = t[k..]
+                    .iter()
+                    .position(|&c| c.is_ascii_whitespace() || c == b'/')
+                    .map(|p| p + k)
+                    .unwrap_or(t.len());
+                return Some(tag[k..end].to_string());
+            }
+        }
+        i += 1;
     }
     None
 }
@@ -508,23 +853,26 @@ fn find_closer(chars: &[char], from: usize, c: char, run: usize) -> Option<usize
 
 /// Wrap inline fragments to `width` columns using word wrapping. Returns styled
 /// lines (each ≤ `width` display columns).
-fn wrap_inline(frags: Vec<Frag>, width: usize, line_style: Style) -> Vec<Line<'static>> {
+fn wrap_inline(frags: Vec<Frag>, width: usize, line_style: Style) -> (Vec<Line<'static>>, Vec<WrapLink>) {
     if width == 0 {
-        return vec![Line::default()];
+        return (vec![Line::default()], Vec::new());
     }
-    let mut stream: Vec<(char, Style)> = Vec::new();
+    let mut stream: Vec<(char, Style, Option<String>)> = Vec::new();
     for frag in frags {
         for c in frag.text.chars() {
-            stream.push((c, frag.style.clone()));
+            stream.push((c, frag.style.clone(), frag.link.clone()));
         }
     }
     if stream.is_empty() {
-        return vec![Line::from(Span::styled(String::new(), line_style))];
+        return (
+            vec![Line::from(Span::styled(String::new(), line_style))],
+            Vec::new(),
+        );
     }
 
     // Split into words.
-    let mut words: Vec<Vec<(char, Style)>> = Vec::new();
-    let mut word: Vec<(char, Style)> = Vec::new();
+    let mut words: Vec<Vec<(char, Style, Option<String>)>> = Vec::new();
+    let mut word: Vec<(char, Style, Option<String>)> = Vec::new();
     for item in stream {
         if item.0 == ' ' {
             if !word.is_empty() {
@@ -539,11 +887,11 @@ fn wrap_inline(frags: Vec<Frag>, width: usize, line_style: Style) -> Vec<Line<'s
         words.push(word);
     }
 
-    let mut lines: Vec<Vec<(char, Style)>> = Vec::new();
-    let mut line: Vec<(char, Style)> = Vec::new();
+    let mut lines: Vec<Vec<(char, Style, Option<String>)>> = Vec::new();
+    let mut line: Vec<(char, Style, Option<String>)> = Vec::new();
     let mut cols = 0usize;
     for word in words {
-        let w: usize = word.iter().map(|(c, _)| char_cols(*c)).sum();
+        let w: usize = word.iter().map(|(c, _, _)| char_cols(*c)).sum();
         if w > width {
             if !line.is_empty() {
                 lines.push(line);
@@ -569,7 +917,12 @@ fn wrap_inline(frags: Vec<Frag>, width: usize, line_style: Style) -> Vec<Line<'s
         }
         if !line.is_empty() {
             if cols + 1 + w <= width {
-                line.push((' ', line.last().unwrap().1.clone()));
+                let last = line.last().unwrap();
+                let last_style = last.1;
+                let last_link = last.2.clone();
+                let word_link = word.first().unwrap().2.clone();
+                let space_link = if last_link == word_link { last_link } else { None };
+                line.push((' ', last_style, space_link));
                 cols += 1;
             } else {
                 lines.push(line);
@@ -578,8 +931,8 @@ fn wrap_inline(frags: Vec<Frag>, width: usize, line_style: Style) -> Vec<Line<'s
             }
         }
         for item in word {
-            line.push(item);
             cols += char_cols(item.0);
+            line.push(item);
         }
     }
     if !line.is_empty() {
@@ -590,26 +943,51 @@ fn wrap_inline(frags: Vec<Frag>, width: usize, line_style: Style) -> Vec<Line<'s
     }
 
     let mut out: Vec<Line> = Vec::new();
-    for chars in lines {
+    let mut links: Vec<WrapLink> = Vec::new();
+    for (line_idx, chars) in lines.into_iter().enumerate() {
         let mut spans: Vec<Span> = Vec::new();
         let mut style = line_style.clone();
+        let mut link: Option<String> = None;
         let mut run = String::new();
-        for (c, st) in chars {
-            if st != style {
-                if !run.is_empty() {
-                    spans.push(Span::styled(run, style));
-                    run = String::new();
-                }
-                style = st.clone();
+        let mut run_start = 0usize;
+        let mut col = 0usize;
+        let flush = |run: &mut String,
+                         style: Style,
+                         link: Option<String>,
+                         run_start: usize,
+                         col: usize,
+                         spans: &mut Vec<Span>,
+                         links: &mut Vec<WrapLink>| {
+            if run.is_empty() {
+                return;
+            }
+            spans.push(Span::styled(std::mem::take(run), style));
+            if let Some(url) = link {
+                links.push(WrapLink {
+                    line: line_idx,
+                    start: run_start,
+                    end: col,
+                    url,
+                });
+            }
+        };
+        for (c, st, ln) in chars {
+            let cw = char_cols(c);
+            if !run.is_empty() && (st != style || ln != link) {
+                flush(&mut run, style, link.clone(), run_start, col, &mut spans, &mut links);
+                run_start = col;
+            }
+            if run.is_empty() {
+                style = st;
+                link = ln;
             }
             run.push(c);
+            col += cw;
         }
-        if !run.is_empty() {
-            spans.push(Span::styled(run, style));
-        }
+        flush(&mut run, style, link, run_start, col, &mut spans, &mut links);
         out.push(Line::from(spans));
     }
-    out
+    (out, links)
 }
 
 // ---------------------------------------------------------------------------
@@ -690,11 +1068,27 @@ fn line_blank(line: &Line) -> bool {
 // Preprocessing
 // ---------------------------------------------------------------------------
 
+/// One preprocessed source line with the block alignment in effect for it.
+struct CleanLine {
+    text: String,
+    align: MdAlign,
+}
+
 /// Strip raw HTML, converting `<br>` into newlines so inline HTML in Modrinth
-/// descriptions degrades to readable text.
-fn strip_html(text: &str) -> String {
+/// descriptions degrades to readable text. `<img>` tags become markdown images
+/// in place. `<a href="…">…</a>` wrappers become markdown links (`[…](target)`)
+/// so linked images keep their target; line breaks inside an anchor join into
+/// one line instead of splitting the link apart.
+///
+/// Block-level wrappers carrying `align="…"` / `text-align: …` (and `<center>`)
+/// push an alignment that applies to every line until the matching close tag,
+/// so image rows can follow Modrinth's per-paragraph alignment.
+fn strip_html(text: &str) -> Vec<CleanLine> {
     let chars: Vec<char> = text.chars().collect();
-    let mut out = String::new();
+    let mut lines: Vec<CleanLine> = Vec::new();
+    let mut cur = String::new();
+    let mut stack = vec![MdAlign::Left];
+    let mut anchors: Vec<String> = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         if chars[i] == '<' {
@@ -709,20 +1103,170 @@ fn strip_html(text: &str) -> String {
                 .iter()
                 .skip(i + 1)
                 .take(j - i - 1)
-                .map(|c| *c)
+                .copied()
                 .collect::<String>();
             let lower = tag.to_ascii_lowercase();
-            if lower.starts_with("br") || lower.starts_with("/p") || lower.starts_with("/h") {
-                out.push('\n');
-                out.push('\n');
+            if lower.starts_with("img") {
+                if let Some(src) = html_attr(&tag, "src") {
+                    let alt = html_attr(&tag, "alt").unwrap_or_default();
+                    let alt = alt.replace(['[', ']'], "");
+                    let url = normalize_img_url(&src);
+                    if !url.is_empty() {
+                        cur.push_str(&format!("![{alt}]({url})"));
+                    }
+                }
+            } else if lower.starts_with("br") {
+                if anchors.is_empty() {
+                    flush_line(&mut cur, &mut lines, &stack);
+                    flush_line(&mut cur, &mut lines, &stack);
+                } else {
+                    cur.push(' ');
+                }
+            } else if let Some(name) = closing_tag_name(&lower) {
+                if name == "a" {
+                    if let Some(href) = anchors.pop() {
+                        if !href.is_empty() {
+                            cur.push_str(&format!("]({href})"));
+                        }
+                    }
+                }
+                if is_block_tag(&name) && stack.len() > 1 {
+                    stack.pop();
+                }
+                if name.starts_with('p') || name.starts_with('h') {
+                    flush_line(&mut cur, &mut lines, &stack);
+                    flush_line(&mut cur, &mut lines, &stack);
+                }
+            } else if let Some(name) = opening_tag_name(&lower) {
+                if name == "a" {
+                    let href = html_attr(&tag, "href")
+                        .map(|h| h.trim().to_string())
+                        .filter(|h| !h.is_empty());
+                    match href {
+                        Some(href) => {
+                            anchors.push(href);
+                            cur.push('[');
+                        }
+                        None => anchors.push(String::new()),
+                    }
+                } else if name == "center" {
+                    stack.push(MdAlign::Center);
+                } else if is_block_tag(&name) {
+                    let align = tag_align(&tag).unwrap_or(MdAlign::Left);
+                    stack.push(align);
+                }
             }
             i = j + 1;
+        } else if chars[i] == '\n' {
+            if anchors.is_empty() {
+                flush_line(&mut cur, &mut lines, &stack);
+            } else {
+                cur.push(' ');
+            }
+            i += 1;
         } else {
-            out.push(chars[i]);
+            cur.push(chars[i]);
             i += 1;
         }
     }
-    out
+    if !cur.is_empty() {
+        flush_line(&mut cur, &mut lines, &stack);
+    }
+    lines
+}
+
+fn flush_line(cur: &mut String, lines: &mut Vec<CleanLine>, stack: &[MdAlign]) {
+    let align = stack.last().copied().unwrap_or(MdAlign::Left);
+    lines.push(CleanLine {
+        text: std::mem::take(cur),
+        align,
+    });
+}
+
+/// Tag name of a `</tag …>` closing tag, lowercased.
+fn closing_tag_name(lower: &str) -> Option<String> {
+    let rest = lower.strip_prefix('/')?;
+    let name = rest.split_whitespace().next().unwrap_or("");
+    let name = name.trim_end_matches('/');
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// Tag name of an opening `<tag …>` / `<tag/>` tag, lowercased.
+fn opening_tag_name(lower: &str) -> Option<String> {
+    if lower.starts_with('/') || lower.starts_with('!') {
+        return None;
+    }
+    let name = lower.split(|c: char| c.is_ascii_whitespace() || c == '/').next()?;
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+fn is_block_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "p" | "div"
+            | "center"
+            | "blockquote"
+            | "section"
+            | "article"
+            | "header"
+            | "footer"
+            | "figure"
+            | "figcaption"
+            | "ul"
+            | "ol"
+            | "li"
+            | "dl"
+            | "dt"
+            | "dd"
+            | "table"
+            | "thead"
+            | "tbody"
+            | "tr"
+            | "td"
+            | "th"
+            | "pre"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+    )
+}
+
+/// Alignment declared on a tag via `align="…"` or `style="text-align: …"`.
+fn tag_align(tag: &str) -> Option<MdAlign> {
+    if let Some(v) = html_attr(tag, "align") {
+        if let Some(a) = parse_align(&v) {
+            return Some(a);
+        }
+    }
+    let style = html_attr(tag, "style")?;
+    let idx = style.to_ascii_lowercase().find("text-align")?;
+    let rest = style[idx + "text-align".len()..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let value: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    parse_align(&value)
+}
+
+fn parse_align(value: &str) -> Option<MdAlign> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "center" => Some(MdAlign::Center),
+        "right" | "end" => Some(MdAlign::Right),
+        "left" | "start" => Some(MdAlign::Left),
+        _ => None,
+    }
 }
 
 /// Display columns occupied by a character (tabs as one column).
@@ -827,4 +1371,356 @@ mod tests {
             assert!(w <= 16, "line too wide: {line:?} ({w} cols)");
         }
     }
+
+    #[test]
+    fn standalone_images_yield_markers() {
+        let md = "text\n\n![cool pic](https://cdn.example/x.png)\n\nmore";
+        let (lines, images) = render_md_ex(md, 40, &theme());
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].url, "https://cdn.example/x.png");
+        let text = plain(&lines);
+        assert_eq!(text[images[0].line], "▣ cool pic");
+    }
+
+    #[test]
+    fn inline_images_stay_placeholders() {
+        let (lines, images) = render_md_ex("see ![shot](https://c.e/s.png) here", 40, &theme());
+        assert!(images.is_empty(), "inline image is not a block");
+        let text = plain(&lines);
+        assert!(text[0].contains("▣ shot"));
+    }
+
+    #[test]
+    fn converts_img_tags_to_image_blocks() {
+        let md = "hello\n\n<img src=\"https://cdn.example/a.png\" alt=\"A pic\">\n\nbye";
+        let (lines, images) = render_md_ex(md, 40, &theme());
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].url, "https://cdn.example/a.png");
+        let text = plain(&lines);
+        assert_eq!(text[images[0].line], "▣ A pic");
+    }
+
+    #[test]
+    fn normalizes_protocol_relative_urls() {
+        let (_, images) = render_md_ex("![](//cdn.example/b.png)", 40, &theme());
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].url, "https://cdn.example/b.png");
+    }
+
+    #[test]
+    fn html_attr_extraction() {
+        assert_eq!(
+            html_attr("img src=\"a.png\" alt='x'", "src").as_deref(),
+            Some("a.png")
+        );
+        assert_eq!(html_attr("img alt=x src=b.png", "alt").as_deref(), Some("x"));
+        assert_eq!(html_attr("img data-src=nope", "src"), None);
+    }
+
+    #[test]
+    fn linked_images_yield_blocks_without_bracket_junk() {
+        let md = "[<img src=\"https://img.shields.io/badge/Discord-5865F2\" alt=\"discord\"/>](https://discord.gg/x)";
+        let (lines, images) = render_md_ex(md, 60, &theme());
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].url, "https://img.shields.io/badge/Discord-5865F2");
+        assert_eq!(images[0].link.as_deref(), Some("https://discord.gg/x"));
+        let text = plain(&lines);
+        assert_eq!(text[images[0].line], "▣ discord");
+        for line in &text {
+            assert!(!line.contains('[') && !line.contains(']'), "bracket junk: {line:?}");
+        }
+    }
+
+    #[test]
+    fn linked_markdown_images_yield_blocks() {
+        let md = "[![shot](https://c.e/s.png)](https://example.com)";
+        let (lines, images) = render_md_ex(md, 60, &theme());
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].url, "https://c.e/s.png");
+        assert_eq!(images[0].link.as_deref(), Some("https://example.com"));
+        let text = plain(&lines);
+        assert_eq!(text[images[0].line], "▣ shot");
+    }
+
+    #[test]
+    fn badge_row_of_linked_images_yields_blocks_in_order() {
+        let md = "[![a](https://c.e/a.png)](https://x/1) [![b](https://c.e/b.png)](https://x/2)";
+        let (_, images) = render_md_ex(md, 60, &theme());
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].url, "https://c.e/a.png");
+        assert_eq!(images[0].link.as_deref(), Some("https://x/1"));
+        assert_eq!(images[1].url, "https://c.e/b.png");
+        assert_eq!(images[1].link.as_deref(), Some("https://x/2"));
+        assert_eq!(images[1].line, images[0].line + 1, "placeholders stack tightly");
+    }
+
+    #[test]
+    fn html_anchor_image_keeps_link_target() {
+        let md = "<a href=\"https://discord.gg/x\"><img src=\"https://c.e/badge.png\" alt=\"badge\"/></a>";
+        let (lines, images) = render_md_ex(md, 60, &theme());
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].url, "https://c.e/badge.png");
+        assert_eq!(images[0].link.as_deref(), Some("https://discord.gg/x"));
+        let text = plain(&lines);
+        assert_eq!(text[images[0].line], "▣ badge");
+        for line in &text {
+            assert!(!line.contains('[') && !line.contains(']'), "bracket junk: {line:?}");
+        }
+    }
+
+    #[test]
+    fn multiline_html_anchor_joins_into_one_block() {
+        let md = "<a href=\"https://example.com/more\">\n<img src=\"https://c.e/m.png\" alt=\"m\">\n</a><br><br>tail";
+        let (lines, images) = render_md_ex(md, 60, &theme());
+        assert_eq!(images.len(), 1, "anchor image is one block");
+        assert_eq!(images[0].link.as_deref(), Some("https://example.com/more"));
+        let text = plain(&lines);
+        assert!(
+            !text.iter().any(|l| l.contains('[') || l.contains(']')),
+            "no stray anchor brackets: {text:?}"
+        );
+        assert!(
+            text.iter().any(|l| l.contains("tail")),
+            "text after anchor survives"
+        );
+    }
+
+    #[test]
+    fn html_anchor_text_link_stays_inline() {
+        let (lines, images) =
+            render_md_ex("see <a href=\"https://c.e/d\">docs</a> now", 60, &theme());
+        assert!(images.is_empty());
+        let text = plain(&lines);
+        assert!(text[0].contains("docs"));
+        assert!(!text[0].contains('['), "no stray brackets: {:?}", text[0]);
+    }
+
+    #[test]
+    fn text_plus_link_falls_back_to_inline() {
+        let (lines, images) =
+            render_md_ex("see [docs](https://c.e/docs) for details", 60, &theme());
+        assert!(images.is_empty());
+        assert!(plain(&lines)[0].contains("docs"));
+    }
+
+    #[test]
+    fn text_link_reports_line_and_columns() {
+        let (lines, _images, links) =
+            render_md_full("see [docs](https://c.e/x) now", 80, &theme());
+        assert_eq!(links.len(), 1);
+        let l = &links[0];
+        assert_eq!(l.line, 0);
+        assert_eq!(l.start, 4, "link starts right after `see `");
+        assert_eq!(l.end, 8, "link ends after `docs`");
+        assert_eq!(l.url, "https://c.e/x");
+        let text = plain(&lines);
+        assert_eq!(text[0], "see docs now");
+    }
+
+    #[test]
+    fn wrapped_text_link_reports_range_per_line() {
+        let (_lines, _images, links) = render_md_full(
+            "alpha [one two three four](https://c.e/x) omega",
+            16,
+            &theme(),
+        );
+        assert_eq!(links.len(), 2, "one range per wrapped line");
+        assert_eq!((links[0].line, links[0].start, links[0].end), (0, 6, 13));
+        assert_eq!((links[1].line, links[1].start, links[1].end), (1, 0, 10));
+        assert_eq!(links[0].url, "https://c.e/x");
+        assert_eq!(links[1].url, "https://c.e/x");
+    }
+
+    #[test]
+    fn list_and_quote_links_offset_by_prefix() {
+        let (_l, _i, links) = render_md_full("- see [docs](https://c.e/a)", 80, &theme());
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            (links[0].line, links[0].start, links[0].end),
+            (0, 6, 10),
+            "marker prefix shifts the range"
+        );
+        let (_l, _i, qlinks) = render_md_full("> [docs](https://c.e/a)", 80, &theme());
+        assert_eq!(qlinks.len(), 1);
+        assert_eq!((qlinks[0].start, qlinks[0].end), (2, 6));
+    }
+
+    #[test]
+    fn html_text_anchor_reports_range() {
+        let (_l, _i, links) =
+            render_md_full("see <a href=\"https://c.e/g\">guide</a> now", 80, &theme());
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].url, "https://c.e/g");
+        assert_eq!((links[0].line, links[0].start, links[0].end), (0, 4, 9));
+    }
+
+    #[test]
+    fn heading_and_bold_links_are_tracked() {
+        let (_l, _i, hlinks) = render_md_full("# [Title](https://c.e/t)", 80, &theme());
+        assert_eq!(hlinks.len(), 1);
+        assert_eq!((hlinks[0].start, hlinks[0].end), (0, 5), "hash prefix stripped");
+        let (_l, _i, blinks) = render_md_full("**[bold](https://c.e/b)**", 80, &theme());
+        assert_eq!(blinks.len(), 1);
+        assert_eq!((blinks[0].start, blinks[0].end), (0, 4));
+    }
+
+    #[test]
+    fn table_columns_align_across_rows() {
+        let md = concat!(
+            "Other mods | Without IF | With IF | Improvement\n",
+            "| --- | --- | --- | --- |\n",
+            "None | 16 FPS | 60 FPS | 3.75x\n",
+            "Sodium | 21 FPS | 82 FPS | 3.90x"
+        );
+        let (lines, _i, _l) = render_md_full(md, 80, &theme());
+        let text = plain(&lines);
+        assert!(text[1].contains('─'), "separator sits under the header");
+        for (col, (head, cell)) in [
+            ("Without IF", "16 FPS"),
+            ("With IF", "60 FPS"),
+            ("Improvement", "3.75x"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let head_col = text[0].find(head).unwrap_or_else(|| panic!("header `{head}` missing"));
+            let cell_col = text[2].find(cell).unwrap_or_else(|| panic!("cell `{cell}` missing"));
+            assert_eq!(head_col, cell_col, "column {col} aligns");
+        }
+        let sep_cols: Vec<usize> = text[1].match_indices('─').map(|(i, _)| i).collect();
+        let seg_start = *sep_cols.first().unwrap();
+        assert_eq!(seg_start, 0, "first segment starts at the left edge");
+        let cell_col = text[0].find("Without IF").unwrap();
+        assert!(
+            sep_cols.contains(&cell_col),
+            "a segment starts at every column boundary"
+        );
+    }
+
+    #[test]
+    fn table_shrinks_to_fit_narrow_width() {
+        let md = concat!(
+            "aaaa | b\n",
+            "| --- | --- |\n",
+            "cccccc | d"
+        );
+        let (lines, _i, _l) = render_md_full(md, 8, &theme());
+        for line in plain(&lines) {
+            assert!(
+                line.width() <= 8,
+                "row wider than the table area: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn image_inside_text_line_stays_inline() {
+        let (lines, images) =
+            render_md_ex("[text](https://c.e/x) and ![pic](https://c.e/p.png)", 60, &theme());
+        assert!(images.is_empty(), "mixed line is not a block");
+        assert!(plain(&lines)[0].contains("▣ pic"));
+    }
+
+    #[test]
+    fn nested_paren_link_target_is_consumed() {
+        let md = "[![g](https://c.e/g.png)](https://en.wikipedia.org/wiki/Foo_(bar))";
+        let (lines, images) = render_md_ex(md, 60, &theme());
+        assert_eq!(images.len(), 1);
+        let text = plain(&lines);
+        for line in &text {
+            assert!(!line.contains(']'), "bracket junk: {line:?}");
+        }
+    }
+
+    #[test]
+    fn empty_alt_falls_back_to_file_name() {
+        let (lines, images) = render_md_ex("![](https://c.e/img/banner.png?w=2)", 60, &theme());
+        assert_eq!(images.len(), 1);
+        assert_eq!(plain(&lines)[images[0].line], "▣ banner");
+    }
+
+    #[test]
+    fn plain_images_are_left_aligned() {
+        let md = "![a](https://c.e/a.png)\n![b](https://c.e/b.png)";
+        let (_, images) = render_md_ex(md, 60, &theme());
+        assert_eq!(images.len(), 2);
+        assert!(images.iter().all(|i| i.align == MdAlign::Left));
+    }
+
+    #[test]
+    fn center_paragraph_aligns_images_until_close_tag() {
+        let md = "<p align=\"center\" style=\"text-align: center;\">\n<img src=\"https://c.e/a.png\" alt=\"a\">\n</p>\n\n![b](https://c.e/b.png)";
+        let (_, images) = render_md_ex(md, 60, &theme());
+        assert_eq!(images.len(), 2, "wrapper images become blocks");
+        assert_eq!(images[0].align, MdAlign::Center, "inside align=center");
+        assert_eq!(images[1].align, MdAlign::Left, "after </p> back to left");
+    }
+
+    #[test]
+    fn center_tag_aligns_following_block() {
+        let md = "<center>\n![a](https://c.e/a.png)\n</center>";
+        let (_, images) = render_md_ex(md, 60, &theme());
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].align, MdAlign::Center);
+    }
+
+    #[test]
+    fn text_align_right_in_style_is_honored() {
+        let md = "<div style=\"text-align: right\">\n![a](https://c.e/a.png)\n</div>";
+        let (_, images) = render_md_ex(md, 60, &theme());
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].align, MdAlign::Right);
+    }
+
+    #[test]
+    fn linked_badge_row_keeps_wrapper_alignment() {
+        let md = "<p align=\"center\">\n[![a](https://c.e/a.png)](https://x/1)\n[![b](https://c.e/b.png)](https://x/2)\n</p>";
+        let (_, images) = render_md_ex(md, 60, &theme());
+        assert_eq!(images.len(), 2);
+        assert!(images.iter().all(|i| i.align == MdAlign::Center));
+    }
+
+    #[test]
+    fn unclosed_br_inside_center_does_not_reset_alignment() {
+        let md = "<center>\n<br>![a](https://c.e/a.png)\n</center>";
+        let (_, images) = render_md_ex(md, 60, &theme());
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].align, MdAlign::Center);
+    }
+
+    #[test]
+    fn entityculling_style_body_yields_expected_alignments() {
+        let md = concat!(
+            "![Entity Culling Banner](https://tr7zw.github.io/uikit/banner/header_entity_culling.png)\n\n",
+            "<p align=\"center\" style=\"text-align: center;\">\n",
+            "  <a href=\"https://discord.gg/x\"><img src=\"https://tr7zw.github.io/uikit/social_buttons_icon/Discord-Button-64.png\" alt=\"Discord\" style=\"margin: 5px 10px;\"></a>\n",
+            "  <a href=\"https://github.com/x\"><img src=\"https://tr7zw.github.io/uikit/social_buttons_icon/Github-Button-64.png\" alt=\"GitHub\" style=\"margin: 5px 10px;\"></a>\n",
+            "</p>\n\n",
+            "<br>![Divider](https://tr7zw.github.io/uikit/divider_faded/Divider_01.png)\n\n",
+            "<img src=\"https://tr7zw.github.io/uikit/headlines/large/About.png\" alt=\"About\" style=\"margin: 5px 10px;\">"
+        );
+        let (_, images) = render_md_ex(md, 100, &theme());
+        assert_eq!(images.len(), 5, "banner, 2 badges, divider, headline");
+        assert_eq!(images[0].align, MdAlign::Left, "banner");
+        assert_eq!(images[1].align, MdAlign::Center, "discord badge");
+        assert_eq!(images[2].align, MdAlign::Center, "github badge");
+        assert_eq!(images[3].align, MdAlign::Left, "divider after </p>");
+        assert_eq!(images[4].align, MdAlign::Left, "bare img headline");
+        assert_eq!(
+            images[1].link.as_deref(),
+            Some("https://discord.gg/x"),
+            "html anchor target captured"
+        );
+        assert_eq!(
+            images[2].link.as_deref(),
+            Some("https://github.com/x"),
+            "html anchor target captured"
+        );
+        assert_eq!(images[0].link, None, "plain banner has no link");
+        assert!(
+            images[2].line > images[1].line,
+            "badge placeholders stay in source order"
+        );
+    }
 }
+

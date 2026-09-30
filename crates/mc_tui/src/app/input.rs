@@ -3,10 +3,11 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use super::{
-    rect_contains, move_selection, settings_field_count, split_args, App, ButtonId, Focus,
-    HitAction, Nav, OverlayAction, PickerKey, NAV_BUTTON_HEIGHT,
+    rect_contains, settings_field_count, split_args, App, ButtonId, Focus, HitAction, Nav,
+    OverlayAction, PickerKey, NAV_BUTTON_HEIGHT,
 };
 use crate::forms::{Form, FormAction, Overlay, TextAction};
+use crate::views::list_wheel;
 
 impl App {
     pub(crate) fn handle_terminal_event(&mut self, event: crossterm::event::Event) -> bool {
@@ -333,6 +334,9 @@ impl App {
             HitAction::BrowseDetailTab(idx) => self.browse_select_tab(idx),
             HitAction::BrowseGallery(idx) => self.browse_select_gallery(idx),
             HitAction::BrowseLink(idx) => self.open_project_link(idx),
+            HitAction::BrowseBodyLink(idx) => self.open_body_link(idx),
+            HitAction::BrowseTextLink(idx) => self.open_text_link(idx),
+            HitAction::BrowseChangelogLink(idx) => self.open_changelog_link(idx),
             HitAction::BrowseInstall => self.browse_install(),
             HitAction::BrowseQuickInstall(idx) => self.browse_quick_install(idx),
             HitAction::BrowseSearchBar => {
@@ -445,16 +449,29 @@ impl App {
             Nav::Browse => self.browse_scroll(delta),
             Nav::Versions => {}
             Nav::Modpacks => {
-                let step = delta * 4;
                 if self.selected_project.is_some() {
-                    move_selection(&mut self.project_state, self.project_versions.len(), step);
+                    list_wheel(
+                        &mut self.project_state,
+                        self.project_versions.len(),
+                        self.project_visible,
+                        delta,
+                    );
                 } else {
-                    move_selection(&mut self.search_state, self.search_results.len(), step);
+                    list_wheel(
+                        &mut self.search_state,
+                        self.search_results.len(),
+                        self.search_visible,
+                        delta,
+                    );
                 }
             }
             Nav::Mods => {
-                let step = delta * 4;
-                move_selection(&mut self.mods_state, self.installed_mods.len(), step);
+                list_wheel(
+                    &mut self.mods_state,
+                    self.installed_mods.len(),
+                    self.mods_visible,
+                    delta,
+                );
             }
             Nav::Logs => self.scroll_logs(delta * 3),
             Nav::Jvm => {
@@ -462,10 +479,11 @@ impl App {
                 let next = (self.settings_field as i32 + delta).clamp(0, len as i32 - 1) as usize;
                 self.settings_field = next;
             }
-            Nav::Accounts => move_selection(
+            Nav::Accounts => list_wheel(
                 &mut self.account_state,
                 self.accounts.accounts().len(),
-                delta * 4,
+                self.accounts_visible,
+                delta,
             ),
             Nav::Launcher => {
                 let len = settings_field_count(Nav::Launcher);
@@ -473,25 +491,54 @@ impl App {
                 self.settings_field = next;
             }
             Nav::ResourcePacks => {
-                move_selection(
+                list_wheel(
                     &mut self.resource_packs_state,
                     self.resource_packs.len(),
-                    delta * 4,
+                    self.resource_packs_visible,
+                    delta,
                 );
             }
             Nav::Shaders => {
-                move_selection(&mut self.shaders_state, self.shaders.len(), delta * 4);
+                list_wheel(
+                    &mut self.shaders_state,
+                    self.shaders.len(),
+                    self.shaders_visible,
+                    delta,
+                );
             }
             Nav::Worlds => {
-                move_selection(&mut self.worlds_state, self.worlds.len(), delta);
+                // Custom cards: scroll the view one world per notch.
+                let total = self.worlds.len();
+                if total > 0 {
+                    let vis = self.world_visible_rows.max(1);
+                    let max = total.saturating_sub(vis);
+                    let off =
+                        (self.world_scroll as i32 + delta).clamp(0, max as i32) as usize;
+                    self.world_scroll = off;
+                    if let Some(sel) = self.worlds_state.selected() {
+                        let edge = (off + vis).saturating_sub(1).min(total.saturating_sub(1));
+                        self.worlds_state.select(Some(sel.clamp(off, edge)));
+                    }
+                }
             }
             Nav::Screenshots => {
-                let cols = self.screenshot_cols.max(1);
-                move_selection(
-                    &mut self.screenshots_state,
-                    self.screenshots.len(),
-                    delta * cols as i32,
-                );
+                // Custom grid: scroll the view one row per notch.
+                let total = self.screenshots.len();
+                if total > 0 {
+                    let cols = self.screenshot_cols.max(1);
+                    let vis = self.screenshot_visible_rows.max(1);
+                    let max = total.div_ceil(cols).saturating_sub(vis);
+                    let off =
+                        (self.screenshot_scroll as i32 + delta).clamp(0, max as i32) as usize;
+                    self.screenshot_scroll = off;
+                    if let Some(sel) = self.screenshots_state.selected() {
+                        let lo = off * cols;
+                        let hi = ((off + vis) * cols)
+                            .saturating_sub(1)
+                            .min(total.saturating_sub(1));
+                        self.screenshots_state.select(Some(sel.clamp(lo, hi)));
+                    }
+                }
             }
         }
     }

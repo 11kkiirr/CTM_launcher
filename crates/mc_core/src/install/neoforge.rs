@@ -97,8 +97,16 @@ pub async fn install(
         )
     };
 
-    let version_id = forge::run_installer(installer, game_version, &url, &sandbox_key).await?;
-    vanilla::install(installer, game_version).await?;
+    let base = vanilla::install(installer, game_version).await?;
+    let required_major = base.details.required_java_major();
+    let version_id = forge::run_installer(
+        installer,
+        game_version,
+        &url,
+        &sandbox_key,
+        required_major,
+    )
+    .await?;
     let resolved = common::resolve_version(&installer.paths, &version_id).await?;
     let json_path = installer
         .paths

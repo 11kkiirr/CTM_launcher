@@ -18,7 +18,7 @@ use ratatui::Frame;
 use ratatui_image::{Resize, StatefulImage};
 
 use crate::app::{App, HitAction};
-use crate::md::render_md;
+use crate::md::{render_md_full, MdAlign};
 use crate::views::{
     action_cell, begin_action_row, pill_cell, row_widths, truncate,
 };
@@ -198,6 +198,43 @@ impl SortOrder {
     }
 }
 
+/// Horizontal gap in cells between images packed in one strip row.
+const IMG_COL_GAP: u16 = 2;
+/// Blank rows between wrapped rows of an image strip.
+const IMG_ROW_GAP: u16 = 1;
+
+/// Position of a loaded image block inside the expanded description body.
+#[derive(Debug, Clone)]
+pub struct BodyImage {
+    /// Index of the first line reserved for the image in `body`. Images that
+    /// share a horizontal strip share their starting line.
+    pub line: usize,
+    /// URL of the image (also the key of the protocol cache).
+    pub url: String,
+    /// Horizontal offset in cells from the left edge of the body column.
+    pub x: u16,
+    /// Reserved width in cells.
+    pub width: u16,
+    /// Reserved height in rows.
+    pub height: u16,
+    /// Link target when the source wraps the image in a link; makes the
+    /// rendered block clickable.
+    pub link: Option<String>,
+}
+
+/// A clickable inline text link inside the expanded description body.
+#[derive(Debug, Clone)]
+pub struct BodyLink {
+    /// Index of the line in `browse.body`.
+    pub line: usize,
+    /// First column of the link text.
+    pub start: usize,
+    /// Column just past the last character of the link text.
+    pub end: usize,
+    /// Link target URL.
+    pub url: String,
+}
+
 /// Per-kind cached browser state.
 #[derive(Debug, Clone)]
 pub struct BrowseCache {
@@ -218,6 +255,9 @@ pub struct BrowseCache {
     pub body_width: usize,
     pub body_scroll: usize,
     pub body_visible: usize,
+    pub body_images: Vec<BodyImage>,
+    pub body_links: Vec<BodyLink>,
+    pub body_dirty: bool,
     pub image_requested: HashSet<String>,
     pub detail_tab: DetailTab,
     pub gallery_selected: usize,
@@ -233,6 +273,10 @@ pub struct BrowseCache {
     pub filter_loaders: Vec<String>,
     pub sort: SortOrder,
     pub sidebar_selected: FilterItem,
+    /// First visible result card in the list (view scroll, items).
+    pub list_scroll: usize,
+    /// How many result cards fit in the list viewport.
+    pub list_visible: usize,
 }
 
 impl Default for BrowseCache {
@@ -255,6 +299,9 @@ impl Default for BrowseCache {
             body_width: 0,
             body_scroll: 0,
             body_visible: 0,
+            body_images: Vec::new(),
+            body_links: Vec::new(),
+            body_dirty: false,
             image_requested: HashSet::new(),
             detail_tab: DetailTab::Description,
             gallery_selected: 0,
@@ -270,6 +317,8 @@ impl Default for BrowseCache {
             filter_loaders: Vec::new(),
             sort: SortOrder::Downloads,
             sidebar_selected: FilterItem::Sort,
+            list_scroll: 0,
+            list_visible: 0,
         }
     }
 }
@@ -299,6 +348,9 @@ pub struct Browse {
     pub body_width: usize,
     pub body_scroll: usize,
     pub body_visible: usize,
+    pub body_images: Vec<BodyImage>,
+    pub body_links: Vec<BodyLink>,
+    pub body_dirty: bool,
     pub image_requested: HashSet<String>,
     pub detail_tab: DetailTab,
     pub gallery_selected: usize,
@@ -314,6 +366,17 @@ pub struct Browse {
     pub filter_loaders: Vec<String>,
     pub sort: SortOrder,
     pub sidebar_selected: FilterItem,
+    /// First visible result card in the list (view scroll, items).
+    pub list_scroll: usize,
+    /// How many result cards fit in the list viewport.
+    pub list_visible: usize,
+    /// URL of the linked body element (image or text) under the pointer;
+    /// shown in the footer while hovered (cleared at the start of every
+    /// render pass).
+    pub hover_link: Option<String>,
+    /// Clickable links of the changelog tab; rebuilt on every render of the
+    /// changelog (not cached — the changelog is re-rendered each frame).
+    pub changelog_links: Vec<BodyLink>,
 }
 
 impl Default for Browse {
@@ -338,6 +401,9 @@ impl Default for Browse {
             body_width: 0,
             body_scroll: 0,
             body_visible: 0,
+            body_images: Vec::new(),
+            body_links: Vec::new(),
+            body_dirty: false,
             image_requested: HashSet::new(),
             detail_tab: DetailTab::Description,
             gallery_selected: 0,
@@ -353,6 +419,10 @@ impl Default for Browse {
             filter_loaders: Vec::new(),
             sort: SortOrder::Downloads,
             sidebar_selected: FilterItem::Sort,
+            list_scroll: 0,
+            list_visible: 0,
+            hover_link: None,
+            changelog_links: Vec::new(),
         }
     }
 }
@@ -378,6 +448,9 @@ impl Browse {
             body_width: self.body_width,
             body_scroll: self.body_scroll,
             body_visible: self.body_visible,
+            body_images: self.body_images.clone(),
+            body_links: self.body_links.clone(),
+            body_dirty: self.body_dirty,
             image_requested: self.image_requested.clone(),
             detail_tab: self.detail_tab,
             gallery_selected: self.gallery_selected,
@@ -393,6 +466,8 @@ impl Browse {
             filter_loaders: self.filter_loaders.clone(),
             sort: self.sort,
             sidebar_selected: self.sidebar_selected,
+            list_scroll: self.list_scroll,
+            list_visible: self.list_visible,
         };
         self.caches.insert(self.kind, cache);
     }
@@ -418,6 +493,9 @@ impl Browse {
             self.body_width = cache.body_width;
             self.body_scroll = cache.body_scroll;
             self.body_visible = cache.body_visible;
+            self.body_images = cache.body_images;
+            self.body_links = cache.body_links;
+            self.body_dirty = cache.body_dirty;
             self.image_requested = cache.image_requested;
             self.detail_tab = cache.detail_tab;
             self.gallery_selected = cache.gallery_selected;
@@ -433,6 +511,8 @@ impl Browse {
             self.filter_loaders = cache.filter_loaders;
             self.sort = cache.sort;
             self.sidebar_selected = cache.sidebar_selected;
+            self.list_scroll = cache.list_scroll;
+            self.list_visible = cache.list_visible;
         } else {
             // No cache — reset to defaults for this kind.
             self.query = String::new();
@@ -452,6 +532,9 @@ impl Browse {
             self.body_width = 0;
             self.body_scroll = 0;
             self.body_visible = 0;
+            self.body_images = Vec::new();
+            self.body_links = Vec::new();
+            self.body_dirty = false;
             self.image_requested = HashSet::new();
             self.detail_tab = DetailTab::Description;
             self.gallery_selected = 0;
@@ -467,6 +550,8 @@ impl Browse {
             self.filter_loaders = Vec::new();
             self.sort = SortOrder::Downloads;
             self.sidebar_selected = FilterItem::Sort;
+            self.list_scroll = 0;
+            self.list_visible = 0;
         }
         self.kind = kind;
     }
@@ -493,6 +578,58 @@ fn short_url(url: &str) -> &str {
     url.strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
         .unwrap_or(url)
+}
+
+/// Re-colour the `[start, end)` column range of a body line (used to
+/// highlight the link under the mouse pointer).
+fn recolor_link_line(
+    line: &Line<'static>,
+    start: usize,
+    end: usize,
+    color: Color,
+) -> Line<'static> {
+    use unicode_width::UnicodeWidthChar;
+    let mut spans: Vec<Span> = Vec::new();
+    let mut col = 0usize;
+    for span in &line.spans {
+        let text: String = span.content.to_string();
+        let span_start = col;
+        let mut width = 0usize;
+        for ch in text.chars() {
+            width += ch.width().unwrap_or(1);
+        }
+        let span_end = col + width;
+        if span_end <= start || span_start >= end {
+            spans.push(span.clone());
+        } else {
+            let mut before = String::new();
+            let mut mid = String::new();
+            let mut after = String::new();
+            let mut c = col;
+            for ch in text.chars() {
+                let cw = ch.width().unwrap_or(1);
+                if c < start {
+                    before.push(ch);
+                } else if c < end {
+                    mid.push(ch);
+                } else {
+                    after.push(ch);
+                }
+                c += cw;
+            }
+            if !before.is_empty() {
+                spans.push(Span::styled(before, span.style));
+            }
+            if !mid.is_empty() {
+                spans.push(Span::styled(mid, span.style.fg(color)));
+            }
+            if !after.is_empty() {
+                spans.push(Span::styled(after, span.style));
+            }
+        }
+        col = span_end;
+    }
+    Line::from(spans)
 }
 
 /// Ping-pong marquee offset: pause at both ends, `step` advances the phase.
@@ -1092,8 +1229,10 @@ impl App {
         }
         let hits = self.browse.results.clone();
         let visible_items = (area.height / CARD_H) as usize;
-        let first_visible_item =
-            self.browse.selected.saturating_sub(visible_items.saturating_sub(1));
+        self.browse.list_visible = visible_items;
+        let max_first = hits.len().saturating_sub(visible_items);
+        let first_visible_item = self.browse.list_scroll.min(max_first);
+        self.browse.list_scroll = first_visible_item;
 
         let visible_hits: Vec<SearchHit> = hits
             .iter()
@@ -2090,9 +2229,13 @@ impl App {
         }
         let body_w = (inner.width as usize).saturating_sub(2).max(10);
         if self.browse.body_for != project.id || self.browse.body_width != body_w {
-            self.browse.body = render_md(&project.body, body_w, &self.theme);
             self.browse.body_for = project.id.clone();
             self.browse.body_width = body_w;
+            self.browse.body_dirty = true;
+        }
+        if self.browse.body_dirty {
+            self.expand_body(&project.body, body_w);
+            self.browse.body_dirty = false;
             self.browse.body_scroll = self
                 .browse
                 .body_scroll
@@ -2103,7 +2246,7 @@ impl App {
         self.browse.body_scroll = self
             .browse
             .body_scroll
-            .min(self.browse.body.len().saturating_sub(visible).max(0));
+            .min(self.browse.body.len().saturating_sub(visible));
         let start = self.browse.body_scroll;
         let end = (start + visible).min(self.browse.body.len().max(1));
 
@@ -2119,15 +2262,309 @@ impl App {
             );
             return;
         }
+        let links = self.browse.body_links.clone();
+        let mut hot: Option<BodyLink> = None;
+        for link in &links {
+            if link.line < start || link.line >= end || link.end <= link.start {
+                continue;
+            }
+            let rect = Rect {
+                x: inner.x + link.start as u16,
+                y: inner.y + (link.line - start) as u16,
+                width: (link.end - link.start) as u16,
+                height: 1,
+            };
+            if self.is_hovered(rect) {
+                hot = Some(link.clone());
+                break;
+            }
+        }
+        if let Some(link) = &hot {
+            self.browse.hover_link = Some(link.url.clone());
+        }
+        let hot_pos = hot.map(|l| (l.line, l.start, l.end));
+        let accent = self.theme.green_bright;
         let lines: Vec<Line> = self
             .browse
             .body
             .iter()
             .skip(start)
             .take(end - start)
-            .map(Line::clone)
+            .enumerate()
+            .map(|(i, line)| match hot_pos {
+                Some((hl, hs, he)) if hl == start + i => recolor_link_line(line, hs, he, accent),
+                _ => line.clone(),
+            })
             .collect();
         frame.render_widget(Paragraph::new(lines).style(self.theme.card()), inner);
+        for (idx, link) in links.iter().enumerate() {
+            if link.line < start || link.line >= end || link.end <= link.start {
+                continue;
+            }
+            let rect = Rect {
+                x: inner.x + link.start as u16,
+                y: inner.y + (link.line - start) as u16,
+                width: (link.end - link.start) as u16,
+                height: 1,
+            };
+            self.push_hitbox(rect, HitAction::BrowseTextLink(idx));
+        }
+        self.render_body_images(frame, inner, start, end, body_w as u16);
+    }
+
+    /// Overlay loaded description images onto their reserved rows.
+    fn render_body_images(
+        &mut self,
+        frame: &mut Frame,
+        inner: Rect,
+        start: usize,
+        end: usize,
+        body_w: u16,
+    ) {
+        let images = self.browse.body_images.clone();
+        for (idx, img) in images.iter().enumerate() {
+            let bottom = img.line + img.height as usize;
+            if img.line < start || bottom > end {
+                continue;
+            }
+            let y = inner.y + (img.line - start) as u16;
+            let rect = Rect {
+                x: inner.x + img.x,
+                y,
+                width: img.width.min(body_w),
+                height: img.height,
+            };
+            if rect.x + rect.width > inner.x + inner.width {
+                continue;
+            }
+            if self.ensure_image_protocol(&img.url) {
+                if let Some(proto) = self.browse_protocols.get_mut(&img.url) {
+                    frame.render_stateful_widget(
+                        StatefulImage::default().resize(Resize::Fit(None)),
+                        rect,
+                        proto,
+                    );
+                }
+            }
+            if let Some(link) = &img.link {
+                if self.is_hovered(rect) {
+                    self.browse.hover_link = Some(link.clone());
+                    let marker = Rect {
+                        x: rect.x + rect.width.saturating_sub(1),
+                        y: rect.y + rect.height.saturating_sub(1),
+                        width: 1,
+                        height: 1,
+                    };
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            "↗",
+                            Style::default().fg(self.theme.green_bright),
+                        )),
+                        marker,
+                    );
+                }
+                self.push_hitbox(rect, HitAction::BrowseBodyLink(idx));
+            }
+        }
+    }
+
+    /// Rebuild `body` from markdown, reserving space for loaded images and
+    /// kicking off fetches for the ones not seen yet.
+    ///
+    /// Images that are adjacent in the source (separated only by blank lines)
+    /// and share one alignment are packed into horizontal strips like Modrinth
+    /// does: greedy width-based rows, positioned left/centred/right per the
+    /// surrounding HTML wrapper, with one blank row between wrapped rows. The
+    /// markdown placeholder/blank lines a strip covers are consumed by the
+    /// reservation.
+    fn expand_body(&mut self, project_body: &str, width: usize) {
+        let (md, images, md_links) = render_md_full(project_body, width, &self.theme);
+        let mut body: Vec<Line> = Vec::with_capacity(md.len());
+        let mut body_images: Vec<BodyImage> = Vec::new();
+        let mut body_links: Vec<BodyLink> = Vec::new();
+        let mut link_i = 0usize;
+        let mut next = 0usize;
+        let mut idx = 0usize;
+        while idx < md.len() {
+            if next >= images.len() || images[next].line != idx {
+                while link_i < md_links.len() && md_links[link_i].line <= idx {
+                    if md_links[link_i].line == idx {
+                        body_links.push(BodyLink {
+                            line: body.len(),
+                            start: md_links[link_i].start,
+                            end: md_links[link_i].end,
+                            url: md_links[link_i].url.clone(),
+                        });
+                    }
+                    link_i += 1;
+                }
+                body.push(md[idx].clone());
+                idx += 1;
+                continue;
+            }
+            // Collect the run of consecutive images whose gaps are blank only
+            // and whose alignment matches.
+            let base_align = images[next].align;
+            let mut last = images[next].line;
+            let mut run_end = next + 1;
+            while run_end < images.len() {
+                if images[run_end].align != base_align {
+                    break;
+                }
+                let gap_start = last + 1;
+                let gap_end = images[run_end].line;
+                if gap_start < gap_end
+                    && !md[gap_start..gap_end]
+                        .iter()
+                        .all(|line| line.spans.is_empty())
+                {
+                    break;
+                }
+                last = images[run_end].line;
+                run_end += 1;
+            }
+            let run = &images[next..run_end];
+            for im in run {
+                self.browse_fetch_image(&im.url);
+            }
+            let sizes: Option<Vec<(u16, u16)>> = run
+                .iter()
+                .map(|im| self.body_image_block(&im.url, width))
+                .collect();
+            if let Some(sizes) = sizes {
+                let (strip_h, placements) =
+                    Self::layout_image_strip(&sizes, width as u16, base_align);
+                let strip_line = body.len();
+                for _ in 0..strip_h {
+                    body.push(Line::default());
+                }
+                for (k, im) in run.iter().enumerate() {
+                    let (x, y) = placements[k];
+                    body_images.push(BodyImage {
+                        line: strip_line + y as usize,
+                        url: im.url.clone(),
+                        x,
+                        width: sizes[k].0,
+                        height: sizes[k].1,
+                        link: im.link.clone(),
+                    });
+                }
+                idx = last + 1;
+                next = run_end;
+                continue;
+            }
+            // Partially loaded: reserve the first image alone and retry the
+            // rest once the remaining fetches complete (`body_dirty`).
+            if let Some((cols, rows)) = self.body_image_block(&run[0].url, width) {
+                let x = Self::strip_x(base_align, cols, width as u16);
+                let strip_line = body.len();
+                for _ in 0..rows {
+                    body.push(Line::default());
+                }
+                body_images.push(BodyImage {
+                    line: strip_line,
+                    url: run[0].url.clone(),
+                    x,
+                    width: cols,
+                    height: rows,
+                    link: run[0].link.clone(),
+                });
+            } else {
+                body.push(md[idx].clone());
+            }
+            idx = images[next].line + 1;
+            next += 1;
+        }
+        self.browse.body = body;
+        self.browse.body_images = body_images;
+        self.browse.body_links = body_links;
+    }
+
+    /// Pack image block sizes into horizontal rows aligned per `align`.
+    ///
+    /// Returns the total strip height and, per image, its `(x, y)` offset
+    /// inside the strip. Rows fill greedily up to `width` cells, images in a
+    /// row are separated by [`IMG_COL_GAP`] cells and wrapped rows by
+    /// [`IMG_ROW_GAP`] blank rows.
+    fn layout_image_strip(
+        sizes: &[(u16, u16)],
+        width: u16,
+        align: MdAlign,
+    ) -> (u16, Vec<(u16, u16)>) {
+        let mut placements = vec![(0u16, 0u16); sizes.len()];
+        if sizes.is_empty() {
+            return (0, placements);
+        }
+        let width = width.max(1);
+        let mut y = 0u16;
+        let mut i = 0usize;
+        while i < sizes.len() {
+            let mut row: Vec<usize> = Vec::new();
+            let mut row_w = 0u16;
+            while i < sizes.len() {
+                let cols = sizes[i].0;
+                let need = if row.is_empty() { cols } else { IMG_COL_GAP + cols };
+                if !row.is_empty() && row_w + need > width {
+                    break;
+                }
+                row.push(i);
+                row_w += need;
+                i += 1;
+                if row_w >= width {
+                    break;
+                }
+            }
+            let row_h = row
+                .iter()
+                .map(|&k| sizes[k].1)
+                .max()
+                .unwrap_or(1)
+                .max(1);
+            let mut x = Self::strip_x(align, row_w, width);
+            for &k in &row {
+                placements[k] = (x, y);
+                x += sizes[k].0 + IMG_COL_GAP;
+            }
+            y = y.saturating_add(row_h).saturating_add(IMG_ROW_GAP);
+        }
+        let total = y.saturating_sub(IMG_ROW_GAP).max(1);
+        (total, placements)
+    }
+
+    /// Horizontal start of a row of `row_w` cells inside `width` cells.
+    fn strip_x(align: MdAlign, row_w: u16, width: u16) -> u16 {
+        match align {
+            MdAlign::Left => 0,
+            MdAlign::Center => width.saturating_sub(row_w) / 2,
+            MdAlign::Right => width.saturating_sub(row_w),
+        }
+    }
+
+    /// Cell size reserved for a loaded image scaled to fit `width` columns.
+    ///
+    /// Images at least half as wide as the body are stretched to the full
+    /// width (Modrinth renders large description images edge to edge), which
+    /// also keeps them on a row of their own; smaller ones keep their natural
+    /// size so badge-style icons can pack side by side.
+    /// Returns `None` while the image is still loading.
+    fn body_image_block(&self, url: &str, width: usize) -> Option<(u16, u16)> {
+        let img = self.browse_images.get(url)?;
+        let (font_w, font_h) = self.picker.font_size();
+        let font_w = font_w.max(1) as u64;
+        let font_h = font_h.max(1) as u64;
+        let img_w = img.width.max(1) as u64;
+        let img_h = img.height.max(1) as u64;
+        let natural_cols = img_w.div_ceil(font_w);
+        let (cols, rows) = if natural_cols >= (width as u64).div_ceil(2) {
+            let cols = width as u64;
+            let scaled_px_h = img_h * cols * font_w / img_w;
+            (cols, scaled_px_h.div_ceil(font_h))
+        } else {
+            (natural_cols, img_h.div_ceil(font_h))
+        };
+        let cols = cols.clamp(1, width as u64) as u16;
+        let rows = rows.clamp(1, 16) as u16;
+        Some((cols, rows))
     }
 
     fn render_detail_changelog(&mut self, frame: &mut Frame, area: Rect) {
@@ -2161,7 +2598,7 @@ impl App {
         if list.height == 0 {
             return;
         }
-        let lines = self.browse_changelog_lines(w);
+        let (lines, links) = self.browse_changelog_render(w);
         let visible = list.height as usize;
         self.browse.changelog_visible = visible;
         self.browse.changelog_scroll = self
@@ -2170,6 +2607,7 @@ impl App {
             .min(lines.len().saturating_sub(visible));
         let start = self.browse.changelog_scroll;
         frame.render_widget(Clear, list);
+        self.browse.changelog_links = links;
         if lines.is_empty() {
             frame.render_widget(
                 Paragraph::new(Span::styled(
@@ -2181,8 +2619,52 @@ impl App {
             );
             return;
         }
-        let shown: Vec<Line> = lines.into_iter().skip(start).take(visible).collect();
+        let mut hot: Option<BodyLink> = None;
+        for link in &self.browse.changelog_links {
+            if link.line < start || link.line >= start + visible || link.end <= link.start {
+                continue;
+            }
+            let rect = Rect {
+                x: list.x + link.start as u16,
+                y: list.y + (link.line - start) as u16,
+                width: (link.end - link.start) as u16,
+                height: 1,
+            };
+            if self.is_hovered(rect) {
+                hot = Some(link.clone());
+                break;
+            }
+        }
+        if let Some(link) = &hot {
+            self.browse.hover_link = Some(link.url.clone());
+        }
+        let hot_pos = hot.map(|l| (l.line, l.start, l.end));
+        let accent = self.theme.green_bright;
+        let shown: Vec<Line> = lines
+            .into_iter()
+            .skip(start)
+            .take(visible)
+            .enumerate()
+            .map(|(i, line)| match hot_pos {
+                Some((hl, hs, he)) if hl == start + i => {
+                    recolor_link_line(&line, hs, he, accent)
+                }
+                _ => line,
+            })
+            .collect();
         frame.render_widget(Paragraph::new(shown).style(self.theme.card()), list);
+        for (idx, link) in self.browse.changelog_links.clone().iter().enumerate() {
+            if link.line < start || link.line >= start + visible || link.end <= link.start {
+                continue;
+            }
+            let rect = Rect {
+                x: list.x + link.start as u16,
+                y: list.y + (link.line - start) as u16,
+                width: (link.end - link.start) as u16,
+                height: 1,
+            };
+            self.push_hitbox(rect, HitAction::BrowseChangelogLink(idx));
+        }
     }
 
     fn render_detail_gallery(&mut self, frame: &mut Frame, area: Rect, project: &Project) {
@@ -2564,9 +3046,11 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.browse_move(-1),
             KeyCode::Char('g') => {
                 self.browse.selected = 0;
+                self.browse_ensure_selected_visible();
             }
             KeyCode::Char('G') => {
                 self.browse.selected = self.browse.results.len().saturating_sub(1);
+                self.browse_ensure_selected_visible();
             }
             KeyCode::Char('n') | KeyCode::Char('N') => self.browse_next_page(),
             KeyCode::Char('p') | KeyCode::Char('P') => self.browse_prev_page(),
@@ -2640,11 +3124,36 @@ impl App {
                 }
             }
         } else {
-            self.browse_move(delta * 4);
+            self.browse_wheel(delta);
         }
     }
 
-    fn browse_move(&mut self, delta: i32) {
+    /// Mouse wheel over the results list scrolls the view (one card per
+    /// notch); the selection stays put. Paging at the ends preserves the
+    /// infinite-scroll behaviour.
+    pub(crate) fn browse_wheel(&mut self, delta: i32) {
+        let len = self.browse.results.len();
+        if len == 0 {
+            return;
+        }
+        let max = len.saturating_sub(self.browse.list_visible.max(1)) as i32;
+        let next = self.browse.list_scroll as i32 + delta;
+        if next < 0 {
+            if self.browse.offset > 0 {
+                self.browse_prev_page();
+            }
+            return;
+        }
+        if next > max {
+            if self.browse.offset + 30 < self.browse.total {
+                self.browse_next_page();
+            }
+            return;
+        }
+        self.browse.list_scroll = next as usize;
+    }
+
+    pub(crate) fn browse_move(&mut self, delta: i32) {
         let len = self.browse.results.len();
         if len == 0 {
             return;
@@ -2661,6 +3170,17 @@ impl App {
             return;
         }
         self.browse.selected = next.clamp(0, len as i32 - 1) as usize;
+        self.browse_ensure_selected_visible();
+    }
+
+    /// Pull the list view so the keyboard selection stays visible.
+    pub(crate) fn browse_ensure_selected_visible(&mut self) {
+        let vis = self.browse.list_visible.max(1);
+        if self.browse.selected < self.browse.list_scroll {
+            self.browse.list_scroll = self.browse.selected;
+        } else if self.browse.selected >= self.browse.list_scroll + vis {
+            self.browse.list_scroll = self.browse.selected + 1 - vis;
+        }
     }
 
     /// Navigate through sidebar filter items.
@@ -2789,22 +3309,32 @@ impl App {
         }
     }
 
-    fn browse_changelog_lines(&self, width: usize) -> Vec<Line<'static>> {
+    fn browse_changelog_render(&self, width: usize) -> (Vec<Line<'static>>, Vec<BodyLink>) {
         let Some(version) = self.browse.versions.get(self.browse.version_selected) else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         let Some(body) = version
             .changelog
             .as_deref()
             .filter(|s| !s.trim().is_empty())
         else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
-        render_md(body, width.max(10), &self.theme)
+        let (lines, _images, links) = render_md_full(body, width.max(10), &self.theme);
+        let links = links
+            .into_iter()
+            .map(|l| BodyLink {
+                line: l.line,
+                start: l.start,
+                end: l.end,
+                url: l.url,
+            })
+            .collect();
+        (lines, links)
     }
 
     fn browse_changelog_len(&self) -> usize {
-        self.browse_changelog_lines(80).len()
+        self.browse_changelog_render(80).0.len()
     }
 
     fn browse_scroll_changelog(&mut self, delta: i32) {

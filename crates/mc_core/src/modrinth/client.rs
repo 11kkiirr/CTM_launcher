@@ -93,6 +93,22 @@ impl ModrinthClient {
                 "refusing to fetch non-Modrinth URL: {url}"
             )));
         }
+        self.stream_bytes(url, max_bytes).await
+    }
+
+    /// Fetch an arbitrary remote image (description bodies reference hosts
+    /// like `img.shields.io`), requiring an HTTP(S) scheme and capping the
+    /// response size.
+    pub async fn get_image_bytes(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>> {
+        if !(url.starts_with("https://") || url.starts_with("http://")) {
+            return Err(CoreError::Modrinth(format!(
+                "refusing to fetch non-HTTP URL: {url}"
+            )));
+        }
+        self.stream_bytes(url, max_bytes).await
+    }
+
+    async fn stream_bytes(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>> {
         use futures::StreamExt;
         let response = self
             .client
@@ -274,17 +290,52 @@ fn is_modrinth_url(url: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn builds_facets_json() {
         let facets = vec![
             vec!["project_type:mod".to_string()],
             vec!["versions:1.20.1".to_string()],
-            vec!["categories:fabric".to_string()],
+            vec!["loaders:fabric".to_string()],
         ];
         let json = serde_json::to_string(&facets).unwrap();
         assert_eq!(
             json,
-            r#"[["project_type:mod"],["versions:1.20.1"],["categories:fabric"]]"#
+            r#"[["project_type:mod"],["versions:1.20.1"],["loaders:fabric"]]"#
         );
     }
+
+    #[test]
+    fn modrinth_url_allowlist() {
+        assert!(is_modrinth_url("https://cdn.modrinth.com/data/x.png"));
+        assert!(is_modrinth_url("https://cdn.modrinth.com/data/x.png?width=2"));
+        assert!(is_modrinth_url("https://modrinth.com/x"));
+        assert!(!is_modrinth_url("https://img.shields.io/badge/x.svg"));
+        assert!(!is_modrinth_url("https://evilmodrinth.com/x"));
+        assert!(!is_modrinth_url("http://cdn.modrinth.com/x"));
+    }
+
+    #[tokio::test]
+    async fn image_fetch_requires_http_scheme() {
+        let client = ModrinthClient::new(reqwest::Client::new());
+        for url in [
+            "file:///etc/passwd",
+            "ftp://example.com/x.png",
+            "data:image/png;base64,AAAA",
+        ] {
+            let err = client.get_image_bytes(url, 1024).await;
+            assert!(err.is_err(), "must refuse {url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn modrinth_fetch_still_rejects_foreign_hosts() {
+        let client = ModrinthClient::new(reqwest::Client::new());
+        let err = client
+            .get_bytes("https://img.shields.io/badge/x.svg", 1024)
+            .await;
+        assert!(err.is_err(), "get_bytes stays Modrinth-only");
+    }
 }
+

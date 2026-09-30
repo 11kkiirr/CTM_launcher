@@ -145,6 +145,7 @@ impl App {
             width: inner.width,
             height: inner.height.saturating_sub(2),
         };
+        self.shaders_visible = list_area.height as usize;
 
         if filtered.is_empty() {
             let hint = if !query_lower.is_empty() {

@@ -1163,6 +1163,7 @@ pub(crate) fn run_browse_search(&mut self, query: String) {
 pub(crate) fn browse_load_first_page(&mut self) {
     self.browse.results.clear();
     self.browse.selected = 0;
+    self.browse.list_scroll = 0;
     self.browse.offset = 0;
     self.browse.total = 0;
     self.browse_do_search(0);
@@ -1178,6 +1179,7 @@ pub(crate) fn browse_next_page(&mut self) {
     }
     self.browse.offset = next;
     self.browse.selected = 0;
+    self.browse.list_scroll = 0;
     self.browse.results.clear();
     self.browse_do_search(next);
 }
@@ -1192,6 +1194,7 @@ pub(crate) fn browse_prev_page(&mut self) {
     let prev = self.browse.offset.saturating_sub(30);
     self.browse.offset = prev;
     self.browse.selected = 0;
+    self.browse.list_scroll = 0;
     self.browse.results.clear();
     self.browse_do_search(prev);
 }
@@ -1320,6 +1323,57 @@ pub(crate) fn open_project_link(&mut self, idx: usize) {
     }
 }
 
+pub(crate) fn open_body_link(&mut self, idx: usize) {
+    let Some(url) = self
+        .browse
+        .body_images
+        .get(idx)
+        .and_then(|im| im.link.clone())
+    else {
+        return;
+    };
+    if open::that(&url).is_err() {
+        self.set_toast(
+            crate::i18n::tr_string(self.lang(), "browse.open_failed").replace("{}", &url),
+            true,
+        );
+    }
+}
+
+pub(crate) fn open_text_link(&mut self, idx: usize) {
+    let Some(url) = self
+        .browse
+        .body_links
+        .get(idx)
+        .map(|link| link.url.clone())
+    else {
+        return;
+    };
+    if open::that(&url).is_err() {
+        self.set_toast(
+            crate::i18n::tr_string(self.lang(), "browse.open_failed").replace("{}", &url),
+            true,
+        );
+    }
+}
+
+pub(crate) fn open_changelog_link(&mut self, idx: usize) {
+    let Some(url) = self
+        .browse
+        .changelog_links
+        .get(idx)
+        .map(|link| link.url.clone())
+    else {
+        return;
+    };
+    if open::that(&url).is_err() {
+        self.set_toast(
+            crate::i18n::tr_string(self.lang(), "browse.open_failed").replace("{}", &url),
+            true,
+        );
+    }
+}
+
 pub(crate) fn browse_close_detail(&mut self) {
     self.browse.detail = None;
     self.browse.members.clear();
@@ -1370,10 +1424,7 @@ pub(crate) fn browse_fetch_image(&mut self, url: &str) {
     let modrinth = self.modrinth.clone();
     let tx = self.engine_tx.clone();
     tokio::spawn(async move {
-        let data = match modrinth.get_bytes(&key, 6 * 1024 * 1024).await {
-            Ok(bytes) => Some(bytes),
-            Err(_) => None,
-        };
+        let data = modrinth.get_image_bytes(&key, 6 * 1024 * 1024).await.ok();
         let _ = tx.send(EngineEvent::BrowseImage {
             url: key,
             data,
@@ -1402,18 +1453,9 @@ pub(crate) fn load_local_image(&mut self, path: &str) {
     let path_buf = PathBuf::from(path);
     let tx = self.engine_tx.clone();
     tokio::task::spawn_blocking(move || {
-        let img = std::fs::read(&path_buf).ok().and_then(|data| {
-            mc_core::img::decode_image(&data).ok().or_else(|| {
-                image::load_from_memory(&data).ok().map(|dynamic| {
-                    let rgba = dynamic.to_rgba8();
-                    mc_core::img::RgbaImage {
-                        width: rgba.width(),
-                        height: rgba.height(),
-                        pixels: rgba.into_raw(),
-                    }
-                })
-            })
-        });
+        let img = std::fs::read(&path_buf)
+            .ok()
+            .and_then(|data| crate::images::decode_rgba(&data));
         let img = img.map(|img| mc_core::img::fit_image(&img, Self::THUMB_MAX, Self::THUMB_MAX));
         let _ = tx.send(EngineEvent::LocalImage { path: key, img });
     });

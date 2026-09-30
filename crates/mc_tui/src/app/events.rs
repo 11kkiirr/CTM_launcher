@@ -116,22 +116,22 @@ impl App {
                 self.browse_fetch_images();
             }
             EngineEvent::BrowseImage { url, data } => {
-                if let Some(data) = data {
-                    if let Ok(img) = mc_core::img::decode_image(&data) {
-                        self.browse_images.insert(url, img);
-                    } else if let Ok(dynamic) = image::load_from_memory(&data) {
-                        let rgba = dynamic.to_rgba8();
-                        let w = rgba.width();
-                        let h = rgba.height();
-                        self.browse_images.insert(
-                            url,
-                            mc_core::img::RgbaImage {
-                                width: w,
-                                height: h,
-                                pixels: rgba.into_raw(),
-                            },
-                        );
+                let mut loaded = false;
+                match &data {
+                    Some(bytes) => {
+                        if let Some(img) = crate::images::decode_rgba(bytes) {
+                            self.browse_images.insert(url.clone(), img);
+                            loaded = true;
+                        }
                     }
+                    None => {
+                        // Network failure: forget the attempt so a later
+                        // re-expand retries instead of pinning the placeholder.
+                        self.browse.image_requested.remove(&url);
+                    }
+                }
+                if loaded {
+                    self.browse.body_dirty = true;
                 }
             }
             EngineEvent::VersionList { target, versions } => {

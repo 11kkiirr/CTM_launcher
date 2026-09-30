@@ -104,6 +104,24 @@ pub(crate) fn move_sel(state: &mut ListState, len: usize, delta: i32) {
     state.select(Some(next));
 }
 
+/// Mouse wheel over a list: scroll the *view* by a few rows, leaving the
+/// selection alone unless it would leave the viewport (vim-style edge
+/// follow). The `List` widget keeps a visible selection on screen by
+/// itself, so keyboard navigation needs no extra work.
+pub(crate) fn list_wheel(state: &mut ListState, len: usize, visible: usize, delta: i32) {
+    if len == 0 {
+        return;
+    }
+    let vis = visible.max(1);
+    let max_off = len.saturating_sub(vis);
+    let off = (state.offset() as i32 + delta * 3).clamp(0, max_off as i32) as usize;
+    *state.offset_mut() = off;
+    if let Some(sel) = state.selected() {
+        let edge = (off + vis).saturating_sub(1).min(len.saturating_sub(1));
+        state.select(Some(sel.clamp(off, edge)));
+    }
+}
+
 /// Select the first or last item.
 pub(crate) fn jump(state: &mut ListState, len: usize, to_end: bool) {
     if len == 0 {
@@ -361,5 +379,40 @@ pub(crate) fn register_rows(
             rect,
             action: make(idx),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wheel_scrolls_view_and_keeps_selection_visible() {
+        let mut state = ListState::default();
+        state.select(Some(0));
+        // 10 items, 6 visible: one notch moves the view; the selection
+        // is pulled along the edge only because it left the viewport.
+        list_wheel(&mut state, 10, 6, 1);
+        assert_eq!(state.offset(), 3);
+        assert_eq!(state.selected(), Some(3));
+        // A selection inside the new view never moves.
+        state.select(Some(5));
+        list_wheel(&mut state, 10, 6, 1);
+        assert_eq!(state.offset(), 4);
+        assert_eq!(state.selected(), Some(5));
+        // Clamp at the end, selection stays.
+        list_wheel(&mut state, 10, 6, 10);
+        assert_eq!(state.offset(), 4);
+        assert_eq!(state.selected(), Some(5));
+        // Back to the top, selection stays.
+        list_wheel(&mut state, 10, 6, -10);
+        assert_eq!(state.offset(), 0);
+        assert_eq!(state.selected(), Some(5));
+        // Short list: no scrolling possible.
+        let mut short = ListState::default();
+        short.select(Some(1));
+        list_wheel(&mut short, 2, 4, 1);
+        assert_eq!(short.offset(), 0);
+        assert_eq!(short.selected(), Some(1));
     }
 }

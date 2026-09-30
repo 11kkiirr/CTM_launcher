@@ -197,6 +197,15 @@ pub enum HitAction {
     BrowseDetailTab(usize),
     BrowseGallery(usize),
     BrowseLink(usize),
+    /// Click on a linked image inside the description body: index into
+    /// `browse.body_images`.
+    BrowseBodyLink(usize),
+    /// Click on an inline text link inside the description body: index into
+    /// `browse.body_links`.
+    BrowseTextLink(usize),
+    /// Click on an inline text link inside the changelog tab: index into
+    /// `browse.changelog_links`.
+    BrowseChangelogLink(usize),
     BrowseInstall,
     BrowseQuickInstall(usize),
     BrowseSearchBar,
@@ -360,14 +369,20 @@ pub struct App {
 
     pub accounts: AccountStore,
     pub account_state: ListState,
+    /// Visible rows in the accounts list (for wheel view-scroll).
+    pub accounts_visible: usize,
 
     pub modrinth: ModrinthClient,
     pub search_query: String,
     pub search_results: Vec<SearchHit>,
     pub search_state: ListState,
+    /// Visible rows in the modpack search list.
+    pub search_visible: usize,
     pub selected_project: Option<Box<Project>>,
     pub project_versions: Vec<Version>,
     pub project_state: ListState,
+    /// Visible rows in the modpack versions list.
+    pub project_visible: usize,
 
     /// Inline search bar query for filtering installed mods.
     pub mods_search_query: String,
@@ -377,15 +392,21 @@ pub struct App {
     pub installed_mods: Vec<InstalledMod>,
     pub mods_state: ListState,
     pub mods_scanning: bool,
+    /// Visible rows in the installed mods list (for wheel view-scroll).
+    pub mods_visible: usize,
 
     pub resource_packs: Vec<String>,
     pub resource_packs_state: ListState,
+    /// Visible rows in the resource packs list.
+    pub resource_packs_visible: usize,
     /// Inline filter for installed resource packs.
     pub rp_search_focused: bool,
     pub rp_inline_query: String,
 
     pub shaders: Vec<String>,
     pub shaders_state: ListState,
+    /// Visible rows in the shaders list.
+    pub shaders_visible: usize,
     /// Inline filter for installed shaders.
     pub shaders_search_focused: bool,
     pub shaders_inline_query: String,
@@ -488,25 +509,31 @@ impl App {
             external_instances: Vec::new(),
             accounts,
             account_state: ListState::default(),
+            accounts_visible: 0,
             search_query: String::new(),
             search_results: Vec::new(),
             search_state: ListState::default(),
+            search_visible: 0,
             selected_project: None,
             project_versions: Vec::new(),
             project_state: ListState::default(),
+            project_visible: 0,
             mods_search_query: String::new(),
             mods_search_focused: false,
             installed_mods: Vec::new(),
             mods_state: ListState::default(),
             mods_scanning: false,
+            mods_visible: 0,
 
             resource_packs: Vec::new(),
             resource_packs_state: ListState::default(),
+            resource_packs_visible: 0,
             rp_search_focused: false,
             rp_inline_query: String::new(),
 
             shaders: Vec::new(),
             shaders_state: ListState::default(),
+            shaders_visible: 0,
             shaders_search_focused: false,
             shaders_inline_query: String::new(),
             worlds: Vec::new(),
@@ -738,23 +765,6 @@ fn advance(cur: &mut usize, target: usize) -> bool {
     true
 }
 
-pub(crate) fn move_selection(state: &mut ListState, len: usize, delta: i32) {
-    if len == 0 {
-        state.select(None);
-        return;
-    }
-    let current = match state.selected() {
-        Some(i) => i as i32,
-        None => {
-            let start = if delta < 0 { len as i32 - 1 } else { 0 };
-            state.select(Some(start as usize));
-            return;
-        }
-    };
-    let next = (current + delta).clamp(0, len as i32 - 1) as usize;
-    state.select(Some(next));
-}
-
 pub(crate) fn gc_index(gc: mc_core::instance::GcPreset) -> usize {
     gc_options()
         .iter()
@@ -926,7 +936,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    use crate::views::browse::{BrowseFocus, BrowseKind};
+    use crate::views::browse::{BrowseFocus, BrowseKind, DetailTab};
 
     fn temp_paths() -> Paths {
         let nanos = std::time::SystemTime::now()
@@ -944,6 +954,14 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    fn raster(width: u32, height: u32) -> mc_core::img::RgbaImage {
+        mc_core::img::RgbaImage {
+            width,
+            height,
+            pixels: vec![120u8, 100, 200, 255].repeat((width * height) as usize),
+        }
     }
 
     fn buffer_row(terminal: &Terminal<TestBackend>, y: u16, x0: u16, x1: u16) -> String {
@@ -1922,6 +1940,640 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn browse_description_renders_markdown_images() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        app.nav = Nav::Browse;
+
+        let url = "https://cdn.example/pic.png";
+        let pixels: Vec<u8> = (0..32 * 16)
+            .flat_map(|i| [i as u8, 100, 200, 255])
+            .collect();
+        app.browse_images.insert(
+            url.to_string(),
+            mc_core::img::RgbaImage {
+                width: 32,
+                height: 16,
+                pixels,
+            },
+        );
+        app.browse.detail = Some(Project {
+            id: "imgproj".into(),
+            slug: "img-proj".into(),
+            title: "Img Proj".into(),
+            description: "with image".into(),
+            body: "Hello\n\n![pic](https://cdn.example/pic.png)\n\nAfter".into(),
+            project_type: "mod".into(),
+            categories: Vec::new(),
+            additional_categories: Vec::new(),
+            client_side: "".into(),
+            server_side: "".into(),
+            downloads: 1,
+            followers: 0,
+            icon_url: None,
+            color: None,
+            issues_url: None,
+            source_url: None,
+            wiki_url: None,
+            discord_url: None,
+            game_versions: vec!["1.21.1".into()],
+            loaders: vec!["fabric".into()],
+            versions: Vec::new(),
+            published: String::new(),
+            updated: String::new(),
+            license: None,
+            gallery: Vec::new(),
+        });
+        app.browse.focus = BrowseFocus::Body;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        assert_eq!(app.browse.body_images.len(), 1, "image block not reserved");
+        let block = app.browse.body_images[0].clone();
+        assert!(block.height >= 1 && block.width >= 1);
+        let placeholder_line = &app.browse.body[block.line];
+        assert!(
+            placeholder_line
+                .spans
+                .iter()
+                .all(|s| s.content.to_string().trim().is_empty()),
+            "placeholder should make room for the image"
+        );
+        assert!(
+            app.browse.body.len() >= block.height as usize + 4,
+            "image rows should extend the body"
+        );
+        assert!(
+            app.browse_protocols.contains_key(url),
+            "image protocol not created"
+        );
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Hello"), "text before image missing");
+        assert!(text.contains("After"), "text after image missing");
+        assert!(
+            text.contains('\u{2580}') || text.contains('\u{2584}'),
+            "half-block image did not render"
+        );
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn browse_description_packs_adjacent_images_into_centered_rows() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        app.nav = Nav::Browse;
+
+        let wide = "https://cdn.example/wide.png";
+        let a = "https://cdn.example/a.png";
+        let b = "https://cdn.example/b.png";
+        app.browse_images.insert(wide.to_string(), raster(2000, 400));
+        app.browse_images.insert(a.to_string(), raster(20, 20));
+        app.browse_images.insert(b.to_string(), raster(20, 20));
+
+        app.browse.detail = Some(Project {
+            id: "pack".into(),
+            slug: "pack".into(),
+            title: "Pack".into(),
+            description: "pack".into(),
+            body: "Intro\n\n![wide](https://cdn.example/wide.png)\n\n<p align=\"center\">\n![a](https://cdn.example/a.png)\n![b](https://cdn.example/b.png)\n</p>\n\nOutro".into(),
+            project_type: "mod".into(),
+            categories: Vec::new(),
+            additional_categories: Vec::new(),
+            client_side: "".into(),
+            server_side: "".into(),
+            downloads: 1,
+            followers: 0,
+            icon_url: None,
+            color: None,
+            issues_url: None,
+            source_url: None,
+            wiki_url: None,
+            discord_url: None,
+            game_versions: vec!["1.21.1".into()],
+            loaders: vec!["fabric".into()],
+            versions: Vec::new(),
+            published: String::new(),
+            updated: String::new(),
+            license: None,
+            gallery: Vec::new(),
+        });
+        app.browse.focus = BrowseFocus::Body;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let body_w = app.browse.body_width as u16;
+        let imgs = &app.browse.body_images;
+        assert_eq!(imgs.len(), 3, "all images reserved");
+        let (im_wide, im_a, im_b) = (&imgs[0], &imgs[1], &imgs[2]);
+        assert_eq!(im_wide.url, wide);
+        assert!(im_wide.line < im_a.line, "wide image sits on its own row");
+        assert_eq!(im_a.line, im_b.line, "badges share one row");
+        assert_eq!(
+            im_a.line as u16,
+            im_wide.line as u16 + im_wide.height + 1,
+            "one blank row between wrapped rows"
+        );
+        assert_eq!(im_wide.x, 0, "full-width row starts at the left edge");
+        assert!(im_a.x > 0, "badge row must be centred, not left-aligned");
+        assert_eq!(im_b.x, im_a.x + im_a.width + 2, "gap between badges");
+        assert!(
+            im_a.x + im_a.width + 2 + im_b.width <= body_w,
+            "badge row fits the body width"
+        );
+        for line in app.browse.body.iter() {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(!text.contains('▣'), "no placeholders when loaded: {text:?}");
+        }
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Intro"), "text before images missing");
+        assert!(text.contains("Outro"), "text after images missing");
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn browse_description_keeps_images_separated_by_text_apart() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        app.nav = Nav::Browse;
+
+        app.browse_images
+            .insert("https://cdn.example/a.png".to_string(), raster(20, 20));
+        app.browse_images
+            .insert("https://cdn.example/b.png".to_string(), raster(20, 20));
+        app.browse.detail = Some(Project {
+            id: "split".into(),
+            slug: "split".into(),
+            title: "Split".into(),
+            description: "split".into(),
+            body: "![a](https://cdn.example/a.png)\n\nmiddle text\n\n![b](https://cdn.example/b.png)".into(),
+            project_type: "mod".into(),
+            categories: Vec::new(),
+            additional_categories: Vec::new(),
+            client_side: "".into(),
+            server_side: "".into(),
+            downloads: 1,
+            followers: 0,
+            icon_url: None,
+            color: None,
+            issues_url: None,
+            source_url: None,
+            wiki_url: None,
+            discord_url: None,
+            game_versions: vec!["1.21.1".into()],
+            loaders: vec!["fabric".into()],
+            versions: Vec::new(),
+            published: String::new(),
+            updated: String::new(),
+            license: None,
+            gallery: Vec::new(),
+        });
+        app.browse.focus = BrowseFocus::Body;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let imgs = &app.browse.body_images;
+        assert_eq!(imgs.len(), 2, "both images reserved");
+        assert!(
+            imgs[0].line + imgs[0].height as usize <= imgs[1].line,
+            "text between images keeps them in separate strips"
+        );
+        assert_eq!(
+            imgs[0].x, imgs[1].x,
+            "standalone images without a wrapper share the left edge"
+        );
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn browse_description_adjacent_images_stay_left_by_default() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        app.nav = Nav::Browse;
+
+        app.browse_images
+            .insert("https://cdn.example/a.png".to_string(), raster(20, 20));
+        app.browse_images
+            .insert("https://cdn.example/b.png".to_string(), raster(20, 20));
+        app.browse.detail = Some(Project {
+            id: "leftrow".into(),
+            slug: "leftrow".into(),
+            title: "Left Row".into(),
+            description: "left row".into(),
+            body: "Intro\n\n![a](https://cdn.example/a.png)\n![b](https://cdn.example/b.png)\n\nOutro".into(),
+            project_type: "mod".into(),
+            categories: Vec::new(),
+            additional_categories: Vec::new(),
+            client_side: "".into(),
+            server_side: "".into(),
+            downloads: 1,
+            followers: 0,
+            icon_url: None,
+            color: None,
+            issues_url: None,
+            source_url: None,
+            wiki_url: None,
+            discord_url: None,
+            game_versions: vec!["1.21.1".into()],
+            loaders: vec!["fabric".into()],
+            versions: Vec::new(),
+            published: String::new(),
+            updated: String::new(),
+            license: None,
+            gallery: Vec::new(),
+        });
+        app.browse.focus = BrowseFocus::Body;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let imgs = &app.browse.body_images;
+        assert_eq!(imgs.len(), 2, "both images reserved");
+        assert_eq!(imgs[0].line, imgs[1].line, "adjacent images share one row");
+        assert_eq!(imgs[0].x, 0, "default alignment is the left edge");
+        assert_eq!(imgs[1].x, imgs[0].width + 2, "packed tightly from the left");
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn browse_description_entityculling_layout_modes() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        app.nav = Nav::Browse;
+
+        let banner = "https://tr7zw.github.io/uikit/banner/header_entity_culling.png";
+        let discord = "https://tr7zw.github.io/uikit/social_buttons_icon/Discord-Button-64.png";
+        let github = "https://tr7zw.github.io/uikit/social_buttons_icon/Github-Button-64.png";
+        let divider = "https://tr7zw.github.io/uikit/divider_faded/Divider_01.png";
+        let about = "https://tr7zw.github.io/uikit/headlines/large/About.png";
+        app.browse_images.insert(banner.to_string(), raster(900, 300));
+        app.browse_images.insert(discord.to_string(), raster(60, 64));
+        app.browse_images.insert(github.to_string(), raster(60, 64));
+        app.browse_images.insert(divider.to_string(), raster(2074, 52));
+        app.browse_images.insert(about.to_string(), raster(196, 52));
+
+        app.browse.detail = Some(Project {
+            id: "ec".into(),
+            slug: "ec".into(),
+            title: "EC".into(),
+            description: "ec".into(),
+            body: format!(
+                concat!(
+                    "![banner]({})\n\n",
+                    "<p align=\"center\">\n",
+                    "<a href=\"https://discord.gg/x\"><img src=\"{}\" alt=\"Discord\"></a>\n",
+                    "<a href=\"https://github.com/x\"><img src=\"{}\" alt=\"GitHub\"></a>\n",
+                    "</p>\n\n",
+                    "<br>![Divider]({})\n\n",
+                    "<img src=\"{}\" alt=\"About\">"
+                ),
+                banner, discord, github, divider, about
+            ),
+            project_type: "mod".into(),
+            categories: Vec::new(),
+            additional_categories: Vec::new(),
+            client_side: "".into(),
+            server_side: "".into(),
+            downloads: 1,
+            followers: 0,
+            icon_url: None,
+            color: None,
+            issues_url: None,
+            source_url: None,
+            wiki_url: None,
+            discord_url: None,
+            game_versions: vec!["1.21.1".into()],
+            loaders: vec!["fabric".into()],
+            versions: Vec::new(),
+            published: String::new(),
+            updated: String::new(),
+            license: None,
+            gallery: Vec::new(),
+        });
+        app.browse.focus = BrowseFocus::Body;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let body_w = app.browse.body_width as u16;
+        let imgs = &app.browse.body_images;
+        assert_eq!(imgs.len(), 5, "banner, 2 badges, divider, headline");
+        let (im_banner, im_dc, im_gh, im_div, im_about) =
+            (&imgs[0], &imgs[1], &imgs[2], &imgs[3], &imgs[4]);
+
+        assert_eq!(im_banner.x, 0, "banner stretches from the left edge");
+        assert_eq!(im_banner.width, body_w, "banner fills the body width");
+
+        assert_eq!(im_dc.line, im_gh.line, "badges share one row");
+        assert!(im_dc.x > 0, "wrapper row is centred, not left-aligned");
+        assert_eq!(im_gh.x, im_dc.x + im_dc.width + 2, "gap between badges");
+        assert!(
+            im_gh.x + im_gh.width <= body_w,
+            "centred badge row fits the body"
+        );
+
+        assert_eq!(im_div.x, 0, "divider stretches from the left edge");
+        assert_eq!(im_div.width, body_w, "divider fills the body width");
+        assert!(
+            im_div.line >= im_gh.line + im_gh.height as usize,
+            "divider sits below the badge row"
+        );
+
+        assert_eq!(im_about.x, 0, "small headline stays on the left edge");
+        assert!(
+            im_about.width < body_w,
+            "small headline keeps its natural size"
+        );
+        assert!(im_about.line > im_div.line + im_div.height as usize);
+
+        assert_eq!(im_banner.link, None, "plain banner is not a link");
+        assert_eq!(
+            im_dc.link.as_deref(),
+            Some("https://discord.gg/x"),
+            "badge keeps its anchor target"
+        );
+        assert_eq!(
+            im_gh.link.as_deref(),
+            Some("https://github.com/x"),
+            "badge keeps its anchor target"
+        );
+        assert_eq!(im_div.link, None);
+        assert_eq!(im_about.link, None);
+        let linked_hits: Vec<_> = app
+            .hitboxes
+            .iter()
+            .filter(|h| matches!(h.action, HitAction::BrowseBodyLink(_)))
+            .collect();
+        assert_eq!(linked_hits.len(), 2, "only linked badges are clickable");
+        assert!(
+            linked_hits.iter().any(|h| h.rect.width == im_dc.width),
+            "hitbox matches the badge rect"
+        );
+
+        let badge_rect = linked_hits[0].rect;
+        app.mouse_pos = Some((
+            badge_rect.x + badge_rect.width / 2,
+            badge_rect.y + badge_rect.height / 2,
+        ));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert_eq!(
+            app.browse.hover_link.as_deref(),
+            Some("https://discord.gg/x"),
+            "hover exposes the link target"
+        );
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("↗ https://discord.gg/x"),
+            "footer shows the hovered target: {text:?}"
+        );
+
+        app.mouse_pos = None;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert_eq!(
+            app.browse.hover_link, None,
+            "hover hint clears when the pointer leaves"
+        );
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn browse_description_text_links_are_clickable_and_hinted() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        app.nav = Nav::Browse;
+
+        app.browse.detail = Some(Project {
+            id: "textlinks".into(),
+            slug: "textlinks".into(),
+            title: "Text Links".into(),
+            description: "text links".into(),
+            body: "Intro one.\n\nRead the [docs](https://example.com/docs) and the [guide](https://wiki.example/guide).".into(),
+            project_type: "mod".into(),
+            categories: Vec::new(),
+            additional_categories: Vec::new(),
+            client_side: "".into(),
+            server_side: "".into(),
+            downloads: 1,
+            followers: 0,
+            icon_url: None,
+            color: None,
+            issues_url: None,
+            source_url: None,
+            wiki_url: None,
+            discord_url: None,
+            game_versions: vec!["1.21.1".into()],
+            loaders: vec!["fabric".into()],
+            versions: Vec::new(),
+            published: String::new(),
+            updated: String::new(),
+            license: None,
+            gallery: Vec::new(),
+        });
+        app.browse.focus = BrowseFocus::Body;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let links = &app.browse.body_links;
+        assert_eq!(links.len(), 2, "both inline links are tracked");
+        assert_eq!(links[0].url, "https://example.com/docs");
+        assert_eq!(links[1].url, "https://wiki.example/guide");
+        assert_eq!(
+            (links[0].line, links[0].start, links[0].end),
+            (2, 9, 13),
+            "line remapped past the intro paragraph, range covers `docs`"
+        );
+        assert_eq!((links[1].start, links[1].end), (22, 27));
+
+        let text_hits: Vec<_> = app
+            .hitboxes
+            .iter()
+            .filter(|h| matches!(h.action, HitAction::BrowseTextLink(_)))
+            .map(|h| h.rect)
+            .collect();
+        assert_eq!(text_hits.len(), 2, "each link has a hitbox");
+        assert_eq!(text_hits[0].width, 4, "hitbox covers exactly `docs`");
+        assert_eq!(text_hits[1].width, 5, "hitbox covers exactly `guide`");
+
+        app.mouse_pos = Some((
+            text_hits[0].x + text_hits[0].width / 2,
+            text_hits[0].y + text_hits[0].height / 2,
+        ));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert_eq!(
+            app.browse.hover_link.as_deref(),
+            Some("https://example.com/docs")
+        );
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("↗ https://example.com/docs"),
+            "footer shows the hovered text link: {text:?}"
+        );
+
+        app.mouse_pos = Some((
+            text_hits[1].x + text_hits[1].width / 2,
+            text_hits[1].y,
+        ));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert_eq!(
+            app.browse.hover_link.as_deref(),
+            Some("https://wiki.example/guide"),
+            "second link has its own target"
+        );
+
+        app.mouse_pos = None;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert_eq!(app.browse.hover_link, None);
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn browse_changelog_links_are_clickable() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        app.nav = Nav::Browse;
+
+        app.browse.detail = Some(Project {
+            id: "cl".into(),
+            slug: "cl".into(),
+            title: "CL".into(),
+            description: "cl".into(),
+            body: String::new(),
+            project_type: "mod".into(),
+            categories: Vec::new(),
+            additional_categories: Vec::new(),
+            client_side: "".into(),
+            server_side: "".into(),
+            downloads: 1,
+            followers: 0,
+            icon_url: None,
+            color: None,
+            issues_url: None,
+            source_url: None,
+            wiki_url: None,
+            discord_url: None,
+            game_versions: vec!["1.21.1".into()],
+            loaders: vec!["fabric".into()],
+            versions: Vec::new(),
+            published: String::new(),
+            updated: String::new(),
+            license: None,
+            gallery: Vec::new(),
+        });
+        app.browse.versions = vec![Version {
+            id: "v1".into(),
+            project_id: "cl".into(),
+            name: "v1".into(),
+            version_number: "1.0.0".into(),
+            changelog: Some("See [notes](https://example.com/notes) for details.".into()),
+            date_published: "2026-01-01T00:00:00Z".into(),
+            downloads: 1,
+            version_type: "release".into(),
+            status: "listed".into(),
+            files: Vec::new(),
+            dependencies: Vec::new(),
+            game_versions: vec!["1.21.1".into()],
+            loaders: vec!["fabric".into()],
+        }];
+        app.browse.detail_tab = DetailTab::Changelog;
+        app.browse.focus = BrowseFocus::Body;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let links = &app.browse.changelog_links;
+        assert_eq!(links.len(), 1, "changelog link is tracked");
+        assert_eq!(links[0].url, "https://example.com/notes");
+        assert_eq!(
+            (links[0].line, links[0].start, links[0].end),
+            (0, 4, 9),
+            "range covers `notes` after `See `"
+        );
+
+        let hit = app
+            .hitboxes
+            .iter()
+            .find(|h| matches!(h.action, HitAction::BrowseChangelogLink(_)))
+            .map(|h| h.rect);
+        let hit = hit.expect("changelog link has a hitbox");
+        assert_eq!(hit.width, 5, "hitbox covers exactly `notes`");
+
+        app.mouse_pos = Some((hit.x + hit.width / 2, hit.y));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert_eq!(
+            app.browse.hover_link.as_deref(),
+            Some("https://example.com/notes")
+        );
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("↗ https://example.com/notes"),
+            "footer shows the hovered changelog link: {text:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn browse_description_partial_run_keeps_placeholder_for_missing() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        app.nav = Nav::Browse;
+
+        app.browse_images
+            .insert("https://cdn.example/a.png".to_string(), raster(20, 20));
+        app.browse.detail = Some(Project {
+            id: "partial".into(),
+            slug: "partial".into(),
+            title: "Partial".into(),
+            description: "partial".into(),
+            body: "![a](https://cdn.example/a.png)\n![missing](https://cdn.example/nope.png)".into(),
+            project_type: "mod".into(),
+            categories: Vec::new(),
+            additional_categories: Vec::new(),
+            client_side: "".into(),
+            server_side: "".into(),
+            downloads: 1,
+            followers: 0,
+            icon_url: None,
+            color: None,
+            issues_url: None,
+            source_url: None,
+            wiki_url: None,
+            discord_url: None,
+            game_versions: vec!["1.21.1".into()],
+            loaders: vec!["fabric".into()],
+            versions: Vec::new(),
+            published: String::new(),
+            updated: String::new(),
+            license: None,
+            gallery: Vec::new(),
+        });
+        app.browse.focus = BrowseFocus::Body;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        assert_eq!(app.browse.body_images.len(), 1, "only the loaded one reserves");
+        assert_eq!(app.browse.body_images[0].url, "https://cdn.example/a.png");
+        let has_placeholder = app.browse.body.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|s| s.content.starts_with('▣'))
+        });
+        assert!(has_placeholder, "missing image keeps its placeholder");
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
     async fn browse_detail_with_realistic_data_small_terminal() {
         let paths = temp_paths();
         let client = reqwest::Client::new();
@@ -2176,6 +2828,75 @@ mod tests {
             color: None,
         };
         assert!(app.is_hit_installed(&rp_hit));
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn browse_wheel_scrolls_view_not_selection() {
+        let mut app = App::new(temp_paths(), reqwest::Client::new()).await.unwrap();
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+        app.nav = Nav::Browse;
+        for i in 0..10 {
+            app.browse.results.push(SearchHit {
+                project_id: format!("id{i}"),
+                project_type: "mod".into(),
+                slug: format!("mod-{i}"),
+                author: "Someone".into(),
+                title: format!("Mod {i}"),
+                description: String::new(),
+                categories: vec![],
+                display_categories: vec![],
+                versions: vec![],
+                downloads: 1,
+                follows: 1,
+                icon_url: None,
+                date_created: String::new(),
+                date_modified: String::new(),
+                latest_version: None,
+                client_side: "".into(),
+                server_side: "".into(),
+                color: None,
+            });
+        }
+        app.browse.total = 10;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let vis = app.browse.list_visible;
+        assert!(vis > 0 && vis < 10, "expected partial viewport, got {vis}");
+
+        // Wheel scrolls the view, selection stays.
+        app.browse_wheel(1);
+        assert_eq!(app.browse.list_scroll, 1);
+        assert_eq!(app.browse.selected, 0);
+        app.browse_wheel(-1);
+        assert_eq!(app.browse.list_scroll, 0);
+
+        // Scroll clamps at the end (no page turn: total fits in offset window).
+        for _ in 0..20 {
+            app.browse_wheel(1);
+        }
+        assert_eq!(app.browse.list_scroll, 10 - vis);
+        assert_eq!(app.browse.selected, 0);
+
+        // Wheel up at the top with no prev page stays.
+        app.browse.list_scroll = 0;
+        app.browse_wheel(-1);
+        assert_eq!(app.browse.list_scroll, 0);
+
+        // Keyboard moves selection and pulls the view along.
+        app.browse.list_scroll = 0;
+        app.browse_move(1);
+        assert_eq!(app.browse.selected, 1);
+        assert_eq!(app.browse.list_scroll, 0);
+        app.browse.selected = 9;
+        app.browse_ensure_selected_visible();
+        assert_eq!(app.browse.list_scroll, 10 - vis);
 
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);
     }

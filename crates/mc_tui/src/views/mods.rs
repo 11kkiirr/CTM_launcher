@@ -248,6 +248,7 @@ impl App {
             width: list_area.width,
             height: list_area.height.saturating_sub(1),
         };
+        self.mods_visible = data_area.height as usize;
 
         let items: Vec<ListItem> = filtered_indices
             .iter()

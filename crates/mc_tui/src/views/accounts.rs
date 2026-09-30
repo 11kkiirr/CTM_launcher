@@ -73,6 +73,7 @@ impl App {
             width: inner.width,
             height: inner.height.saturating_sub(1),
         };
+        self.accounts_visible = list_area.height as usize;
         let active_id = self.accounts.active_id().map(str::to_string);
         let selected = self.account_state.selected();
         let hovered = hovered_index(self, list_area, self.account_state.offset(), account_count);

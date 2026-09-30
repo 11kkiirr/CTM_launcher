@@ -27,6 +27,78 @@ pub fn terminal_supports_truecolor() -> bool {
     }
 }
 
+/// Decode raw image bytes into the launcher's RGBA raster. Tries the native
+/// PNG decoder first (no `image` crate overhead), then the `image` crate for
+/// raster formats (jpeg/gif/webp/bmp/tiff/ico/…), then SVG rasterization via
+/// resvg (shields.io-style badges). Returns `None` for anything unsupported.
+pub fn decode_rgba(data: &[u8]) -> Option<RgbaImage> {
+    if let Ok(img) = mc_core::img::decode_image(data) {
+        return Some(img);
+    }
+    if let Ok(dynamic) = image::load_from_memory(data) {
+        let rgba = dynamic.to_rgba8();
+        return Some(RgbaImage {
+            width: rgba.width(),
+            height: rgba.height(),
+            pixels: rgba.into_raw(),
+        });
+    }
+    decode_svg(data)
+}
+
+/// Rasterize an SVG document to an RGBA raster at its intrinsic size.
+///
+/// SVG bytes are sniffed (XML prolog / root tag) before parsing so non-SVG
+/// input fails fast. The pixmap produced by resvg is premultiplied; pixels
+/// are un-premultiplied here so downstream blitters expect straight alpha.
+/// Sizes beyond [`SVG_MAX_DIM`] are rejected to bound allocations.
+pub fn decode_svg(data: &[u8]) -> Option<RgbaImage> {
+    const SVG_MAX_DIM: usize = 4096;
+    let text = std::str::from_utf8(data).ok()?;
+    let head = text.get(..4096).unwrap_or(text);
+    if !head.contains("<svg") && !head.contains("<?xml") {
+        return None;
+    }
+    let mut opt = resvg::usvg::Options::default();
+    let mut fontdb = resvg::usvg::fontdb::Database::new();
+    fontdb.load_system_fonts();
+    opt.fontdb = std::sync::Arc::new(fontdb);
+    let tree = resvg::usvg::Tree::from_str(text, &opt).ok()?;
+    let size = tree.size();
+    let w = size.width().ceil();
+    let h = size.height().ceil();
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let w = w as usize;
+    let h = h as usize;
+    if w > SVG_MAX_DIM || h > SVG_MAX_DIM || w * h > SVG_MAX_DIM * SVG_MAX_DIM {
+        return None;
+    }
+    let w = w as u32;
+    let h = h as u32;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::default(),
+        &mut pixmap.as_mut(),
+    );
+    let mut pixels = pixmap.data().to_vec();
+    for px in pixels.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        if a > 0 && a < 255 {
+            px[0] = ((px[0] as u32 * 255) / a).min(255) as u8;
+            px[1] = ((px[1] as u32 * 255) / a).min(255) as u8;
+            px[2] = ((px[2] as u32 * 255) / a).min(255) as u8;
+        }
+    }
+    Some(RgbaImage {
+        width: w,
+        height: h,
+        pixels,
+    })
+}
+
 /// Convert a decoded RGBA raster into the `image` crate's `DynamicImage` used
 /// by the `ratatui-image` widget protocols. Returns `None` for malformed
 /// rasters so the caller can fall back to a placeholder.
@@ -135,4 +207,31 @@ mod tests {
         // Should not panic on missing env and should return a bool.
         let _ = terminal_supports_truecolor();
     }
+
+    #[test]
+    fn decodes_svg_rasters() {
+        let svg = br##"<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="8" height="4">
+  <rect width="8" height="4" fill="#50FA7B"/>
+</svg>"##;
+        let img = decode_svg(svg).expect("svg should rasterize");
+        assert_eq!(img.width, 8);
+        assert_eq!(img.height, 4);
+        assert_eq!(img.pixels.len(), 8 * 4 * 4);
+        assert_eq!(decode_rgba(svg).map(|i| i.width), Some(8));
+    }
+
+    #[test]
+    fn svg_sniff_rejects_plain_text() {
+        assert!(decode_svg(b"hello world, not an image").is_none());
+        assert!(decode_svg(b"tag soup <svg").is_none());
+        assert!(decode_rgba(b"definitely not an image").is_none());
+    }
+
+    #[test]
+    fn svg_size_cap_rejects_huge_documents() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100000" height="100000"><rect width="100000" height="100000" fill="red"/></svg>"#;
+        assert!(decode_svg(svg).is_none(), "huge svg must be rejected");
+    }
 }
+

@@ -21,5 +21,17 @@ reqwest.workspace = true
 serde.workspace = true
 unicode-width = "0.2"
 ratatui-image = { version = "9.0.0", default-features = false, features = ["crossterm"] }
-image = { version = "0.25.6", default-features = false, features = ["webp"] }
+image = { version = "0.25.6", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "bmp",
+    "ico",
+    "tiff",
+    "tga",
+    "pnm",
+    "qoi",
+    "webp",
+] }
+resvg = "0.45"
 open = "5"

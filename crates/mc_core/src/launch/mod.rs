@@ -193,7 +193,8 @@ impl Launcher {
 ///
 /// Order of preference:
 /// 1. The instance's explicit Java path.
-/// 2. An installed runtime that satisfies the required major version.
+/// 2. The lowest installed runtime that meets the required major version
+///    without overshooting it (see [`java::find_for_major`]).
 /// 3. The Mojang-provided runtime for the version's component (downloaded on
 ///    demand into the launcher's `java/` directory).
 /// 4. Any discovered runtime, as a last resort.
