@@ -337,6 +337,8 @@ impl App {
             HitAction::BrowseBodyLink(idx) => self.open_body_link(idx),
             HitAction::BrowseTextLink(idx) => self.open_text_link(idx),
             HitAction::BrowseChangelogLink(idx) => self.open_changelog_link(idx),
+            HitAction::CopyBodyCode(idx) => self.copy_body_code(idx),
+            HitAction::CopyBodyCodeBlock(idx) => self.copy_body_code_block(idx),
             HitAction::BrowseInstall => self.browse_install(),
             HitAction::BrowseQuickInstall(idx) => self.browse_quick_install(idx),
             HitAction::BrowseSearchBar => {

@@ -16,7 +16,11 @@ struct Frag {
     text: String,
     style: Style,
     link: Option<String>,
+    code: Option<String>,
 }
+
+/// One wrapped character with its style and optional link/code payloads.
+type StreamItem = (char, Style, Option<String>, Option<String>);
 
 /// A clickable inline link found while rendering markdown, in output
 /// coordinates of [`render_md_full`].
@@ -32,23 +36,54 @@ pub struct MdLink {
     pub url: String,
 }
 
-/// Link range inside a single [`wrap_inline`] result, offset-adjusted by the
-/// block renderer that prepends prefixes (quote bars, list markers).
+/// An inline code span (`\`code\``) found while rendering markdown.
 #[derive(Debug, Clone)]
-struct WrapLink {
+pub struct MdCode {
+    /// Index of the output line containing the span (one entry per wrapped
+    /// line when the span crosses a line break).
+    pub line: usize,
+    /// First column of the span.
+    pub start: usize,
+    /// Column just past the last character of the span.
+    pub end: usize,
+    /// Full code text (the whole span, even when wrapped across lines).
+    pub text: String,
+}
+
+/// A fenced/indented code block region in the rendered output.
+#[derive(Debug, Clone)]
+pub struct MdCodeBlock {
+    /// Index of the first line of the block (its top padding row).
+    pub line: usize,
+    /// Total height in rows, including the padding rows.
+    pub height: usize,
+    /// Full block text (lines joined with newlines) — the copy payload.
+    pub text: String,
+}
+
+/// Link/code range inside a single [`wrap_inline`] result, offset-adjusted by
+/// the block renderer that prepends prefixes (quote bars, list markers).
+#[derive(Debug, Clone)]
+struct WrapMark {
     line: usize,
     start: usize,
     end: usize,
-    url: String,
+    url: Option<String>,
+    code: Option<String>,
 }
 
-/// Append wrapped lines and their link ranges to the block output, rebasing
-/// link line indices onto `out`.
-fn push_wrapped(out: &mut Vec<Line<'static>>, links: &mut Vec<WrapLink>, wrapped: Vec<Line<'static>>, wl: Vec<WrapLink>) {
+/// Append wrapped lines and their link/code ranges to the block output,
+/// rebasing line indices onto `out`.
+fn push_wrapped(
+    out: &mut Vec<Line<'static>>,
+    marks: &mut Vec<WrapMark>,
+    wrapped: Vec<Line<'static>>,
+    wm: Vec<WrapMark>,
+) {
     let base = out.len();
-    for mut l in wl {
-        l.line += base;
-        links.push(l);
+    for mut m in wm {
+        m.line += base;
+        marks.push(m);
     }
     out.extend(wrapped);
 }
@@ -86,24 +121,32 @@ pub fn render_md(text: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> 
 /// caller can replace their placeholder lines with real images.
 #[allow(dead_code)]
 pub fn render_md_ex(text: &str, width: usize, theme: &Theme) -> (Vec<Line<'static>>, Vec<MdImage>) {
-    let (lines, images, _) = render_md_full(text, width, theme);
+    let (lines, images, _, _, _) = render_md_full(text, width, theme);
     (lines, images)
 }
 
+/// Full markdown render result: wrapped lines, image blocks, clickable links,
+/// inline code spans and code block regions.
+pub type MdFull = (
+    Vec<Line<'static>>,
+    Vec<MdImage>,
+    Vec<MdLink>,
+    Vec<MdCode>,
+    Vec<MdCodeBlock>,
+);
+
 /// Like [`render_md_ex`], also reporting clickable inline links
-/// (`[label](url)`, `<a href="…">`) with their line/column ranges.
-pub fn render_md_full(
-    text: &str,
-    width: usize,
-    theme: &Theme,
-) -> (Vec<Line<'static>>, Vec<MdImage>, Vec<MdLink>) {
+/// (`[label](url)`, `<a href="…">`), inline code spans and code block
+/// regions with their line/column coordinates.
+pub fn render_md_full(text: &str, width: usize, theme: &Theme) -> MdFull {
     let clean = strip_html(text);
     let lines: Vec<&str> = clean.iter().map(|l| l.text.as_str()).collect();
     let aligns: Vec<MdAlign> = clean.iter().map(|l| l.align).collect();
     let base = theme.card();
     let mut out: Vec<Line> = Vec::new();
     let mut images: Vec<MdImage> = Vec::new();
-    let mut raw_links: Vec<WrapLink> = Vec::new();
+    let mut raw_marks: Vec<WrapMark> = Vec::new();
+    let mut code_blocks: Vec<MdCodeBlock> = Vec::new();
     let mut i = 0usize;
     let mut prev_blank = false;
 
@@ -116,7 +159,7 @@ pub fn render_md_full(
             i += 1;
             continue;
         }
-        if is_hr(&trimmed) {
+        if is_hr(trimmed) {
             if prev_blank {
                 out.push(Line::default());
             }
@@ -128,7 +171,7 @@ pub fn render_md_full(
             i += 1;
             continue;
         }
-        if let Some(fence) = fence_of(&trimmed) {
+        if let Some(fence) = fence_of(trimmed) {
             if prev_blank {
                 out.push(Line::default());
             }
@@ -136,25 +179,31 @@ pub fn render_md_full(
             let mut j = i + 1;
             while j < lines.len() {
                 let t = lines[j].trim();
-                if !t.is_empty() && fence_of(&t).is_some() && t.ends_with(fence.as_str()) {
+                if !t.is_empty() && fence_of(t).is_some() && t.ends_with(fence.as_str()) {
                     break;
                 }
                 code.push(lines[j].to_string());
                 j += 1;
             }
+            let block_line = out.len();
             out.extend(code_block(&code, width, theme));
+            code_blocks.push(MdCodeBlock {
+                line: block_line,
+                height: out.len() - block_line,
+                text: code.join("\n"),
+            });
             prev_blank = true;
             i = (j + 1).min(lines.len());
             continue;
         }
-        if let Some(level) = heading_level(&trimmed) {
+        if let Some(level) = heading_level(trimmed) {
             if prev_blank {
                 out.push(Line::default());
             }
             let text = trimmed.chars().skip(level).collect::<String>().trim_start().to_string();
             let heading_style = theme.header();
             let (wrapped, wl) = wrap_inline(parse_inline(&text, heading_style, theme), width, heading_style);
-            push_wrapped(&mut out, &mut raw_links, wrapped, wl);
+            push_wrapped(&mut out, &mut raw_marks, wrapped, wl);
             prev_blank = true;
             i += 1;
             continue;
@@ -211,12 +260,12 @@ pub fn render_md_full(
                 out.push(Line::default());
             }
             let (quoted, ql) = render_blockquote(&quote, width, theme);
-            push_wrapped(&mut out, &mut raw_links, quoted, ql);
+            push_wrapped(&mut out, &mut raw_marks, quoted, ql);
             prev_blank = true;
             i = j;
             continue;
         }
-        if let Some((marker, indent)) = list_marker(&trimmed) {
+        if let Some((marker, indent)) = list_marker(trimmed) {
             let mut items: Vec<String> = Vec::new();
             let mut j = i;
             while j < lines.len() {
@@ -224,7 +273,7 @@ pub fn render_md_full(
                 if t.is_empty() {
                     break;
                 }
-                if let Some((m, _)) = list_marker(&t) {
+                if let Some((m, _)) = list_marker(t) {
                     if m != marker {
                         break;
                     }
@@ -238,16 +287,16 @@ pub fn render_md_full(
                 out.push(Line::default());
             }
             let (listed, ll) = render_list(&items, marker, width, theme);
-            push_wrapped(&mut out, &mut raw_links, listed, ll);
+            push_wrapped(&mut out, &mut raw_marks, listed, ll);
             prev_blank = true;
             i = j;
             continue;
         }
-        if is_table_separator(&trimmed) {
+        if is_table_separator(trimmed) {
             i += 1;
             continue;
         }
-        if trimmed.contains('|') && i + 1 < lines.len() && is_table_separator(&lines[i + 1].trim()) {
+        if trimmed.contains('|') && i + 1 < lines.len() && is_table_separator(lines[i + 1].trim()) {
             let mut rows: Vec<String> = vec![trimmed.to_string()];
             let mut j = i + 2;
             while j < lines.len() {
@@ -283,7 +332,13 @@ pub fn render_md_full(
             if prev_blank {
                 out.push(Line::default());
             }
+            let block_line = out.len();
             out.extend(code_block(&code, width, theme));
+            code_blocks.push(MdCodeBlock {
+                line: block_line,
+                height: out.len() - block_line,
+                text: code.join("\n"),
+            });
             prev_blank = true;
             i = j;
             continue;
@@ -294,11 +349,11 @@ pub fn render_md_full(
         while j < lines.len() {
             let t = lines[j].trim();
             if t.is_empty()
-                || is_hr(&t)
-                || fence_of(&t).is_some()
-                || heading_level(&t).is_some()
+                || is_hr(t)
+                || fence_of(t).is_some()
+                || heading_level(t).is_some()
                 || t.starts_with(">")
-                || list_marker(&t).is_some()
+                || list_marker(t).is_some()
                 || t.contains('|')
             {
                 break;
@@ -311,24 +366,46 @@ pub fn render_md_full(
         }
         let joined = para.join(" ");
         let (wrapped, wl) = wrap_inline(parse_inline(&joined, base, theme), width, base);
-        push_wrapped(&mut out, &mut raw_links, wrapped, wl);
+        push_wrapped(&mut out, &mut raw_marks, wrapped, wl);
         prev_blank = false;
         i = j;
     }
 
-    while !out.is_empty() && line_blank(out.last().unwrap()) {
+    let code_end = code_blocks
+        .last()
+        .map(|b| b.line + b.height)
+        .unwrap_or(0);
+    while out.len() > code_end && line_blank(out.last().unwrap()) {
         out.pop();
     }
-    let links = raw_links
-        .into_iter()
-        .map(|l| MdLink {
-            line: l.line,
-            start: l.start,
-            end: l.end,
-            url: l.url,
-        })
-        .collect();
-    (out, images, links)
+    let mut links = Vec::new();
+    let mut codes = Vec::new();
+    for m in raw_marks {
+        let WrapMark {
+            line,
+            start,
+            end,
+            url,
+            code,
+        } = m;
+        if let Some(url) = url {
+            links.push(MdLink {
+                line,
+                start,
+                end,
+                url,
+            });
+        }
+        if let Some(text) = code {
+            codes.push(MdCode {
+                line,
+                start,
+                end,
+                text,
+            });
+        }
+    }
+    (out, images, links, codes, code_blocks)
 }
 
 // ---------------------------------------------------------------------------
@@ -336,20 +413,25 @@ pub fn render_md_full(
 // ---------------------------------------------------------------------------
 
 fn code_block(lines: &[String], width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let style = Style::default().fg(theme.muted).bg(theme.panel_alt);
+    let style = Style::default().fg(theme.comment).bg(theme.panel_alt);
+    let w = width.max(4);
     let mut out = Vec::new();
+    let pad_row = Line::from(Span::styled(" ".repeat(w), style));
+    out.push(pad_row.clone());
     for line in lines {
-        let text = line.trim_end().to_string();
-        let shown = truncate_cols(&text, width);
+        let text = line.trim_end();
+        let mut shown = String::from("  ");
+        shown.push_str(&truncate_cols(text, w.saturating_sub(4)));
+        while shown.width() < w {
+            shown.push(' ');
+        }
         out.push(Line::from(Span::styled(shown, style)));
     }
-    if out.is_empty() {
-        out.push(Line::from(Span::styled(String::new(), style)));
-    }
+    out.push(pad_row);
     out
 }
 
-fn render_blockquote(lines: &[String], width: usize, theme: &Theme) -> (Vec<Line<'static>>, Vec<WrapLink>) {
+fn render_blockquote(lines: &[String], width: usize, theme: &Theme) -> (Vec<Line<'static>>, Vec<WrapMark>) {
     let style = Style::default().fg(theme.comment);
     let inner_w = width.saturating_sub(2).max(1);
     let mut out = Vec::new();
@@ -375,7 +457,7 @@ fn render_blockquote(lines: &[String], width: usize, theme: &Theme) -> (Vec<Line
     (out, links)
 }
 
-fn render_list(items: &[String], marker: &str, width: usize, theme: &Theme) -> (Vec<Line<'static>>, Vec<WrapLink>) {
+fn render_list(items: &[String], marker: &str, width: usize, theme: &Theme) -> (Vec<Line<'static>>, Vec<WrapMark>) {
     let ordered = marker != "-" && marker != "*" && marker != "+";
     let indent = 3usize;
     let inner_w = width.saturating_sub(indent).max(1);
@@ -501,13 +583,19 @@ fn parse_inline(text: &str, base: Style, theme: &Theme) -> Vec<Frag> {
     while i < chars.len() {
         let c = chars[i];
         if c == '\\' && i + 1 < chars.len() {
-            push_frag(&mut out, format!("{}", chars[i + 1]), base, None);
+            push_frag(&mut out, format!("{}", chars[i + 1]), base, None, None);
             i += 2;
             continue;
         }
         if c == '!' && i + 1 < chars.len() && chars[i + 1] == '[' {
             if let Some((alt, _url, rest)) = link_target(&chars, i + 1) {
-                push_frag(&mut out, format!("▣ {alt}"), Style::default().fg(theme.green_dim), None);
+                push_frag(
+                    &mut out,
+                    format!("▣ {alt}"),
+                    Style::default().fg(theme.green_dim),
+                    None,
+                    None,
+                );
                 i = rest;
                 continue;
             }
@@ -520,8 +608,9 @@ fn parse_inline(text: &str, base: Style, theme: &Theme) -> Vec<Frag> {
                     push_frag(
                         &mut out,
                         frag.text.clone(),
-                        frag.style.clone().add_modifier(Modifier::UNDERLINED),
+                        frag.style.add_modifier(Modifier::UNDERLINED),
                         frag.link.clone().or_else(|| Some(url.clone())),
+                        frag.code.clone(),
                     );
                 }
                 i = rest;
@@ -530,7 +619,13 @@ fn parse_inline(text: &str, base: Style, theme: &Theme) -> Vec<Frag> {
         }
         if c == '`' {
             if let Some((code, rest)) = code_span(&chars, i) {
-                push_frag(&mut out, code, Style::default().fg(theme.info), None);
+                push_frag(
+                    &mut out,
+                    code.clone(),
+                    Style::default().fg(theme.comment).bg(theme.panel_alt),
+                    None,
+                    Some(code),
+                );
                 i = rest;
                 continue;
             }
@@ -542,41 +637,59 @@ fn parse_inline(text: &str, base: Style, theme: &Theme) -> Vec<Frag> {
                     .iter()
                     .skip(i + run)
                     .take(closer - i - run)
-                    .map(|ch| *ch)
+                    .copied()
                     .collect::<String>();
                 let inner_style = if c == '~' {
-                    base.clone().add_modifier(Modifier::CROSSED_OUT)
+                    base.add_modifier(Modifier::CROSSED_OUT)
                 } else if run >= 2 {
-                    base.clone().add_modifier(Modifier::BOLD)
+                    base.add_modifier(Modifier::BOLD)
                 } else {
-                    base.clone().add_modifier(Modifier::ITALIC)
+                    base.add_modifier(Modifier::ITALIC)
                 };
                 let inner = parse_inline(&inner_text, inner_style, theme);
                 for frag in inner {
-                    push_frag(&mut out, frag.text.clone(), frag.style.clone(), frag.link.clone());
+                    push_frag(
+                        &mut out,
+                        frag.text.clone(),
+                        frag.style,
+                        frag.link.clone(),
+                        frag.code.clone(),
+                    );
                 }
                 i = closer + run;
                 continue;
             }
         }
-        push_frag(&mut out, format!("{}", c), base, None);
+        push_frag(&mut out, format!("{}", c), base, None, None);
         i += 1;
     }
     out
 }
 
-/// Push a fragment, merging with the previous when style and link match.
-fn push_frag(out: &mut Vec<Frag>, text: String, style: Style, link: Option<String>) {
+/// Push a fragment, merging with the previous when style, link and code all
+/// match.
+fn push_frag(
+    out: &mut Vec<Frag>,
+    text: String,
+    style: Style,
+    link: Option<String>,
+    code: Option<String>,
+) {
     if text.is_empty() {
         return;
     }
     if let Some(last) = out.last_mut() {
-        if last.style == style && last.link == link {
+        if last.style == style && last.link == link && last.code == code {
             last.text.push_str(text.as_str());
             return;
         }
     }
-    out.push(Frag { text, style, link });
+    out.push(Frag {
+        text,
+        style,
+        link,
+        code,
+    });
 }
 
 /// For a `[` at `i`, find the closing `](url)` and return
@@ -601,7 +714,7 @@ fn link_target(chars: &[char], i: usize) -> Option<(String, String, usize)> {
                             .iter()
                             .skip(i + 1)
                             .take(j - i - 1)
-                            .map(|ch| *ch)
+                            .copied()
                             .collect::<String>();
                         let url: String = chars[j + 2..k].iter().collect();
                         return Some((label, url, k + 1));
@@ -806,7 +919,7 @@ fn code_span(chars: &[char], i: usize) -> Option<(String, usize)> {
                     .iter()
                     .skip(i + run)
                     .take(j - i - run)
-                    .map(|ch| *ch)
+                    .copied()
                     .collect::<String>();
                 return Some((code, j + run));
             }
@@ -853,14 +966,18 @@ fn find_closer(chars: &[char], from: usize, c: char, run: usize) -> Option<usize
 
 /// Wrap inline fragments to `width` columns using word wrapping. Returns styled
 /// lines (each ≤ `width` display columns).
-fn wrap_inline(frags: Vec<Frag>, width: usize, line_style: Style) -> (Vec<Line<'static>>, Vec<WrapLink>) {
+fn wrap_inline(
+    frags: Vec<Frag>,
+    width: usize,
+    line_style: Style,
+) -> (Vec<Line<'static>>, Vec<WrapMark>) {
     if width == 0 {
         return (vec![Line::default()], Vec::new());
     }
-    let mut stream: Vec<(char, Style, Option<String>)> = Vec::new();
+    let mut stream: Vec<StreamItem> = Vec::new();
     for frag in frags {
         for c in frag.text.chars() {
-            stream.push((c, frag.style.clone(), frag.link.clone()));
+            stream.push((c, frag.style, frag.link.clone(), frag.code.clone()));
         }
     }
     if stream.is_empty() {
@@ -871,8 +988,8 @@ fn wrap_inline(frags: Vec<Frag>, width: usize, line_style: Style) -> (Vec<Line<'
     }
 
     // Split into words.
-    let mut words: Vec<Vec<(char, Style, Option<String>)>> = Vec::new();
-    let mut word: Vec<(char, Style, Option<String>)> = Vec::new();
+    let mut words: Vec<Vec<StreamItem>> = Vec::new();
+    let mut word: Vec<StreamItem> = Vec::new();
     for item in stream {
         if item.0 == ' ' {
             if !word.is_empty() {
@@ -887,11 +1004,11 @@ fn wrap_inline(frags: Vec<Frag>, width: usize, line_style: Style) -> (Vec<Line<'
         words.push(word);
     }
 
-    let mut lines: Vec<Vec<(char, Style, Option<String>)>> = Vec::new();
-    let mut line: Vec<(char, Style, Option<String>)> = Vec::new();
+    let mut lines: Vec<Vec<StreamItem>> = Vec::new();
+    let mut line: Vec<StreamItem> = Vec::new();
     let mut cols = 0usize;
     for word in words {
-        let w: usize = word.iter().map(|(c, _, _)| char_cols(*c)).sum();
+        let w: usize = word.iter().map(|(c, _, _, _)| char_cols(*c)).sum();
         if w > width {
             if !line.is_empty() {
                 lines.push(line);
@@ -922,7 +1039,10 @@ fn wrap_inline(frags: Vec<Frag>, width: usize, line_style: Style) -> (Vec<Line<'
                 let last_link = last.2.clone();
                 let word_link = word.first().unwrap().2.clone();
                 let space_link = if last_link == word_link { last_link } else { None };
-                line.push((' ', last_style, space_link));
+                let last_code = last.3.clone();
+                let word_code = word.first().unwrap().3.clone();
+                let space_code = if last_code == word_code { last_code } else { None };
+                line.push((' ', last_style, space_link, space_code));
                 cols += 1;
             } else {
                 lines.push(line);
@@ -943,51 +1063,73 @@ fn wrap_inline(frags: Vec<Frag>, width: usize, line_style: Style) -> (Vec<Line<'
     }
 
     let mut out: Vec<Line> = Vec::new();
-    let mut links: Vec<WrapLink> = Vec::new();
+    let mut marks: Vec<WrapMark> = Vec::new();
     for (line_idx, chars) in lines.into_iter().enumerate() {
         let mut spans: Vec<Span> = Vec::new();
-        let mut style = line_style.clone();
+        let mut style = line_style;
         let mut link: Option<String> = None;
+        let mut code: Option<String> = None;
         let mut run = String::new();
         let mut run_start = 0usize;
         let mut col = 0usize;
         let flush = |run: &mut String,
-                         style: Style,
-                         link: Option<String>,
-                         run_start: usize,
-                         col: usize,
-                         spans: &mut Vec<Span>,
-                         links: &mut Vec<WrapLink>| {
+                     style: Style,
+                     link: Option<String>,
+                     code: Option<String>,
+                     run_start: usize,
+                     col: usize,
+                     spans: &mut Vec<Span>,
+                     marks: &mut Vec<WrapMark>| {
             if run.is_empty() {
                 return;
             }
             spans.push(Span::styled(std::mem::take(run), style));
-            if let Some(url) = link {
-                links.push(WrapLink {
+            if link.is_some() || code.is_some() {
+                marks.push(WrapMark {
                     line: line_idx,
                     start: run_start,
                     end: col,
-                    url,
+                    url: link,
+                    code,
                 });
             }
         };
-        for (c, st, ln) in chars {
+        for (c, st, ln, cd) in chars {
             let cw = char_cols(c);
-            if !run.is_empty() && (st != style || ln != link) {
-                flush(&mut run, style, link.clone(), run_start, col, &mut spans, &mut links);
+            if !run.is_empty() && (st != style || ln != link || cd != code) {
+                flush(
+                    &mut run,
+                    style,
+                    link.clone(),
+                    code.clone(),
+                    run_start,
+                    col,
+                    &mut spans,
+                    &mut marks,
+                );
                 run_start = col;
             }
             if run.is_empty() {
                 style = st;
                 link = ln;
+                code = cd;
             }
             run.push(c);
             col += cw;
         }
-        flush(&mut run, style, link, run_start, col, &mut spans, &mut links);
+        flush(
+            &mut run,
+            style,
+            link,
+            code,
+            run_start,
+            col,
+            &mut spans,
+            &mut marks,
+        );
         out.push(Line::from(spans));
     }
-    (out, links)
+    (out, marks)
 }
 
 // ---------------------------------------------------------------------------
@@ -1505,7 +1647,7 @@ mod tests {
 
     #[test]
     fn text_link_reports_line_and_columns() {
-        let (lines, _images, links) =
+        let (lines, _images, links, _, _) =
             render_md_full("see [docs](https://c.e/x) now", 80, &theme());
         assert_eq!(links.len(), 1);
         let l = &links[0];
@@ -1519,7 +1661,7 @@ mod tests {
 
     #[test]
     fn wrapped_text_link_reports_range_per_line() {
-        let (_lines, _images, links) = render_md_full(
+        let (_lines, _images, links, _, _) = render_md_full(
             "alpha [one two three four](https://c.e/x) omega",
             16,
             &theme(),
@@ -1533,21 +1675,21 @@ mod tests {
 
     #[test]
     fn list_and_quote_links_offset_by_prefix() {
-        let (_l, _i, links) = render_md_full("- see [docs](https://c.e/a)", 80, &theme());
+        let (_l, _i, links, _, _) = render_md_full("- see [docs](https://c.e/a)", 80, &theme());
         assert_eq!(links.len(), 1);
         assert_eq!(
             (links[0].line, links[0].start, links[0].end),
             (0, 6, 10),
             "marker prefix shifts the range"
         );
-        let (_l, _i, qlinks) = render_md_full("> [docs](https://c.e/a)", 80, &theme());
+        let (_l, _i, qlinks, _, _) = render_md_full("> [docs](https://c.e/a)", 80, &theme());
         assert_eq!(qlinks.len(), 1);
         assert_eq!((qlinks[0].start, qlinks[0].end), (2, 6));
     }
 
     #[test]
     fn html_text_anchor_reports_range() {
-        let (_l, _i, links) =
+        let (_l, _i, links, _, _) =
             render_md_full("see <a href=\"https://c.e/g\">guide</a> now", 80, &theme());
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].url, "https://c.e/g");
@@ -1556,10 +1698,10 @@ mod tests {
 
     #[test]
     fn heading_and_bold_links_are_tracked() {
-        let (_l, _i, hlinks) = render_md_full("# [Title](https://c.e/t)", 80, &theme());
+        let (_l, _i, hlinks, _, _) = render_md_full("# [Title](https://c.e/t)", 80, &theme());
         assert_eq!(hlinks.len(), 1);
         assert_eq!((hlinks[0].start, hlinks[0].end), (0, 5), "hash prefix stripped");
-        let (_l, _i, blinks) = render_md_full("**[bold](https://c.e/b)**", 80, &theme());
+        let (_l, _i, blinks, _, _) = render_md_full("**[bold](https://c.e/b)**", 80, &theme());
         assert_eq!(blinks.len(), 1);
         assert_eq!((blinks[0].start, blinks[0].end), (0, 4));
     }
@@ -1572,7 +1714,7 @@ mod tests {
             "None | 16 FPS | 60 FPS | 3.75x\n",
             "Sodium | 21 FPS | 82 FPS | 3.90x"
         );
-        let (lines, _i, _l) = render_md_full(md, 80, &theme());
+        let (lines, _i, _l, _, _) = render_md_full(md, 80, &theme());
         let text = plain(&lines);
         assert!(text[1].contains('─'), "separator sits under the header");
         for (col, (head, cell)) in [
@@ -1604,13 +1746,52 @@ mod tests {
             "| --- | --- |\n",
             "cccccc | d"
         );
-        let (lines, _i, _l) = render_md_full(md, 8, &theme());
+        let (lines, _i, _l, _, _) = render_md_full(md, 8, &theme());
         for line in plain(&lines) {
             assert!(
                 line.width() <= 8,
                 "row wider than the table area: {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn inline_code_span_reports_coords_and_style() {
+        let theme = theme();
+        let (lines, _, _, codes, _) = render_md_full("use `cargo build` here", 80, &theme);
+        assert_eq!(codes.len(), 1);
+        let c = &codes[0];
+        assert_eq!(c.text, "cargo build");
+        assert_eq!((c.line, c.start, c.end), (0, 4, 15));
+        assert_eq!(plain(&lines)[0], "use cargo build here");
+        let code_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.style.bg == Some(theme.panel_alt))
+            .expect("inline code has a panel_alt background");
+        assert_eq!(code_span.style.fg, Some(theme.comment));
+        assert!(
+            code_span.content.to_string().contains("cargo build"),
+            "code span keeps its text: {code_span:?}"
+        );
+    }
+
+    #[test]
+    fn code_block_gets_padding_and_reports_coords() {
+        let theme = theme();
+        let md = "intro\n\n```rust\nfn main() {}\n```\n\nafter";
+        let (lines, _, _, _, blocks) = render_md_full(md, 40, &theme);
+        assert_eq!(blocks.len(), 1);
+        let b = &blocks[0];
+        assert_eq!(b.height, 3, "top pad + code row + bottom pad");
+        assert_eq!(b.text, "fn main() {}", "copy payload is the raw code");
+        let text = plain(&lines);
+        assert!(text[b.line].chars().all(|c| c == ' '), "top pad row");
+        assert!(text[b.line + 1].contains("fn main()"));
+        assert!(text[b.line + 2].chars().all(|c| c == ' '), "bottom pad row");
+        let style = lines[b.line + 1].spans[0].style;
+        assert_eq!(style.bg, Some(theme.panel_alt));
+        assert_eq!(style.fg, Some(theme.comment));
     }
 
     #[test]

@@ -235,6 +235,32 @@ pub struct BodyLink {
     pub url: String,
 }
 
+/// An inline code span inside the expanded description body; clickable to
+/// copy its text.
+#[derive(Debug, Clone)]
+pub struct BodyCode {
+    /// Index of the line in `browse.body`.
+    pub line: usize,
+    /// First column of the span.
+    pub start: usize,
+    /// Column just past the last character of the span.
+    pub end: usize,
+    /// Full code text (the copy payload).
+    pub text: String,
+}
+
+/// A code block panel inside the expanded description body; clickable to
+/// copy its text.
+#[derive(Debug, Clone)]
+pub struct BodyCodeBlock {
+    /// Index of the first line of the panel in `browse.body`.
+    pub line: usize,
+    /// Panel height in rows (including padding rows).
+    pub height: usize,
+    /// Full block text (the copy payload).
+    pub text: String,
+}
+
 /// Per-kind cached browser state.
 #[derive(Debug, Clone)]
 pub struct BrowseCache {
@@ -257,6 +283,8 @@ pub struct BrowseCache {
     pub body_visible: usize,
     pub body_images: Vec<BodyImage>,
     pub body_links: Vec<BodyLink>,
+    pub body_codes: Vec<BodyCode>,
+    pub body_code_blocks: Vec<BodyCodeBlock>,
     pub body_dirty: bool,
     pub image_requested: HashSet<String>,
     pub detail_tab: DetailTab,
@@ -301,6 +329,8 @@ impl Default for BrowseCache {
             body_visible: 0,
             body_images: Vec::new(),
             body_links: Vec::new(),
+            body_codes: Vec::new(),
+            body_code_blocks: Vec::new(),
             body_dirty: false,
             image_requested: HashSet::new(),
             detail_tab: DetailTab::Description,
@@ -350,6 +380,8 @@ pub struct Browse {
     pub body_visible: usize,
     pub body_images: Vec<BodyImage>,
     pub body_links: Vec<BodyLink>,
+    pub body_codes: Vec<BodyCode>,
+    pub body_code_blocks: Vec<BodyCodeBlock>,
     pub body_dirty: bool,
     pub image_requested: HashSet<String>,
     pub detail_tab: DetailTab,
@@ -370,10 +402,9 @@ pub struct Browse {
     pub list_scroll: usize,
     /// How many result cards fit in the list viewport.
     pub list_visible: usize,
-    /// URL of the linked body element (image or text) under the pointer;
-    /// shown in the footer while hovered (cleared at the start of every
-    /// render pass).
-    pub hover_link: Option<String>,
+    /// Footer hint while hovering a link/code element (full display text,
+    /// e.g. `↗ url` or `⎘ code`); cleared at the start of every render pass.
+    pub hover_hint: Option<String>,
     /// Clickable links of the changelog tab; rebuilt on every render of the
     /// changelog (not cached — the changelog is re-rendered each frame).
     pub changelog_links: Vec<BodyLink>,
@@ -403,6 +434,8 @@ impl Default for Browse {
             body_visible: 0,
             body_images: Vec::new(),
             body_links: Vec::new(),
+            body_codes: Vec::new(),
+            body_code_blocks: Vec::new(),
             body_dirty: false,
             image_requested: HashSet::new(),
             detail_tab: DetailTab::Description,
@@ -421,7 +454,7 @@ impl Default for Browse {
             sidebar_selected: FilterItem::Sort,
             list_scroll: 0,
             list_visible: 0,
-            hover_link: None,
+            hover_hint: None,
             changelog_links: Vec::new(),
         }
     }
@@ -450,6 +483,8 @@ impl Browse {
             body_visible: self.body_visible,
             body_images: self.body_images.clone(),
             body_links: self.body_links.clone(),
+            body_codes: self.body_codes.clone(),
+            body_code_blocks: self.body_code_blocks.clone(),
             body_dirty: self.body_dirty,
             image_requested: self.image_requested.clone(),
             detail_tab: self.detail_tab,
@@ -495,6 +530,8 @@ impl Browse {
             self.body_visible = cache.body_visible;
             self.body_images = cache.body_images;
             self.body_links = cache.body_links;
+            self.body_codes = cache.body_codes;
+            self.body_code_blocks = cache.body_code_blocks;
             self.body_dirty = cache.body_dirty;
             self.image_requested = cache.image_requested;
             self.detail_tab = cache.detail_tab;
@@ -534,6 +571,8 @@ impl Browse {
             self.body_visible = 0;
             self.body_images = Vec::new();
             self.body_links = Vec::new();
+            self.body_codes = Vec::new();
+            self.body_code_blocks = Vec::new();
             self.body_dirty = false;
             self.image_requested = HashSet::new();
             self.detail_tab = DetailTab::Description;
@@ -2262,25 +2301,65 @@ impl App {
             );
             return;
         }
-        let links = self.browse.body_links.clone();
-        let mut hot: Option<BodyLink> = None;
-        for link in &links {
-            if link.line < start || link.line >= end || link.end <= link.start {
+        let codes = self.browse.body_codes.clone();
+        let mut code_hint: Option<String> = None;
+        for (idx, code) in codes.iter().enumerate() {
+            if code.line < start || code.line >= end || code.end <= code.start {
                 continue;
             }
             let rect = Rect {
-                x: inner.x + link.start as u16,
-                y: inner.y + (link.line - start) as u16,
-                width: (link.end - link.start) as u16,
+                x: inner.x + code.start as u16,
+                y: inner.y + (code.line - start) as u16,
+                width: (code.end - code.start) as u16,
                 height: 1,
             };
-            if self.is_hovered(rect) {
-                hot = Some(link.clone());
-                break;
+            self.push_hitbox(rect, HitAction::CopyBodyCode(idx));
+            if code_hint.is_none() && self.is_hovered(rect) {
+                code_hint = Some(format!("⎘ {}", code.text));
             }
         }
-        if let Some(link) = &hot {
-            self.browse.hover_link = Some(link.url.clone());
+        let blocks = self.browse.body_code_blocks.clone();
+        let mut block_hint: Option<String> = None;
+        for (idx, block) in blocks.iter().enumerate() {
+            let y0 = block.line.max(start);
+            let y1 = (block.line + block.height).min(end);
+            if y0 >= y1 {
+                continue;
+            }
+            let rect = Rect {
+                x: inner.x,
+                y: inner.y + (y0 - start) as u16,
+                width: body_w as u16,
+                height: (y1 - y0) as u16,
+            };
+            self.push_hitbox(rect, HitAction::CopyBodyCodeBlock(idx));
+            if block_hint.is_none() && self.is_hovered(rect) {
+                block_hint = Some(format!("⎘ {}", block.text.replace('\n', " · ")));
+            }
+        }
+        let links = self.browse.body_links.clone();
+        let mut hot: Option<BodyLink> = None;
+        if code_hint.is_none() && block_hint.is_none() {
+            for link in &links {
+                if link.line < start || link.line >= end || link.end <= link.start {
+                    continue;
+                }
+                let rect = Rect {
+                    x: inner.x + link.start as u16,
+                    y: inner.y + (link.line - start) as u16,
+                    width: (link.end - link.start) as u16,
+                    height: 1,
+                };
+                if self.is_hovered(rect) {
+                    hot = Some(link.clone());
+                    break;
+                }
+            }
+        }
+        if let Some(hint) = code_hint.or(block_hint) {
+            self.browse.hover_hint = Some(hint);
+        } else if let Some(link) = &hot {
+            self.browse.hover_hint = Some(format!("↗ {}", link.url));
         }
         let hot_pos = hot.map(|l| (l.line, l.start, l.end));
         let accent = self.theme.green_bright;
@@ -2348,7 +2427,7 @@ impl App {
             }
             if let Some(link) = &img.link {
                 if self.is_hovered(rect) {
-                    self.browse.hover_link = Some(link.clone());
+                    self.browse.hover_hint = Some(format!("↗ {link}"));
                     let marker = Rect {
                         x: rect.x + rect.width.saturating_sub(1),
                         y: rect.y + rect.height.saturating_sub(1),
@@ -2378,11 +2457,16 @@ impl App {
     /// markdown placeholder/blank lines a strip covers are consumed by the
     /// reservation.
     fn expand_body(&mut self, project_body: &str, width: usize) {
-        let (md, images, md_links) = render_md_full(project_body, width, &self.theme);
+        let (md, images, md_links, md_codes, md_blocks) =
+            render_md_full(project_body, width, &self.theme);
         let mut body: Vec<Line> = Vec::with_capacity(md.len());
         let mut body_images: Vec<BodyImage> = Vec::new();
         let mut body_links: Vec<BodyLink> = Vec::new();
+        let mut body_codes: Vec<BodyCode> = Vec::new();
+        let mut body_code_blocks: Vec<BodyCodeBlock> = Vec::new();
         let mut link_i = 0usize;
+        let mut code_i = 0usize;
+        let mut block_i = 0usize;
         let mut next = 0usize;
         let mut idx = 0usize;
         while idx < md.len() {
@@ -2397,6 +2481,28 @@ impl App {
                         });
                     }
                     link_i += 1;
+                }
+                while code_i < md_codes.len() && md_codes[code_i].line <= idx {
+                    if md_codes[code_i].line == idx {
+                        body_codes.push(BodyCode {
+                            line: body.len(),
+                            start: md_codes[code_i].start,
+                            end: md_codes[code_i].end,
+                            text: md_codes[code_i].text.clone(),
+                        });
+                    }
+                    code_i += 1;
+                }
+                while block_i < md_blocks.len() && md_blocks[block_i].line < idx {
+                    block_i += 1;
+                }
+                if block_i < md_blocks.len() && md_blocks[block_i].line == idx {
+                    body_code_blocks.push(BodyCodeBlock {
+                        line: body.len(),
+                        height: md_blocks[block_i].height,
+                        text: md_blocks[block_i].text.clone(),
+                    });
+                    block_i += 1;
                 }
                 body.push(md[idx].clone());
                 idx += 1;
@@ -2478,6 +2584,8 @@ impl App {
         self.browse.body = body;
         self.browse.body_images = body_images;
         self.browse.body_links = body_links;
+        self.browse.body_codes = body_codes;
+        self.browse.body_code_blocks = body_code_blocks;
     }
 
     /// Pack image block sizes into horizontal rows aligned per `align`.
@@ -2636,7 +2744,7 @@ impl App {
             }
         }
         if let Some(link) = &hot {
-            self.browse.hover_link = Some(link.url.clone());
+            self.browse.hover_hint = Some(format!("↗ {}", link.url));
         }
         let hot_pos = hot.map(|l| (l.line, l.start, l.end));
         let accent = self.theme.green_bright;
@@ -3320,7 +3428,7 @@ impl App {
         else {
             return (Vec::new(), Vec::new());
         };
-        let (lines, _images, links) = render_md_full(body, width.max(10), &self.theme);
+        let (lines, _images, links, _codes, _blocks) = render_md_full(body, width.max(10), &self.theme);
         let links = links
             .into_iter()
             .map(|l| BodyLink {

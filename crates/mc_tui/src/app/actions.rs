@@ -1374,6 +1374,39 @@ pub(crate) fn open_changelog_link(&mut self, idx: usize) {
     }
 }
 
+pub(crate) fn copy_body_code(&mut self, idx: usize) {
+    let Some(text) = self.browse.body_codes.get(idx).map(|code| code.text.clone()) else {
+        return;
+    };
+    self.copy_text(&text);
+}
+
+pub(crate) fn copy_body_code_block(&mut self, idx: usize) {
+    let Some(text) = self
+        .browse
+        .body_code_blocks
+        .get(idx)
+        .map(|block| block.text.clone())
+    else {
+        return;
+    };
+    self.copy_text(&text);
+}
+
+fn copy_text(&mut self, text: &str) {
+    if clipboard_copy(text) {
+        self.set_toast(
+            crate::i18n::tr_string(self.lang(), "toast.copied"),
+            false,
+        );
+    } else {
+        self.set_toast(
+            crate::i18n::tr_string(self.lang(), "toast.copy_failed"),
+            true,
+        );
+    }
+}
+
 pub(crate) fn browse_close_detail(&mut self) {
     self.browse.detail = None;
     self.browse.members.clear();
@@ -3075,4 +3108,82 @@ pub(crate) fn import_external_by_name(&mut self, name: &str) {
     });
 }
 
+}
+
+fn clipboard_copy(text: &str) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let candidates: [(&str, &[&str]); 5] = [
+        ("wl-copy", &[]),
+        ("xclip", &["-selection", "clipboard", "-in"]),
+        ("xsel", &["--clipboard", "--input"]),
+        ("pbcopy", &[]),
+        ("clip.exe", &[]),
+    ];
+    for (bin, args) in candidates {
+        let mut child = match Command::new(bin)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => continue,
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            if stdin.write_all(text.as_bytes()).is_err() {
+                let _ = child.kill();
+                continue;
+            }
+        }
+        if let Ok(status) = child.wait() {
+            if status.success() {
+                return true;
+            }
+        }
+    }
+    osc52_copy(text)
+}
+
+fn osc52_copy(text: &str) -> bool {
+    use std::io::Write;
+    let b64 = base64_encode(text.as_bytes());
+    let seq = if std::env::var_os("TMUX").is_some() {
+        format!("\x1bPtmux;\x1b\x1b]52;c;{b64}\x07\x1b\\")
+    } else {
+        format!("\x1b]52;c;{b64}\x07")
+    };
+    let mut out = std::io::stdout();
+    out.write_all(seq.as_bytes()).is_ok() && out.flush().is_ok()
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
 }

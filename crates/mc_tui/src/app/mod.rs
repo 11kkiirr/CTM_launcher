@@ -206,6 +206,12 @@ pub enum HitAction {
     /// Click on an inline text link inside the changelog tab: index into
     /// `browse.changelog_links`.
     BrowseChangelogLink(usize),
+    /// Click on an inline code span in the description body — copy it:
+    /// index into `browse.body_codes`.
+    CopyBodyCode(usize),
+    /// Click on a code block panel in the description body — copy it:
+    /// index into `browse.body_code_blocks`.
+    CopyBodyCodeBlock(usize),
     BrowseInstall,
     BrowseQuickInstall(usize),
     BrowseSearchBar,
@@ -2323,8 +2329,8 @@ mod tests {
         ));
         terminal.draw(|frame| app.render(frame)).unwrap();
         assert_eq!(
-            app.browse.hover_link.as_deref(),
-            Some("https://discord.gg/x"),
+            app.browse.hover_hint.as_deref(),
+            Some("↗ https://discord.gg/x"),
             "hover exposes the link target"
         );
         let text = buffer_text(&terminal);
@@ -2336,7 +2342,7 @@ mod tests {
         app.mouse_pos = None;
         terminal.draw(|frame| app.render(frame)).unwrap();
         assert_eq!(
-            app.browse.hover_link, None,
+            app.browse.hover_hint, None,
             "hover hint clears when the pointer leaves"
         );
 
@@ -2408,8 +2414,8 @@ mod tests {
         ));
         terminal.draw(|frame| app.render(frame)).unwrap();
         assert_eq!(
-            app.browse.hover_link.as_deref(),
-            Some("https://example.com/docs")
+            app.browse.hover_hint.as_deref(),
+            Some("↗ https://example.com/docs")
         );
         let text = buffer_text(&terminal);
         assert!(
@@ -2423,14 +2429,95 @@ mod tests {
         ));
         terminal.draw(|frame| app.render(frame)).unwrap();
         assert_eq!(
-            app.browse.hover_link.as_deref(),
-            Some("https://wiki.example/guide"),
+            app.browse.hover_hint.as_deref(),
+            Some("↗ https://wiki.example/guide"),
             "second link has its own target"
         );
 
         app.mouse_pos = None;
         terminal.draw(|frame| app.render(frame)).unwrap();
-        assert_eq!(app.browse.hover_link, None);
+        assert_eq!(app.browse.hover_hint, None);
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn browse_body_code_is_clickable_and_hinted() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        app.nav = Nav::Browse;
+
+        app.browse.detail = Some(Project {
+            id: "code".into(),
+            slug: "code".into(),
+            title: "Code".into(),
+            description: "code".into(),
+            body: "Run `cargo build` now.\n\n```\nfn main() {}\n```".into(),
+            project_type: "mod".into(),
+            categories: Vec::new(),
+            additional_categories: Vec::new(),
+            client_side: "".into(),
+            server_side: "".into(),
+            downloads: 1,
+            followers: 0,
+            icon_url: None,
+            color: None,
+            issues_url: None,
+            source_url: None,
+            wiki_url: None,
+            discord_url: None,
+            game_versions: vec!["1.21.1".into()],
+            loaders: vec!["fabric".into()],
+            versions: Vec::new(),
+            published: String::new(),
+            updated: String::new(),
+            license: None,
+            gallery: Vec::new(),
+        });
+        app.browse.focus = BrowseFocus::Body;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        assert_eq!(app.browse.body_codes.len(), 1, "inline span is tracked");
+        assert_eq!(app.browse.body_codes[0].text, "cargo build");
+        assert_eq!(app.browse.body_code_blocks.len(), 1, "block is tracked");
+        assert_eq!(app.browse.body_code_blocks[0].text, "fn main() {}");
+
+        let code_hits: Vec<_> = app
+            .hitboxes
+            .iter()
+            .filter(|h| matches!(h.action, HitAction::CopyBodyCode(_)))
+            .map(|h| h.rect)
+            .collect();
+        let block_hits: Vec<_> = app
+            .hitboxes
+            .iter()
+            .filter(|h| matches!(h.action, HitAction::CopyBodyCodeBlock(_)))
+            .map(|h| h.rect)
+            .collect();
+        assert_eq!(code_hits.len(), 1, "inline code has a hitbox");
+        assert_eq!(code_hits[0].width, 11, "hitbox covers `cargo build`");
+        assert_eq!(block_hits.len(), 1, "code block has a hitbox");
+        assert_eq!(block_hits[0].height, 3, "pad row + code row + pad row");
+
+        app.mouse_pos = Some((code_hits[0].x + code_hits[0].width / 2, code_hits[0].y));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert_eq!(app.browse.hover_hint.as_deref(), Some("⎘ cargo build"));
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("⎘ cargo build"),
+            "footer shows the code hint: {text:?}"
+        );
+
+        app.dispatch_hit(HitAction::CopyBodyCode(0));
+        let toast = app.toast.clone().expect("copy reports via toast");
+        assert!(!toast.error, "copy succeeded: {toast:?}");
+        assert_eq!(toast.message, "Copied to clipboard");
+
+        app.mouse_pos = None;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert_eq!(app.browse.hover_hint, None);
 
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);
     }
@@ -2509,8 +2596,8 @@ mod tests {
         app.mouse_pos = Some((hit.x + hit.width / 2, hit.y));
         terminal.draw(|frame| app.render(frame)).unwrap();
         assert_eq!(
-            app.browse.hover_link.as_deref(),
-            Some("https://example.com/notes")
+            app.browse.hover_hint.as_deref(),
+            Some("↗ https://example.com/notes")
         );
         let text = buffer_text(&terminal);
         assert!(
