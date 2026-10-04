@@ -55,8 +55,8 @@ impl App {
             ],
         );
 
-        self.render_log_list(frame, chunks[1]);
-        self.render_log_status(frame, chunks[2]);
+        self.render_log_list(frame, crate::views::left_gutter(chunks[1]));
+        self.render_log_status(frame, crate::views::left_gutter(chunks[2]));
     }
 
     fn render_log_list(&mut self, frame: &mut Frame, area: Rect) {

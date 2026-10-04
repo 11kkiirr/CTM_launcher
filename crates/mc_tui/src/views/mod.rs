@@ -34,6 +34,16 @@ pub(crate) fn inner(area: Rect) -> Rect {
     }
 }
 
+/// Page body inset 2 columns from the window's left edge, leaving the darkest
+/// page background visible as a gutter.
+pub(crate) fn left_gutter(area: Rect) -> Rect {
+    Rect {
+        x: area.x + 2,
+        width: area.width.saturating_sub(2),
+        ..area
+    }
+}
+
 /// Draw a flat card: a filled dark surface with no borders.
 ///
 /// Focused cards additionally get a green `▎` accent bar down the left edge.
@@ -326,6 +336,113 @@ pub(crate) fn buttons_row(
     buttons: &[(&str, &str, ButtonId)],
 ) {
     pill_row(app, frame, x, y, max_width, buttons);
+}
+
+/// Toolbar filter pill: ▄/▀ caps, a "Filter" label, and the query text with a
+/// caret/selection while focused. Registers a hitbox for click/drag editing.
+pub(crate) fn render_filter_pill(
+    app: &mut App,
+    frame: &mut Frame,
+    rect: Rect,
+    query: &str,
+    focused: bool,
+    action: HitAction,
+) {
+    if rect.width == 0 || rect.height < 3 {
+        return;
+    }
+    let search_bg = if focused {
+        app.theme.panel_alt
+    } else {
+        app.theme.panel
+    };
+    let edge = Style::default().fg(search_bg).bg(app.theme.bg);
+    frame.render_widget(
+        Paragraph::new(Span::styled("▄".repeat(rect.width as usize), edge))
+            .style(Style::default().bg(app.theme.bg)),
+        Rect {
+            height: 1,
+            ..rect
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled("▀".repeat(rect.width as usize), edge))
+            .style(Style::default().bg(app.theme.bg)),
+        Rect {
+            y: rect.y + 2,
+            height: 1,
+            ..rect
+        },
+    );
+    let bar_row = rect.y + 1;
+    // Fill the middle row with the panel color first: the text below starts
+    // one column right of the edge, so without this the first cell would show
+    // the dark page background through.
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            " ".repeat(rect.width as usize),
+            Style::default().bg(search_bg),
+        ))
+        .style(Style::default().bg(search_bg)),
+        Rect {
+            x: rect.x,
+            y: bar_row,
+            width: rect.width,
+            height: 1,
+        },
+    );
+    if focused {
+        frame.render_widget(
+            Paragraph::new(Span::styled(" ", app.theme.accent()))
+                .style(Style::default().bg(search_bg)),
+            Rect {
+                x: rect.x,
+                y: bar_row,
+                width: 1,
+                height: 1,
+            },
+        );
+    }
+    let base = if focused {
+        Style::default().fg(app.theme.green).bg(search_bg)
+    } else {
+        Style::default().fg(app.theme.fg).bg(search_bg)
+    };
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if query.is_empty() && !focused {
+        spans.push(Span::styled(
+            app.tr("dialog.search"),
+            Style::default().fg(app.theme.muted).bg(search_bg),
+        ));
+    }
+    if focused {
+        spans.extend(app.edit.edit_spans(query, true, base, base, app.theme.selection_bg));
+    } else if !query.is_empty() {
+        spans.push(Span::styled(query.to_string(), base));
+    }
+    let bar_x = rect.x + 1;
+    let bar_w = rect.width.saturating_sub(1);
+    // Horizontal scroll: keep the caret (while typing) or the tail (idle)
+    // visible when the text is longer than the field.
+    let anchor = if focused {
+        app.edit.cursor
+    } else {
+        query.chars().count()
+    };
+    let visible = bar_w as usize;
+    let scroll_x = anchor.saturating_sub(visible.saturating_sub(1)) as u16;
+    frame.render_widget(
+        Paragraph::new(Line::from(spans))
+            .style(Style::default().bg(search_bg))
+            .scroll((0, scroll_x)),
+        Rect {
+            x: bar_x,
+            y: bar_row,
+            width: bar_w,
+            height: 1,
+        },
+    );
+    app.push_hitbox(rect, action);
 }
 
 /// A card section title: a green label with an optional muted suffix.

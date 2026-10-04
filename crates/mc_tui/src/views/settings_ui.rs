@@ -12,7 +12,7 @@ use crate::app::App;
 /// Dark page-bg gutter on the left of every settings panel.
 pub(crate) const SIDE_PAD: u16 = 2;
 /// Dark page-bg rows between section panels.
-pub(crate) const PANEL_GAP: u16 = 1;
+pub(crate) const PANEL_GAP: u16 = 0;
 /// Fixed label column width (cells) so values always start on the same column.
 pub(crate) const LABEL_W: u16 = 22;
 /// Gap between the label cell and the value/track column.

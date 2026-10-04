@@ -23,6 +23,10 @@ impl App {
             crossterm::event::Event::Mouse(mouse) => self.handle_mouse(mouse),
             crossterm::event::Event::Resize(_, _) => true,
             crossterm::event::Event::FocusGained => true,
+            crossterm::event::Event::Paste(s) => {
+                self.paste_text(&s);
+                true
+            }
             _ => false,
         }
     }
@@ -38,9 +42,64 @@ impl App {
                 && self.browse.focus == crate::views::browse::BrowseFocus::Search)
     }
 
+    /// The edit field currently capturing keyboard input, if any.
+    fn active_edit(&mut self) -> Option<(&mut crate::edit::EditState, &mut String)> {
+        if self.settings_dropdown.is_some() {
+            return None;
+        }
+        if let Some((_, buffer)) = self.settings_edit.as_mut() {
+            return Some((&mut self.edit, buffer));
+        }
+        if self.mods_search_focused {
+            return Some((&mut self.edit, &mut self.mods_search_query));
+        }
+        if self.rp_search_focused {
+            return Some((&mut self.edit, &mut self.rp_inline_query));
+        }
+        if self.shaders_search_focused {
+            return Some((&mut self.edit, &mut self.shaders_inline_query));
+        }
+        if self.nav == Nav::Browse
+            && self.browse.focus == crate::views::browse::BrowseFocus::Search
+        {
+            return Some((&mut self.edit, &mut self.browse.search_input));
+        }
+        None
+    }
+
+    /// Feed a key press into the active inline edit field. Returns `true` when
+    /// the key was consumed (so global shortcuts do not fire while typing).
+    /// Escape/Enter/Tab are left for the regular dispatch (close field, commit).
+    pub(crate) fn typing_edit_key(&mut self, key: KeyEvent) -> bool {
+        use crate::edit::EditSignal;
+        let Some((edit, text)) = self.active_edit() else {
+            return false;
+        };
+        match edit.handle_key(text, key) {
+            EditSignal::Unhandled => false,
+            EditSignal::Copy(s) | EditSignal::Cut(s) => {
+                self.copy_text(&s);
+                true
+            }
+            EditSignal::Handled => true,
+        }
+    }
+
+    /// Bracketed-paste text into the active edit field (single line).
+    pub(crate) fn paste_text(&mut self, text: &str) {
+        let Some((edit, buffer)) = self.active_edit() else {
+            return;
+        };
+        edit.insert_str(buffer, text);
+    }
+
     pub(crate) fn handle_key(&mut self, key: KeyEvent) {
         if self.overlay.is_some() {
             self.handle_overlay_key(key);
+            return;
+        }
+
+        if self.typing_edit_key(key) {
             return;
         }
 
@@ -85,6 +144,11 @@ impl App {
         }
         self.nav = nav;
         self.focus = Focus::Content;
+        // Close any inline search field from the previous page: it would keep
+        // swallowing keystrokes (including ctrl+c) while hidden on the new page.
+        self.mods_search_focused = false;
+        self.rp_search_focused = false;
+        self.shaders_search_focused = false;
         self.settings_edit = None;
         self.settings_dropdown = None;
         self.settings_scroll = 0;
@@ -118,6 +182,11 @@ impl App {
             && self.nav != Nav::Modpacks
             && self.settings_edit.is_none()
             && self.settings_dropdown.is_none()
+            && !self.mods_search_focused
+            && !self.rp_search_focused
+            && !self.shaders_search_focused
+            && !(self.nav == Nav::Browse
+                && self.browse.focus == crate::views::browse::BrowseFocus::Search)
         {
             if self.nav == Nav::Browse {
                 if self.browse.in_detail() {
@@ -205,8 +274,27 @@ impl App {
                 true
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(hit) = self.hit_action_at(new_pos) {
-                    self.dispatch_hit(hit);
+                let hit = self.hitbox_at(new_pos);
+                let keep = hit.as_ref().map(|h| h.action);
+                self.unfocus_search_bars_except(keep);
+                if let Some(hit) = hit {
+                    self.dispatch_click(hit, new_pos);
+                    true
+                } else {
+                    hover_changed
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some((action, rect)) = self.edit_drag {
+                    self.drag_edit(action, rect, new_pos);
+                    true
+                } else {
+                    hover_changed
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if self.edit_drag.take().is_some() {
+                    self.edit.end_drag();
                     true
                 } else {
                     hover_changed
@@ -261,6 +349,101 @@ impl App {
             .map(|h| h.action)
     }
 
+    pub(crate) fn hitbox_at(&self, pos: (u16, u16)) -> Option<crate::app::Hitbox> {
+        self.hitboxes
+            .iter()
+            .find(|h| rect_contains(h.rect, pos))
+            .copied()
+    }
+
+    /// Text column inside a filter field under the mouse. The text always
+    /// starts one column right of the field edge (accent bar / left inset);
+    /// on an empty field every column clamps to 0 anyway.
+    fn field_click_col(&self, rect: ratatui::layout::Rect, pos: (u16, u16)) -> usize {
+        let rel = pos.0.saturating_sub(rect.x) as usize;
+        rel.saturating_sub(1)
+    }
+
+    /// A mouse click outside a focused search bar drops its focus, so the
+    /// single-letter shortcuts become active again. `keep` is the hitbox the
+    /// click landed on — clicking the bar itself must not unfocus it.
+    pub(crate) fn unfocus_search_bars_except(&mut self, keep: Option<HitAction>) {
+        let mut changed = false;
+        if keep != Some(HitAction::ModsSearchBar) && self.mods_search_focused {
+            self.mods_search_focused = false;
+            changed = true;
+        }
+        if keep != Some(HitAction::RPSearchBar) && self.rp_search_focused {
+            self.rp_search_focused = false;
+            changed = true;
+        }
+        if keep != Some(HitAction::ShadersSearchBar) && self.shaders_search_focused {
+            self.shaders_search_focused = false;
+            changed = true;
+        }
+        if keep != Some(HitAction::BrowseSearchBar)
+            && self.browse.focus == crate::views::browse::BrowseFocus::Search
+        {
+            self.browse.focus = crate::views::browse::BrowseFocus::List;
+            changed = true;
+        }
+        if changed {
+            self.edit.end_drag();
+        }
+    }
+
+    /// Handle a mouse click: for text fields place the cursor at the click
+    /// position (and start a selection drag); everything else dispatches.
+    pub(crate) fn dispatch_click(&mut self, hit: crate::app::Hitbox, pos: (u16, u16)) {
+        let action = hit.action;
+        match action {
+            HitAction::ModsSearchBar => {
+                self.mods_search_focused = true;
+                let col = self.field_click_col(hit.rect, pos);
+                self.edit.start_drag(&self.mods_search_query, col);
+                self.edit_drag = Some((action, hit.rect));
+            }
+            HitAction::RPSearchBar => {
+                self.rp_search_focused = true;
+                let col = self.field_click_col(hit.rect, pos);
+                self.edit.start_drag(&self.rp_inline_query, col);
+                self.edit_drag = Some((action, hit.rect));
+            }
+            HitAction::ShadersSearchBar => {
+                self.shaders_search_focused = true;
+                let col = self.field_click_col(hit.rect, pos);
+                self.edit.start_drag(&self.shaders_inline_query, col);
+                self.edit_drag = Some((action, hit.rect));
+            }
+            HitAction::BrowseSearchBar => {
+                if self.browse.focus != crate::views::browse::BrowseFocus::Search {
+                    self.browse.search_input = self.browse.query.clone();
+                }
+                self.browse.focus = crate::views::browse::BrowseFocus::Search;
+                let col = self.field_click_col(hit.rect, pos);
+                self.edit.start_drag(&self.browse.search_input, col);
+                self.edit_drag = Some((action, hit.rect));
+            }
+            _ => self.dispatch_hit(action),
+        }
+    }
+
+    pub(crate) fn drag_edit(
+        &mut self,
+        action: HitAction,
+        rect: ratatui::layout::Rect,
+        pos: (u16, u16),
+    ) {
+        let col = self.field_click_col(rect, pos);
+        match action {
+            HitAction::ModsSearchBar => self.edit.drag_to(&self.mods_search_query, col),
+            HitAction::RPSearchBar => self.edit.drag_to(&self.rp_inline_query, col),
+            HitAction::ShadersSearchBar => self.edit.drag_to(&self.shaders_inline_query, col),
+            HitAction::BrowseSearchBar => self.edit.drag_to(&self.browse.search_input, col),
+            _ => {}
+        }
+    }
+
     pub(crate) fn dispatch_hit(&mut self, action: HitAction) {
         match action {
             HitAction::NavItem(nav) => self.open_nav(nav),
@@ -287,6 +470,12 @@ impl App {
             }
             HitAction::ModsSearchBar => {
                 self.mods_search_focused = true;
+            }
+            HitAction::RPSearchBar => {
+                self.rp_search_focused = true;
+            }
+            HitAction::ShadersSearchBar => {
+                self.shaders_search_focused = true;
             }
             HitAction::AccountRow(idx) => {
                 self.account_state.select(Some(idx));
@@ -468,12 +657,8 @@ impl App {
                 }
             }
             Nav::Mods => {
-                list_wheel(
-                    &mut self.mods_state,
-                    self.installed_mods.len(),
-                    self.mods_visible,
-                    delta,
-                );
+                let len = self.visible_mod_indices().len();
+                list_wheel(&mut self.mods_state, len, self.mods_visible, delta);
             }
             Nav::Logs => self.scroll_logs(delta * 3),
             Nav::Jvm => {
@@ -493,20 +678,12 @@ impl App {
                 self.settings_field = next;
             }
             Nav::ResourcePacks => {
-                list_wheel(
-                    &mut self.resource_packs_state,
-                    self.resource_packs.len(),
-                    self.resource_packs_visible,
-                    delta,
-                );
+                let len = self.visible_rp_indices().len();
+                list_wheel(&mut self.resource_packs_state, len, self.resource_packs_visible, delta);
             }
             Nav::Shaders => {
-                list_wheel(
-                    &mut self.shaders_state,
-                    self.shaders.len(),
-                    self.shaders_visible,
-                    delta,
-                );
+                let len = self.visible_shader_indices().len();
+                list_wheel(&mut self.shaders_state, len, self.shaders_visible, delta);
             }
             Nav::Worlds => {
                 // Custom cards: scroll the view one world per notch.
@@ -731,11 +908,9 @@ impl App {
 
     pub(crate) fn handle_overlay_click(&mut self) {
         match self.overlay.as_ref() {
-            Some(Overlay::Confirm { action, .. }) => {
-                let action = action.clone();
-                self.overlay = None;
-                self.confirm(action);
-            }
+            // A click outside the Yes button never confirms: close the dialog
+            // (same as Esc / "No") so an accidental click cannot delete data.
+            Some(Overlay::Confirm { .. }) => self.overlay = None,
             Some(Overlay::Message { .. }) => self.overlay = None,
             _ => {}
         }

@@ -101,7 +101,14 @@ impl App {
                 self.browse.detail = Some(*project);
                 self.browse.members = members;
                 self.browse.versions = versions;
-                self.browse.version_selected = 0;
+                let gv = self
+                    .selected_instance()
+                    .map(|i| i.metadata.game_version.as_str());
+                let ld = self
+                    .selected_instance()
+                    .map(|i| i.metadata.loader.as_str());
+                self.browse.version_selected =
+                    crate::views::browse::first_compatible_index(&self.browse.versions, gv, ld);
                 self.browse.focus = crate::views::browse::BrowseFocus::Body;
                 self.browse.body = Vec::new();
                 self.browse.body_for = String::new();
@@ -149,19 +156,36 @@ impl App {
                 if let Some(mut wizard) = self.pending_wizard.take() {
                     wizard.project = Some(*project);
                     wizard.project_versions = versions;
-                    wizard.selected = 0;
+                    let gv = wizard.game_version.clone();
+                    let ld = wizard.loader().as_str();
+                    wizard.selected = crate::views::browse::first_compatible_index(
+                        &wizard.project_versions,
+                        Some(&gv),
+                        Some(ld),
+                    );
                     wizard.step = crate::wizard::WizardStep::ModrinthProject;
                     self.overlay = Some(Overlay::Wizard(wizard));
                 }
             }
             EngineEvent::Project { project, versions } => {
+                let gv = self
+                    .selected_instance()
+                    .map(|i| i.metadata.game_version.clone());
+                let ld = self
+                    .selected_instance()
+                    .map(|i| i.metadata.loader.as_str().to_string());
                 self.selected_project = Some(project);
                 self.project_versions = versions;
+                let idx = crate::views::browse::first_compatible_index(
+                    &self.project_versions,
+                    gv.as_deref(),
+                    ld.as_deref(),
+                );
                 self.project_state
                     .select(if self.project_versions.is_empty() {
                         None
                     } else {
-                        Some(0)
+                        Some(idx)
                     });
             }
             EngineEvent::ModsChanged => {
@@ -170,7 +194,8 @@ impl App {
             EngineEvent::InstalledMods(mods) => {
                 self.installed_mods = mods;
                 self.mods_scanning = false;
-                clamp_selection(&mut self.mods_state, self.installed_mods.len());
+                let len = self.visible_mod_indices().len();
+                clamp_selection(&mut self.mods_state, len);
             }
             EngineEvent::Crash(analysis) => {
                 self.crash_analysis = analysis;
@@ -201,11 +226,13 @@ impl App {
             EngineEvent::Error(message) => self.set_toast(message, true),
             EngineEvent::ResourcePacks(items) => {
                 self.resource_packs = items;
-                clamp_selection(&mut self.resource_packs_state, self.resource_packs.len());
+                let len = self.visible_rp_indices().len();
+                clamp_selection(&mut self.resource_packs_state, len);
             }
             EngineEvent::ShaderPacks(items) => {
                 self.shaders = items;
-                clamp_selection(&mut self.shaders_state, self.shaders.len());
+                let len = self.visible_shader_indices().len();
+                clamp_selection(&mut self.shaders_state, len);
             }
             EngineEvent::Worlds(items) => {
                 self.worlds = items;

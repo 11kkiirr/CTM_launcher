@@ -183,6 +183,8 @@ pub enum HitAction {
     ProjectVersionRow(usize),
     ModRow(usize),
     ModsSearchBar,
+    RPSearchBar,
+    ShadersSearchBar,
     AccountRow(usize),
     SettingsRow(usize),
     /// Open dropdown option click: `(field_index, option_index)`.
@@ -447,6 +449,10 @@ pub struct App {
     pub settings_field: usize,
     /// Inline settings editor: `(field_index, text_buffer)` while typing.
     pub settings_edit: Option<(usize, String)>,
+    /// Cursor and selection state for the currently active inline edit field.
+    pub edit: crate::edit::EditState,
+    /// Active mouse selection drag: `(field hit action, field rect)`.
+    pub edit_drag: Option<(HitAction, Rect)>,
     /// Open choice dropdown: `(field_index, highlighted_option)`.
     pub settings_dropdown: Option<(usize, usize)>,
     /// Vertical scroll offset for the settings body (sections may overflow).
@@ -566,6 +572,8 @@ impl App {
             java_installations: Vec::new(),
             settings_field: 0,
             settings_edit: None,
+            edit: crate::edit::EditState::default(),
+            edit_drag: None,
             settings_dropdown: None,
             settings_scroll: 0,
             settings_sliders: Vec::new(),
@@ -908,7 +916,7 @@ pub(crate) fn footer_hints(nav: Nav) -> &'static [(&'static str, &'static str)] 
             ("Space", "hint.toggle"),
             ("d", "hint.delete"),
             ("Enter", "hint.open_folder"),
-            ("t", "hint.filter"),
+            ("t", "hint.search"),
             ("s", "hint.store"),
             ("wheel", "hint.scroll"),
         ],
@@ -916,7 +924,7 @@ pub(crate) fn footer_hints(nav: Nav) -> &'static [(&'static str, &'static str)] 
             ("Space", "hint.toggle"),
             ("d", "hint.delete"),
             ("Enter", "hint.open_folder"),
-            ("t", "hint.filter"),
+            ("t", "hint.search"),
             ("s", "hint.store"),
             ("wheel", "hint.scroll"),
         ],
@@ -937,11 +945,13 @@ pub(crate) fn footer_hints(nav: Nav) -> &'static [(&'static str, &'static str)] 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use mc_core::instance::LoaderType;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
+    use crate::engine::EngineEvent;
+    use crate::forms::ConfirmAction;
     use crate::views::browse::{BrowseFocus, BrowseKind, DetailTab};
 
     fn temp_paths() -> Paths {
@@ -1517,6 +1527,117 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
         assert_eq!(app.nav, Nav::Mods, "digits must not switch tabs while typing");
         assert!(app.mods_search_focused, "search focus must stay open");
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn mods_filter_inline_editing_navigation_and_select_all() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        app.nav = Nav::Mods;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert!(app.mods_search_focused, "t must open the filter");
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert_eq!(app.mods_search_query, "so");
+
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(app.mods_search_query, "sxo", "cursor must move with arrows");
+
+        app.handle_key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL,
+        ));
+        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert_eq!(app.mods_search_query, "z", "ctrl+a must select all");
+
+        app.handle_key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        ));
+        assert!(!app.should_quit, "ctrl+c must copy, not quit, while typing");
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.mods_search_focused, "escape must close the filter");
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn clicking_and_dragging_mods_filter_moves_cursor_and_selection() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        app.instance_manager
+            .create("Alpha", "1.21.1", LoaderType::Vanilla, None)
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+        app.nav = Nav::Mods;
+        app.mods_search_query = "sodium".to_string();
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let hit = app
+            .hitboxes
+            .iter()
+            .find(|h| matches!(h.action, HitAction::ModsSearchBar))
+            .copied()
+            .expect("filter hitbox must be registered");
+
+        // The text starts one column right of the field edge (left inset).
+        let click = (hit.rect.x + 3, hit.rect.y);
+        app.dispatch_click(hit, click);
+        assert!(app.mods_search_focused, "click must focus the filter");
+        assert_eq!(app.edit.cursor, 2, "cursor must follow the click column");
+
+        // Drag to extend the selection (accent bar shifts columns by 1 once focused).
+        app.drag_edit(hit.action, hit.rect, (hit.rect.x + 5, hit.rect.y));
+        assert_eq!(app.edit.selection(&app.mods_search_query), Some((2, 4)));
+
+        // The focused filter renders the caret.
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let content = buffer_text(&terminal);
+        assert!(content.contains('█'), "caret must be rendered while typing");
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn filter_pill_left_inset_is_panel_colored() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        app.instance_manager
+            .create("Alpha", "1.21.1", LoaderType::Vanilla, None)
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+        app.nav = Nav::Mods;
+        app.mods_search_focused = false;
+        app.mods_search_query.clear();
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let hit = app
+            .hitboxes
+            .iter()
+            .find(|h| matches!(h.action, HitAction::ModsSearchBar))
+            .copied()
+            .expect("filter hitbox must be registered");
+        let panel = app.theme.panel;
+        let cell = terminal.backend().buffer().get(hit.rect.x, hit.rect.y + 1);
+        assert_eq!(
+            cell.bg,
+            panel,
+            "left inset cell must be panel-colored, not the dark page background"
+        );
 
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);
     }
@@ -3090,4 +3211,683 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);
     }
+
+    #[tokio::test]
+    async fn inline_filter_closes_on_navigation_and_input_works() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        app.instance_manager
+            .create("Alpha", "1.21.1", LoaderType::Vanilla, None)
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+
+        app.open_nav(Nav::ResourcePacks);
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert!(app.rp_search_focused, "t must open the rp filter");
+
+        app.open_nav(Nav::Shaders);
+        assert!(
+            !app.rp_search_focused,
+            "navigation must close the previous page's inline filter"
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert!(app.shaders_search_focused, "t must open the shaders filter");
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(app.shaders_inline_query, "a", "typing must insert");
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.shaders_search_focused);
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(
+            app.should_quit,
+            "ctrl+c with no active field must quit the launcher"
+        );
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn filter_text_scrolls_horizontally_when_too_long() {
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        app.instance_manager
+            .create("Alpha", "1.21.1", LoaderType::Vanilla, None)
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+        app.open_nav(Nav::Mods);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+
+        // Typing: caret sits after a long string, it must stay visible.
+        let long: String = "x".repeat(80);
+        app.mods_search_focused = true;
+        app.mods_search_query = long.clone();
+        app.edit.reset_with(&long);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let content = buffer_text(&terminal);
+        assert!(
+            content.contains('█'),
+            "caret must stay visible while typing a too-long filter"
+        );
+
+        // Idle: the tail of the query must be visible, not the head.
+        app.mods_search_focused = false;
+        app.mods_search_query = format!("START{}TAIL99", "a".repeat(80));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let content = buffer_text(&terminal);
+        assert!(
+            content.contains("TAIL99"),
+            "the tail of a too-long filter must be scrolled into view"
+        );
+        assert!(
+            !content.contains("START"),
+            "the head must be scrolled out of view"
+        );
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn installed_mods_rows_align_into_columns() {
+        fn char_pos(haystack: &str, needle: &str) -> Option<usize> {
+            let h: Vec<char> = haystack.chars().collect();
+            let n: Vec<char> = needle.chars().collect();
+            if n.is_empty() {
+                return Some(0);
+            }
+            h.windows(n.len()).position(|w| w == n.as_slice())
+        }
+
+        let paths = temp_paths();
+        let client = reqwest::Client::new();
+        let mut app = App::new(paths, client).await.unwrap();
+        app.instance_manager
+            .create("Alpha", "1.21.1", LoaderType::Vanilla, None)
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+        app.open_nav(Nav::Mods);
+
+        app.installed_mods.push(InstalledMod {
+            path: std::path::PathBuf::from("short.jar"),
+            file_name: "short.jar".into(),
+            enabled: true,
+            sha1: String::new(),
+            size: 314 * 1024,
+            mod_name: "Short".into(),
+            version: "1.0".into(),
+            mod_id: "short".into(),
+            install_date: "2026-05-30 16:35".into(),
+        });
+        app.installed_mods.push(InstalledMod {
+            path: std::path::PathBuf::from("long.jar"),
+            file_name: "long.jar".into(),
+            enabled: true,
+            sha1: String::new(),
+            size: 71_300_000,
+            mod_name: "A Much Longer Mod Name".into(),
+            version: "2.0.0-beta.3".into(),
+            mod_id: "long".into(),
+            install_date: "2026-01-31 15:06".into(),
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let rows: Vec<String> = (0..40)
+            .map(|y| {
+                (0..120)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect();
+        let header = rows
+            .iter()
+            .find(|l| l.contains("Version"))
+            .expect("header row");
+        let short_line = rows.iter().find(|l| l.contains("Short")).expect("short row");
+        let long_line = rows
+            .iter()
+            .find(|l| l.contains("A Much Longer"))
+            .expect("long row");
+
+        let hv = char_pos(header, "Version").expect("Version in header");
+        assert_eq!(char_pos(short_line, "1.0"), Some(hv), "short version");
+        assert_eq!(char_pos(long_line, "2.0.0"), Some(hv), "long version");
+
+        let hd = char_pos(header, "Date").expect("Date in header");
+        assert_eq!(char_pos(short_line, "2026"), Some(hd), "short date");
+        assert_eq!(char_pos(long_line, "2026"), Some(hd), "long date");
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    fn mouse_down(x: u16, y: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// First screen point that is not covered by any hitbox.
+    fn empty_point(app: &App) -> (u16, u16) {
+        (0..40)
+            .flat_map(|y| (0..120).map(move |x| (x, y)))
+            .find(|&p| app.hit_action_at(p).is_none())
+            .expect("some point must be free of hitboxes")
+    }
+
+    fn test_project(id: &str, title: &str) -> Project {
+        Project {
+            id: id.into(),
+            slug: id.into(),
+            title: title.into(),
+            description: "desc".into(),
+            body: String::new(),
+            project_type: "mod".into(),
+            categories: Vec::new(),
+            additional_categories: Vec::new(),
+            client_side: "".into(),
+            server_side: "".into(),
+            downloads: 1,
+            followers: 1,
+            icon_url: None,
+            color: None,
+            issues_url: None,
+            source_url: None,
+            wiki_url: None,
+            discord_url: None,
+            game_versions: vec!["1.21.1".into()],
+            loaders: vec!["fabric".into()],
+            versions: Vec::new(),
+            published: String::new(),
+            updated: String::new(),
+            license: None,
+            gallery: Vec::new(),
+        }
+    }
+
+    fn test_version(num: &str, game_versions: &[&str], loaders: &[&str]) -> Version {
+        Version {
+            id: num.into(),
+            project_id: "proj".into(),
+            name: num.into(),
+            version_number: num.into(),
+            changelog: None,
+            date_published: String::new(),
+            downloads: 1,
+            version_type: "release".into(),
+            status: "listed".into(),
+            files: Vec::new(),
+            dependencies: Vec::new(),
+            game_versions: game_versions.iter().map(|s| s.to_string()).collect(),
+            loaders: loaders.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn filtered_mod_actions_use_display_selection() {
+        let paths = temp_paths();
+        let mut app = App::new(paths, reqwest::Client::new()).await.unwrap();
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+        let instance = app.selected_instance().cloned().expect("instance");
+        std::fs::create_dir_all(instance.mods_dir()).unwrap();
+        for name in ["alpha.jar", "beta.jar", "gamma.jar"] {
+            std::fs::write(instance.mods_dir().join(name), b"fake jar").unwrap();
+        }
+        app.installed_mods = ["alpha", "beta", "gamma"]
+            .iter()
+            .map(|n| InstalledMod {
+                path: instance.mods_dir().join(format!("{n}.jar")),
+                file_name: format!("{n}.jar"),
+                enabled: true,
+                sha1: String::new(),
+                size: 1,
+                mod_name: format!("{n} mod"),
+                version: "1.0".into(),
+                mod_id: (*n).into(),
+                install_date: String::new(),
+            })
+            .collect();
+        app.open_nav(Nav::Mods);
+        app.mods_search_query = "gamma".to_string();
+        app.mods_state.select(Some(0));
+
+        app.confirm_delete_mod();
+        match &app.overlay {
+            Some(Overlay::Confirm {
+                action: ConfirmAction::DeleteMod(path),
+                message,
+                ..
+            }) => {
+                assert!(
+                    path.ends_with("gamma.jar"),
+                    "delete must target the filtered mod, got {path:?}"
+                );
+                assert!(message.contains("gamma.jar"), "message: {message}");
+            }
+            other => panic!("expected a delete confirm, got {other:?}"),
+        }
+        app.overlay = None;
+
+        app.toggle_selected_mod();
+        assert!(
+            !app.installed_mods[2].enabled,
+            "the filtered mod must be toggled"
+        );
+        assert!(
+            app.installed_mods[0].enabled && app.installed_mods[1].enabled,
+            "hidden mods must stay untouched"
+        );
+        let mut reloaded = false;
+        for _ in 0..64 {
+            if let Some(EngineEvent::ModsChanged) = app.engine_rx.recv().await {
+                reloaded = true;
+                break;
+            }
+        }
+        assert!(reloaded, "toggle must rename the file on disk");
+        assert!(instance.mods_dir().join("gamma.jar.disabled").exists());
+        assert!(instance.mods_dir().join("alpha.jar").exists());
+
+        // Navigation is clamped to the filtered list, not the full one.
+        app.key_mods(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.mods_state.selected(), Some(0), "list has one entry");
+        app.key_mods(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        assert_eq!(app.mods_state.selected(), Some(0), "jump lands on the only entry");
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn click_outside_search_bar_drops_focus() {
+        let paths = temp_paths();
+        let mut app = App::new(paths, reqwest::Client::new()).await.unwrap();
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+        app.installed_mods.push(InstalledMod {
+            path: std::path::PathBuf::from("alpha.jar"),
+            file_name: "alpha.jar".into(),
+            enabled: true,
+            sha1: String::new(),
+            size: 1,
+            mod_name: "Alpha".into(),
+            version: "1.0".into(),
+            mod_id: "alpha".into(),
+            install_date: String::new(),
+        });
+        app.open_nav(Nav::Mods);
+        app.mods_search_focused = true;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let bar = app
+            .hitboxes
+            .iter()
+            .find(|h| h.action == HitAction::ModsSearchBar)
+            .copied()
+            .expect("search bar hitbox");
+        let row = app
+            .hitboxes
+            .iter()
+            .find(|h| matches!(h.action, HitAction::ModRow(_)))
+            .copied()
+            .expect("mod row hitbox");
+
+        // Clicking the bar itself keeps the focus.
+        app.handle_mouse(mouse_down(bar.rect.x + 2, bar.rect.y));
+        assert!(app.mods_search_focused, "bar click must keep focus");
+
+        // Clicking a mod row unfocuses and selects the row.
+        app.handle_mouse(mouse_down(row.rect.x + 3, row.rect.y));
+        assert!(!app.mods_search_focused, "row click must drop focus");
+        assert_eq!(app.mods_state.selected(), Some(0));
+
+        // Clicking empty space unfocuses too.
+        app.mods_search_focused = true;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let (ex, ey) = empty_point(&app);
+        app.handle_mouse(mouse_down(ex, ey));
+        assert!(!app.mods_search_focused, "empty click must drop focus");
+
+        // Browse search bar behaves the same way.
+        app.open_nav(Nav::Browse);
+        app.browse.focus = BrowseFocus::Search;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let browse_bar = app
+            .hitboxes
+            .iter()
+            .find(|h| h.action == HitAction::BrowseSearchBar)
+            .copied()
+            .expect("browse search hitbox");
+        app.handle_mouse(mouse_down(browse_bar.rect.x + 2, browse_bar.rect.y));
+        assert_eq!(
+            app.browse.focus,
+            BrowseFocus::Search,
+            "browse bar click must keep focus"
+        );
+        let (ex, ey) = empty_point(&app);
+        app.handle_mouse(mouse_down(ex, ey));
+        assert_ne!(
+            app.browse.focus,
+            BrowseFocus::Search,
+            "outside click must leave the browse search"
+        );
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn confirm_popup_confirms_only_via_yes_button() {
+        let paths = temp_paths();
+        let mut app = App::new(paths, reqwest::Client::new()).await.unwrap();
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+
+        let file = app.paths.data_dir.join("victim.jar");
+        std::fs::create_dir_all(&app.paths.data_dir).unwrap();
+        std::fs::write(&file, b"fake jar").unwrap();
+        let open = || {
+            Overlay::confirm(
+                "Delete Mod",
+                "Delete 'victim.jar'?",
+                ConfirmAction::DeleteMod(file.clone()),
+            )
+        };
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let frame_area = Rect::new(0, 0, 120, 40);
+        let popup = crate::widgets::centered_rect(52, 22, frame_area);
+        assert!(popup.height > 5, "test popup too small: {popup:?}");
+
+        // Only the two buttons are clickable — never the whole dialog.
+        app.overlay = Some(open());
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let overlay_hits: Vec<_> = app
+            .hitboxes
+            .iter()
+            .filter(|h| matches!(h.action, HitAction::Overlay(_)))
+            .copied()
+            .collect();
+        assert_eq!(overlay_hits.len(), 2, "exactly Yes and No hitboxes");
+        let yes = overlay_hits
+            .iter()
+            .find(|h| h.action == HitAction::Overlay(OverlayAction::ConfirmYes))
+            .copied()
+            .expect("Yes hitbox");
+        let no = overlay_hits
+            .iter()
+            .find(|h| h.action == HitAction::Overlay(OverlayAction::ConfirmNo))
+            .copied()
+            .expect("No hitbox");
+        assert!(
+            yes.rect.width <= 12 && no.rect.width <= 12,
+            "buttons must be small, got yes={} no={}",
+            yes.rect.width,
+            no.rect.width
+        );
+
+        // Click far outside the popup: cancels, file survives.
+        app.handle_mouse(mouse_down(1, 1));
+        assert!(app.overlay.is_none(), "outside click must close the dialog");
+        assert!(file.exists(), "outside click must not delete the file");
+
+        // Click the message text inside the popup: still just a cancel.
+        app.overlay = Some(open());
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        app.handle_mouse(mouse_down(popup.x + popup.width / 2, popup.y + 3));
+        assert!(app.overlay.is_none(), "message click must close the dialog");
+        assert!(file.exists(), "message click must not delete the file");
+
+        // Click "No": cancels.
+        app.overlay = Some(open());
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        app.handle_mouse(mouse_down(no.rect.x + 1, no.rect.y));
+        assert!(app.overlay.is_none(), "No must close the dialog");
+        assert!(file.exists(), "No must not delete the file");
+
+        // Click "Yes": confirms and the file goes away.
+        app.overlay = Some(open());
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        app.handle_mouse(mouse_down(yes.rect.x + 1, yes.rect.y));
+        assert!(app.overlay.is_none(), "Yes must close the dialog");
+        let mut deleted = false;
+        for _ in 0..400 {
+            if !file.exists() {
+                deleted = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(deleted, "Yes must delete the file");
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn mod_hover_highlights_row_under_mouse() {
+        let paths = temp_paths();
+        let mut app = App::new(paths, reqwest::Client::new()).await.unwrap();
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+        for n in ["alpha", "beta"] {
+            app.installed_mods.push(InstalledMod {
+                path: std::path::PathBuf::from(format!("{n}.jar")),
+                file_name: format!("{n}.jar"),
+                enabled: true,
+                sha1: String::new(),
+                size: 1,
+                mod_name: n.to_string(),
+                version: "1.0".into(),
+                mod_id: n.to_string(),
+                install_date: String::new(),
+            });
+        }
+        app.open_nav(Nav::Mods);
+        app.mods_state.select(None);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let mut rows: Vec<_> = app
+            .hitboxes
+            .iter()
+            .filter(|h| matches!(h.action, HitAction::ModRow(_)))
+            .copied()
+            .collect();
+        rows.sort_by_key(|h| h.rect.y);
+        assert!(rows.len() >= 2, "need two mod rows");
+        let x = rows[0].rect.x + 4;
+        let (y0, y1) = (rows[0].rect.y, rows[1].rect.y);
+
+        app.mouse_pos = Some((x, y0));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buf = terminal.backend().buffer();
+        assert_eq!(
+            buf[(x, y0)].bg,
+            app.theme.hover_bg,
+            "the row under the mouse must be hovered"
+        );
+        assert_ne!(
+            buf[(x, y1)].bg,
+            app.theme.hover_bg,
+            "the next row must not be hovered"
+        );
+
+        app.mouse_pos = Some((x, y1));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buf = terminal.backend().buffer();
+        assert_eq!(
+            buf[(x, y1)].bg,
+            app.theme.hover_bg,
+            "second row hover must track the mouse"
+        );
+        assert_ne!(
+            buf[(x, y0)].bg,
+            app.theme.hover_bg,
+            "first row must lose the hover"
+        );
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn browse_versions_default_to_first_compatible() {
+        let paths = temp_paths();
+        let mut app = App::new(paths, reqwest::Client::new()).await.unwrap();
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+        app.nav = Nav::Browse;
+
+        app.handle_engine_event(EngineEvent::BrowseProject {
+            project: Box::new(test_project("demo", "Demo")),
+            versions: vec![
+                test_version("26.3.0", &["26.3"], &["fabric"]),
+                test_version("0.5.0", &["1.21.1"], &["fabric"]),
+                test_version("0.4.0", &["1.21.1"], &["quilt"]),
+            ],
+            members: Vec::new(),
+        });
+        assert_eq!(
+            app.browse.version_selected, 1,
+            "the build for the instance's Minecraft must be preselected"
+        );
+
+        // Arrow navigation walks the displayed (compatible-first) order.
+        app.browse_version_move(1);
+        assert_eq!(app.browse.version_selected, 0, "ordered: [1, 0, 2]");
+        app.browse_version_move(1);
+        assert_eq!(app.browse.version_selected, 2);
+        app.browse_version_move(-1);
+        assert_eq!(app.browse.version_selected, 0);
+
+        // Scrolling follows the display position, so a compatible version
+        // sitting last in raw order still opens as the first visible row.
+        app.handle_engine_event(EngineEvent::BrowseProject {
+            project: Box::new(test_project("demo", "Demo")),
+            versions: (0..30)
+                .map(|i| {
+                    if i == 29 {
+                        test_version("0.1.0", &["1.21.1"], &["fabric"])
+                    } else {
+                        test_version(&format!("9.{i}.0"), &["26.3"], &["fabric"])
+                    }
+                })
+                .collect(),
+            members: Vec::new(),
+        });
+        assert_eq!(app.browse.version_selected, 29);
+        app.browse_select_tab(3);
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let mut hits: Vec<_> = app
+            .hitboxes
+            .iter()
+            .filter_map(|h| match h.action {
+                HitAction::BrowseVersion(idx) => Some((h.rect, idx)),
+                _ => None,
+            })
+            .collect();
+        hits.sort_by_key(|(rect, _)| rect.y);
+        let (top_rect, top_idx) = hits.first().expect("version rows").to_owned();
+        assert_eq!(
+            top_idx, 29,
+            "the compatible version must be the top visible row"
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(top_rect.x + 1, top_rect.y)].bg,
+            app.theme.selection_bg,
+            "top row carries the selection"
+        );
+
+        // Wizard picks the version matching its own configured MC + loader.
+        let wizard = crate::wizard::CreateWizard {
+            game_version: "1.21.1".into(),
+            loader_idx: 1,
+            ..crate::wizard::CreateWizard::default()
+        };
+        app.pending_wizard = Some(wizard);
+        app.handle_engine_event(EngineEvent::WizardProject {
+            project: Box::new(test_project("wiz", "Wizard Mod")),
+            versions: vec![
+                test_version("26.3.0", &["26.3"], &["fabric"]),
+                test_version("0.5.0", &["1.21.1"], &["fabric"]),
+                test_version("0.4.0", &["1.21.1"], &["quilt"]),
+            ],
+        });
+        match &app.overlay {
+            Some(Overlay::Wizard(w)) => assert_eq!(
+                w.selected, 1,
+                "wizard must preselect the build for 1.21.1 + fabric"
+            ),
+            other => panic!("expected wizard overlay, got {other:?}"),
+        }
+
+        // Modpack browse: the list selection follows compatibility too.
+        app.overlay = None;
+        app.handle_engine_event(EngineEvent::Project {
+            project: Box::new(test_project("pack", "Pack")),
+            versions: vec![
+                test_version("26.3.0", &["26.3"], &["fabric"]),
+                test_version("0.5.0", &["1.21.1"], &["fabric"]),
+            ],
+        });
+        assert_eq!(
+            app.project_state.selected(),
+            Some(1),
+            "modpack version list must start on the compatible build"
+        );
+
+        // Pure helper fallbacks.
+        let versions = vec![
+            test_version("a", &["1.20.1"], &["fabric"]),
+            test_version("b", &["1.21.1"], &["fabric"]),
+        ];
+        assert_eq!(
+            crate::views::browse::first_compatible_index(&versions, Some("1.21.1"), Some("fabric")),
+            1
+        );
+        assert_eq!(
+            crate::views::browse::first_compatible_index(&versions, Some("1.21.1"), Some("quilt")),
+            1,
+            "game-version-only fallback when no loader matches"
+        );
+        assert_eq!(
+            crate::views::browse::first_compatible_index(&versions, Some("1.19"), Some("fabric")),
+            0,
+            "nothing matches: fall back to the newest build"
+        );
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
 }
+
+

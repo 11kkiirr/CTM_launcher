@@ -8,7 +8,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::{App, ButtonId, Focus};
-use crate::views::{buttons_row, card, section_title};
+use crate::views::{buttons_row, card};
 
 impl App {
     pub(crate) fn render_versions(&mut self, frame: &mut Frame, area: Rect) {
@@ -41,22 +41,10 @@ impl App {
         );
 
         let focused = self.focus == Focus::Content;
-        let inner = card(self, frame, chunks[1], focused);
+        let inner = card(self, frame, crate::views::left_gutter(chunks[1]), focused);
         if inner.height == 0 {
             return;
         }
-        let title = self.tr("versions.title").to_string();
-        frame.render_widget(
-            Paragraph::new(section_title(&title, "", &self.theme))
-                .style(self.theme.card()),
-            Rect {
-                x: inner.x,
-                y: inner.y,
-                width: inner.width,
-                height: 1,
-            },
-        );
-
         let rows = [
             (
                 self.tr("versions.minecraft").to_string(),
@@ -80,7 +68,7 @@ impl App {
             ),
         ];
         for (idx, (label, value)) in rows.iter().enumerate() {
-            let y = inner.y + 2 + idx as u16;
+            let y = inner.y + idx as u16;
             if y >= inner.y + inner.height {
                 break;
             }
@@ -106,7 +94,7 @@ impl App {
                 self.theme.card_dim(),
             ))
             .style(self.theme.card()),
-            chunks[3],
+            crate::views::left_gutter(chunks[3]),
         );
     }
 

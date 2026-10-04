@@ -1393,7 +1393,7 @@ pub(crate) fn copy_body_code_block(&mut self, idx: usize) {
     self.copy_text(&text);
 }
 
-fn copy_text(&mut self, text: &str) {
+pub(crate) fn copy_text(&mut self, text: &str) {
     if clipboard_copy(text) {
         self.set_toast(
             crate::i18n::tr_string(self.lang(), "toast.copied"),
@@ -1676,7 +1676,10 @@ pub(crate) fn browse_filter_click(&mut self, item: crate::views::browse::FilterI
 }
 
 pub(crate) fn toggle_selected_mod(&mut self) {
-    let Some(idx) = self.mods_state.selected() else {
+    let Some(sel) = self.mods_state.selected() else {
+        return;
+    };
+    let Some(&idx) = self.visible_mod_indices().get(sel) else {
         return;
     };
     let Some(module) = self.installed_mods.get(idx).cloned() else {
@@ -1701,7 +1704,10 @@ pub(crate) fn toggle_selected_mod(&mut self) {
 }
 
 pub(crate) fn confirm_delete_mod(&mut self) {
-    let Some(idx) = self.mods_state.selected() else {
+    let Some(sel) = self.mods_state.selected() else {
+        return;
+    };
+    let Some(&idx) = self.visible_mod_indices().get(sel) else {
         return;
     };
     let Some(module) = self.installed_mods.get(idx).cloned() else {
@@ -1761,7 +1767,8 @@ fn confirm_delete_screenshot(&mut self) {
 }
 
 fn confirm_delete_resource_pack(&mut self) {
-    let Some(idx) = self.resource_packs_state.selected() else { return };
+    let Some(sel) = self.resource_packs_state.selected() else { return };
+    let Some(&idx) = self.visible_rp_indices().get(sel) else { return };
     let Some(name) = self.resource_packs.get(idx).cloned() else { return };
     let Some(instance) = self.selected_instance().cloned() else { return };
     let path = instance.resourcepacks_dir().join(&name);
@@ -1773,7 +1780,8 @@ fn confirm_delete_resource_pack(&mut self) {
 }
 
 fn confirm_delete_shader(&mut self) {
-    let Some(idx) = self.shaders_state.selected() else { return };
+    let Some(sel) = self.shaders_state.selected() else { return };
+    let Some(&idx) = self.visible_shader_indices().get(sel) else { return };
     let Some(name) = self.shaders.get(idx).cloned() else { return };
     let Some(instance) = self.selected_instance().cloned() else { return };
     let path = instance.shaders_dir().join(&name);
@@ -1785,7 +1793,8 @@ fn confirm_delete_shader(&mut self) {
 }
 
 fn toggle_selected_resource_pack(&mut self) {
-    let Some(idx) = self.resource_packs_state.selected() else { return };
+    let Some(sel) = self.resource_packs_state.selected() else { return };
+    let Some(&idx) = self.visible_rp_indices().get(sel) else { return };
     let Some(name) = self.resource_packs.get(idx).cloned() else { return };
     let Some(instance) = self.selected_instance().cloned() else { return };
     let path = instance.resourcepacks_dir().join(&name);
@@ -1803,7 +1812,8 @@ fn toggle_selected_resource_pack(&mut self) {
 }
 
 fn toggle_selected_shader(&mut self) {
-    let Some(idx) = self.shaders_state.selected() else { return };
+    let Some(sel) = self.shaders_state.selected() else { return };
+    let Some(&idx) = self.visible_shader_indices().get(sel) else { return };
     let Some(name) = self.shaders.get(idx).cloned() else { return };
     let Some(instance) = self.selected_instance().cloned() else { return };
     let path = instance.shaders_dir().join(&name);
@@ -2116,6 +2126,7 @@ pub(crate) fn begin_settings_edit(&mut self) {
         2 => self.settings.default_max_memory_mb.to_string(),
         _ => return,
     };
+    self.edit.reset_with(&buffer);
     self.settings_edit = Some((field, buffer));
 }
 
@@ -2238,6 +2249,7 @@ pub(crate) fn begin_instance_settings_edit(&mut self) {
         6 => jvm.extra_game_args.join(" "),
         _ => return,
     };
+    self.edit.reset_with(&buffer);
     self.settings_edit = Some((field, buffer));
 }
 

@@ -342,6 +342,7 @@ fn render_build_info(&mut self, frame: &mut Frame, area: Rect) {
 }
 
 pub(crate) fn render_empty_state(&mut self, frame: &mut Frame, area: Rect) {
+    let area = crate::views::left_gutter(area);
     let inner = crate::views::card(self, frame, area, true);
 
     let lines = vec![
@@ -739,31 +740,85 @@ pub(crate) fn render_overlay(&mut self, frame: &mut Frame, area: Rect) {
         }
         Overlay::Confirm { title, message, .. } => {
             let popup = crate::widgets::centered_rect(52, 22, area);
-            let lines = vec![
-                Line::from(Span::styled(message, self.theme.warning_style())),
-                Line::from(""),
-                Line::from(Span::styled(self.tr("dialog.yes_no"), self.theme.accent())),
-            ];
-            crate::widgets::render_popup(frame, popup, &title, lines, &self.theme);
-            let mid = popup.width / 2;
-            self.push_hitbox(
+            crate::widgets::render_popup(frame, popup, &title, Vec::new(), &self.theme);
+
+            let content = Rect {
+                x: popup.x + 2,
+                y: popup.y + 1,
+                width: popup.width.saturating_sub(3),
+                height: popup.height.saturating_sub(2),
+            };
+            if content.width == 0 || content.height < 2 {
+                return;
+            }
+            let body_y = content.y + 2;
+            let btn_y = content.y + content.height - 1;
+            let msg_h = btn_y.saturating_sub(body_y);
+            if msg_h > 0 {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(message, self.theme.warning_style()))
+                        .style(Style::default().bg(self.theme.panel_alt))
+                        .wrap(ratatui::widgets::Wrap { trim: false }),
+                    Rect {
+                        x: content.x,
+                        y: body_y,
+                        width: content.width,
+                        height: msg_h,
+                    },
+                );
+            }
+
+            // Two explicit buttons with separate hitboxes: only a direct hit
+            // on "Yes" may confirm, anywhere else cancels or does nothing.
+            let keys = self.tr("dialog.yes_no").to_string();
+            let (yes_text, no_text) = match keys.split_once("   ") {
+                Some((yes, no)) => (yes, no),
+                None => (keys.as_str(), ""),
+            };
+            use unicode_width::UnicodeWidthStr;
+            let yes_w = UnicodeWidthStr::width(yes_text) as u16;
+            let no_w = UnicodeWidthStr::width(no_text) as u16;
+            let gap: u16 = 3;
+            let yes_rect = Rect {
+                x: content.x,
+                y: btn_y,
+                width: yes_w.min(content.width),
+                height: 1,
+            };
+            let no_rect = Rect {
+                x: content.x + yes_w + gap,
+                y: btn_y,
+                width: no_w.min(content.width.saturating_sub(yes_w + gap)),
+                height: 1,
+            };
+            let yes_style = if self.is_hovered(yes_rect) {
+                self.theme.row_hover()
+            } else {
+                self.theme.accent()
+            };
+            let no_style = if self.is_hovered(no_rect) {
+                self.theme.row_hover()
+            } else {
+                self.theme.accent()
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(yes_text, yes_style),
+                    Span::styled(" ".repeat(gap as usize), self.theme.accent()),
+                    Span::styled(no_text, no_style),
+                ]))
+                .style(Style::default().bg(self.theme.panel_alt)),
                 Rect {
-                    x: popup.x,
-                    y: popup.y,
-                    width: mid,
-                    height: popup.height,
+                    x: content.x,
+                    y: btn_y,
+                    width: content.width,
+                    height: 1,
                 },
-                HitAction::Overlay(OverlayAction::ConfirmYes),
             );
-            self.push_hitbox(
-                Rect {
-                    x: popup.x + mid,
-                    y: popup.y,
-                    width: popup.width - mid,
-                    height: popup.height,
-                },
-                HitAction::Overlay(OverlayAction::ConfirmNo),
-            );
+            self.push_hitbox(yes_rect, HitAction::Overlay(OverlayAction::ConfirmYes));
+            if no_w > 0 {
+                self.push_hitbox(no_rect, HitAction::Overlay(OverlayAction::ConfirmNo));
+            }
         }
         Overlay::Message { title, lines } => {
             let popup = crate::widgets::centered_rect(74, 84, area);
@@ -833,12 +888,19 @@ pub(crate) fn render_overlay(&mut self, frame: &mut Frame, area: Rect) {
                     .style(surface),
                 rows[0],
             );
+            let mut filter_spans: Vec<Span<'static>> = Vec::new();
+            if picker.query.is_empty() {
+                filter_spans.push(Span::styled(
+                    self.tr("dialog.search"),
+                    self.theme.comment_style(),
+                ));
+            }
+            filter_spans.push(Span::styled(
+                format!("{}█", picker.query),
+                self.theme.accent(),
+            ));
             frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(self.tr("dialog.filter"), self.theme.comment_style()),
-                    Span::styled(format!("{}█", picker.query), self.theme.accent()),
-                ]))
-                .style(surface),
+                Paragraph::new(Line::from(filter_spans)).style(surface),
                 rows[2],
             );
 

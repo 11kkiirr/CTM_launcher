@@ -14,7 +14,7 @@ use crate::views::settings_ui::{
     slider_input_rect, slider_track_rect, slider_value_rect, FieldKind, INPUT_W, LABEL_GAP,
     LABEL_W, PANEL_GAP, RAM_MIN, SIDE_PAD,
 };
-use crate::views::{buttons_row, section_title, truncate};
+use crate::views::{buttons_row, truncate};
 
 const FIELD_COUNT: usize = 9;
 
@@ -100,24 +100,7 @@ impl App {
             return;
         }
 
-        let title = self.tr("settings.title").to_string();
-        frame.render_widget(
-            Paragraph::new(section_title(&title, "", &self.theme))
-                .style(Style::default().bg(self.theme.bg)),
-            Rect {
-                x: area.x + SIDE_PAD,
-                y: area.y,
-                width: area.width.saturating_sub(SIDE_PAD),
-                height: 1,
-            },
-        );
-
-        let body = Rect {
-            x: area.x,
-            y: area.y + 1,
-            width: area.width,
-            height: area.height.saturating_sub(1),
-        };
+        let body = area;
         if body.height == 0 {
             return;
         }
@@ -168,7 +151,7 @@ impl App {
             if si > 0 {
                 total_h += PANEL_GAP;
             }
-            total_h += 1; // header
+            total_h += 3; // half-block edge + header + edge
             for (idx, kind, _) in fields {
                 total_h += self.field_h(*idx, *kind);
             }
@@ -191,7 +174,7 @@ impl App {
                 y_content += PANEL_GAP;
             }
 
-            let mut section_h = 1u16;
+            let mut section_h = 3u16;
             for (idx, kind, _) in fields {
                 section_h += self.field_h(*idx, *kind);
             }
@@ -226,24 +209,63 @@ impl App {
             // Solid panel body so gutters/row seams never show page-bg holes.
             fill_rect(frame, panel_rect, Style::default().bg(self.theme.panel));
 
+            let top_edge = panel_top >= scroll;
+            let bot_edge = panel_top + section_h <= scroll + body.height;
+            let edge_style = Style::default().fg(self.theme.panel).bg(self.theme.bg);
+            if top_edge {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        "▄".repeat(panel_rect.width as usize),
+                        edge_style,
+                    ))
+                    .style(Style::default().bg(self.theme.bg)),
+                    Rect {
+                        x: panel_rect.x,
+                        y: panel_rect.y,
+                        width: panel_rect.width,
+                        height: 1,
+                    },
+                );
+            }
+            if bot_edge && panel_rect.height > 0 {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        "▀".repeat(panel_rect.width as usize),
+                        edge_style,
+                    ))
+                    .style(Style::default().bg(self.theme.bg)),
+                    Rect {
+                        x: panel_rect.x,
+                        y: panel_rect.y + panel_rect.height - 1,
+                        width: panel_rect.width,
+                        height: 1,
+                    },
+                );
+            }
+            let cap_top = u16::from(top_edge);
+            let cap_bot = u16::from(bot_edge);
+
             let st = self.tr(title_key).to_string();
-            let header_rect = Rect {
-                x: panel_rect.x,
-                y: panel_rect.y,
-                width: panel_rect.width,
-                height: 1,
-            };
-            section_header(self, frame, header_rect, &st);
+            let header_y = panel_rect.y + cap_top;
+            if header_y < panel_rect.y + panel_rect.height.saturating_sub(cap_bot) {
+                let header_rect = Rect {
+                    x: panel_rect.x + 1,
+                    y: header_y,
+                    width: panel_rect.width.saturating_sub(2),
+                    height: 1,
+                };
+                section_header(self, frame, header_rect, &st);
+            }
 
             let inner = Rect {
-                x: panel_rect.x + 1,
-                y: panel_rect.y + 1,
-                width: panel_rect.width.saturating_sub(2),
-                height: panel_rect.height.saturating_sub(1),
+                x: panel_rect.x + 2,
+                y: panel_rect.y + cap_top + 1,
+                width: panel_rect.width.saturating_sub(4),
+                height: panel_rect.height.saturating_sub(cap_top + 1 + cap_bot),
             };
 
             // Rows stack with no blank lines — only the label/value column gap.
-            let mut row_y = panel_top + 1;
+            let mut row_y = panel_top + 2;
             for (idx, kind, label_key) in fields {
                 let h = self.field_h(*idx, *kind);
 
@@ -464,17 +486,25 @@ impl App {
                 } else {
                     Style::default().bg(row_bg).fg(self.theme.fg)
                 };
-                let display = if editing {
-                    format!("[{}█]", val_num)
+                let display_spans = if editing {
+                    let mut v = vec![Span::styled("[", input_style)];
+                    v.extend(self.edit.edit_spans(
+                        &val_num,
+                        true,
+                        input_style,
+                        input_style,
+                        self.theme.selection_bg,
+                    ));
+                    v.push(Span::styled("]", input_style));
+                    v
                 } else {
-                    format!("[{}]", val_num)
+                    vec![Span::styled(
+                        crate::views::truncate(&format!("[{}]", val_num), INPUT_W as usize),
+                        input_style,
+                    )]
                 };
                 frame.render_widget(
-                    Paragraph::new(Span::styled(
-                        crate::views::truncate(&display, INPUT_W as usize),
-                        input_style,
-                    ))
-                    .style(input_style),
+                    Paragraph::new(Line::from(display_spans)).style(input_style),
                     input_rect,
                 );
 
@@ -491,22 +521,25 @@ impl App {
             FieldKind::Choice => {
                 let open = self.settings_dropdown.map(|(f, _)| f) == Some(idx);
                 let chevron = if open { "▴" } else { "▾" };
-                let display = if editing {
-                    format!("{}█", self.settings_edit.as_ref().unwrap().1)
-                } else {
-                    format!("{}  {}", value, chevron)
-                };
                 let label_style = if selected {
                     Style::default().fg(self.theme.green).bg(self.theme.selection_bg)
                 } else {
                     self.theme.card_dim()
                 };
+                let mut line_spans = vec![Span::styled(lab.clone(), label_style)];
+                if editing {
+                    line_spans.extend(self.edit.edit_spans(
+                        &self.settings_edit.as_ref().unwrap().1,
+                        true,
+                        style,
+                        style,
+                        self.theme.selection_bg,
+                    ));
+                } else {
+                    line_spans.push(Span::styled(format!("{}  {}", value, chevron), style));
+                }
                 frame.render_widget(
-                    Paragraph::new(Line::from(vec![
-                        Span::styled(lab.clone(), label_style),
-                        Span::styled(display, style),
-                    ]))
-                    .style(style),
+                    Paragraph::new(Line::from(line_spans)).style(style),
                     row,
                 );
                 self.hitboxes.push(crate::app::Hitbox {
@@ -515,22 +548,25 @@ impl App {
                 });
             }
             _ => {
-                let display = if editing {
-                    format!("{}█", self.settings_edit.as_ref().unwrap().1)
-                } else {
-                    value.to_string()
-                };
                 let label_style = if selected {
                     Style::default().fg(self.theme.green).bg(self.theme.selection_bg)
                 } else {
                     self.theme.card_dim()
                 };
+                let mut line_spans = vec![Span::styled(lab.clone(), label_style)];
+                if editing {
+                    line_spans.extend(self.edit.edit_spans(
+                        &self.settings_edit.as_ref().unwrap().1,
+                        true,
+                        style,
+                        style,
+                        self.theme.selection_bg,
+                    ));
+                } else {
+                    line_spans.push(Span::styled(value.to_string(), style));
+                }
                 frame.render_widget(
-                    Paragraph::new(Line::from(vec![
-                        Span::styled(lab.clone(), label_style),
-                        Span::styled(display, style),
-                    ]))
-                    .style(style),
+                    Paragraph::new(Line::from(line_spans)).style(style),
                     row,
                 );
                 self.hitboxes.push(crate::app::Hitbox {
@@ -611,16 +647,13 @@ impl App {
             match key.code {
                 KeyCode::Esc => {
                     self.settings_edit = None;
+                    self.edit.end_drag();
                 }
                 KeyCode::Enter => {
                     let buf = buffer.clone();
                     self.settings_edit = None;
                     self.commit_launcher_setting(field, &buf);
                 }
-                KeyCode::Backspace => {
-                    buffer.pop();
-                }
-                KeyCode::Char(c) => buffer.push(c),
                 _ => {}
             }
             return;

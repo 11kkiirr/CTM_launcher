@@ -9,7 +9,7 @@ use ratatui::Frame;
 use ratatui_image::{Resize, StatefulImage};
 
 use crate::app::{App, ButtonId, Focus, HitAction};
-use crate::views::{buttons_row, card, section_title, truncate};
+use crate::views::{buttons_row, card, truncate};
 
 const CARD_W: u16 = 32;
 const CARD_H: u16 = 10;
@@ -22,7 +22,6 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),
-                Constraint::Length(1),
                 Constraint::Min(3),
             ])
             .split(area);
@@ -41,19 +40,8 @@ impl App {
             ],
         );
 
-        let title = self.tr("nav.screenshots").to_string();
-        frame.render_widget(
-            Paragraph::new(section_title(
-                &title,
-                &format!("{}", self.screenshots.len()),
-                &self.theme,
-            ))
-            .style(self.theme.card()),
-            chunks[1],
-        );
-
         let focused = self.focus == Focus::Content;
-        let inner = card(self, frame, chunks[2], focused);
+        let inner = card(self, frame, crate::views::left_gutter(chunks[1]), focused);
         if inner.height == 0 || inner.width == 0 {
             return;
         }

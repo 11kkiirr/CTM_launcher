@@ -9,7 +9,7 @@ use ratatui::Frame;
 
 use crate::app::{App, ButtonId, Focus, HitAction};
 use crate::views::{
-    buttons_row, card, hovered_index, jump, move_sel, register_rows, row_style, section_title,
+    buttons_row, card, hovered_index, jump, move_sel, register_rows, row_style,
     truncate,
 };
 
@@ -26,10 +26,14 @@ impl ModColumns {
     fn compute(width: u16) -> Self {
         let w = width as usize;
         let toggle = 0;
-        let name = 3;
-        let version = (w * 3 / 10).max(name + 6);
-        let size = (w * 6 / 10).max(version + 8);
-        let date = (w * 8 / 10).max(size + 10);
+        let name = 8;
+        let version = (w * 3 / 10).max(name + 8);
+        // Date is anchored to the right edge of the card: 16 cells for
+        // "YYYY-MM-DD HH:MM".
+        let date = w.saturating_sub(16);
+        let size = (w * 6 / 10)
+            .max(version + 6)
+            .min(date.saturating_sub(6));
         Self {
             toggle: toggle as u16,
             name: name as u16,
@@ -40,104 +44,31 @@ impl ModColumns {
     }
 }
 
-impl App {
-    pub(crate) fn render_mods(&mut self, frame: &mut Frame, area: Rect) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(5)])
-            .split(area);
-
-        let toggle = self.tr("btn.toggle");
-        let delete = self.tr("btn.delete");
-        let browse = self.tr("btn.browse");
-        let updates = self.tr("btn.updates");
-        buttons_row(
-            self,
-            frame,
-            chunks[0].x + 2,
-            chunks[0].y,
-            area.x + area.width,
-            &[
-                (toggle, "Space", ButtonId::ToggleMod),
-                (delete, "d", ButtonId::DeleteMod),
-                (browse, "s", ButtonId::BrowseMods),
-                (updates, "u", ButtonId::UpdateMods),
-            ],
-        );
-
-        self.render_installed_mods(frame, chunks[1]);
+/// Format `text` into a fixed-width table cell: truncate when too long,
+/// pad with spaces (right-aligned when `right` is set) so every column
+/// starts at exactly the same offset on every row.
+fn cell(text: &str, width: u16, right: bool) -> String {
+    use unicode_width::UnicodeWidthStr;
+    let w = width as usize;
+    if w == 0 {
+        return String::new();
     }
+    let t = truncate(text, w);
+    let pad = w.saturating_sub(UnicodeWidthStr::width(t.as_str()));
+    if right {
+        format!("{}{}", " ".repeat(pad), t)
+    } else {
+        format!("{}{}", t, " ".repeat(pad))
+    }
+}
 
-    fn render_installed_mods(&mut self, frame: &mut Frame, area: Rect) {
-        let focused = self.focus == Focus::Content;
-        let inner = card(self, frame, area, focused);
-        if inner.height == 0 {
-            return;
-        }
-
-        // ── Inline search bar ──
-        let search_focused = self.mods_search_focused;
-        let search_bg = if search_focused {
-            self.theme.panel_alt
-        } else {
-            self.theme.panel
-        };
-        let search_rect = Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: 1,
-        };
-        if search_focused && search_rect.width > 0 {
-            let bar = Rect { x: search_rect.x, y: search_rect.y, width: 1, height: 1 };
-            frame.render_widget(
-                Paragraph::new(Span::styled(" ", self.theme.accent()))
-                    .style(Style::default().bg(search_bg)),
-                bar,
-            );
-        }
-        let search_label = self.tr("dialog.filter");
-        let query_text = if self.mods_search_query.is_empty() && !search_focused {
-            String::new()
-        } else if search_focused {
-            format!("{}█", self.mods_search_query)
-        } else {
-            self.mods_search_query.clone()
-        };
-        let query_style = if search_focused {
-            Style::default().fg(self.theme.green).bg(search_bg)
-        } else if !self.mods_search_query.is_empty() {
-            Style::default().fg(self.theme.fg).bg(search_bg)
-        } else {
-            Style::default().fg(self.theme.muted).bg(search_bg)
-        };
-        let search_line = Line::from(vec![
-            Span::styled(
-                search_label,
-                Style::default()
-                    .fg(if search_focused { self.theme.green } else { self.theme.muted })
-                    .bg(search_bg),
-            ),
-            Span::styled(query_text, query_style),
-        ]);
-        let bar_x = if search_focused { search_rect.x + 1 } else { search_rect.x };
-        let bar_w = if search_focused { search_rect.width.saturating_sub(1) } else { search_rect.width };
-        frame.render_widget(
-            Paragraph::new(search_line).style(Style::default().bg(search_bg)),
-            Rect { x: bar_x, y: search_rect.y, width: bar_w, height: 1 },
-        );
-        self.push_hitbox(search_rect, HitAction::ModsSearchBar);
-
-        // ── Title row ──
-        let instance_name = self
-            .selected_instance()
-            .map(|i| i.name().to_string())
-            .unwrap_or_else(|| "no instance".to_string());
-
-        // Filter mods by search query
+impl App {
+    /// Indices into `installed_mods` that pass the current search filter,
+    /// in display order. All list state (selection, hitboxes, actions) is
+    /// expressed in these display positions.
+    pub(crate) fn visible_mod_indices(&self) -> Vec<usize> {
         let query_lower = self.mods_search_query.to_lowercase();
-        let filtered_indices: Vec<usize> = self
-            .installed_mods
+        self.installed_mods
             .iter()
             .enumerate()
             .filter(|(_, m)| {
@@ -154,35 +85,77 @@ impl App {
                     || m.file_name.to_lowercase().contains(&query_lower)
             })
             .map(|(i, _)| i)
-            .collect();
+            .collect()
+    }
 
-        let title = Rect {
-            x: inner.x,
-            y: inner.y + 1,
-            width: inner.width,
-            height: 1,
+    pub(crate) fn render_mods(&mut self, frame: &mut Frame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(5)])
+            .split(area);
+
+        let toggle = self.tr("btn.toggle");
+        let delete = self.tr("btn.delete");
+        let browse = self.tr("btn.browse");
+        let updates = self.tr("btn.updates");
+        let buttons: [(&str, &str, ButtonId); 4] = [
+            (toggle, "Space", ButtonId::ToggleMod),
+            (delete, "d", ButtonId::DeleteMod),
+            (browse, "s", ButtonId::BrowseMods),
+            (updates, "u", ButtonId::UpdateMods),
+        ];
+        let buttons_w: u16 = crate::views::row_widths(buttons.iter().map(|(l, k, _)| (*l, *k)))
+            .iter()
+            .sum::<u16>()
+            + buttons.len().saturating_sub(1) as u16;
+        let filter_w = area
+            .width
+            .saturating_sub(chunks[0].x + 2 + buttons_w + 1)
+            .clamp(12, 36);
+        let filter_rect = Rect {
+            x: area.x + area.width.saturating_sub(filter_w),
+            y: chunks[0].y,
+            width: filter_w,
+            height: 3,
         };
-        let count_text = if query_lower.is_empty() {
-            format!("{}", self.installed_mods.len())
-        } else {
-            format!("{}/{}", filtered_indices.len(), self.installed_mods.len())
-        };
-        frame.render_widget(
-            Paragraph::new(section_title(
-                self.tr("mods.installed"),
-                &format!("{instance_name}  ·  {count_text}"),
-                &self.theme,
-            ))
-            .style(self.theme.card()),
-            title,
+        buttons_row(
+            self,
+            frame,
+            chunks[0].x + 2,
+            chunks[0].y,
+            filter_rect.x.saturating_sub(1),
+            &buttons,
         );
+        let query = self.mods_search_query.clone();
+        crate::views::render_filter_pill(
+            self,
+            frame,
+            filter_rect,
+            &query,
+            self.mods_search_focused,
+            HitAction::ModsSearchBar,
+        );
+
+        self.render_installed_mods(frame, crate::views::left_gutter(chunks[1]));
+    }
+
+    fn render_installed_mods(&mut self, frame: &mut Frame, area: Rect) {
+        let focused = self.focus == Focus::Content;
+        let inner = card(self, frame, area, focused);
+        if inner.height == 0 {
+            return;
+        }
+
+        // Filter mods by search query
+        let query_lower = self.mods_search_query.to_lowercase();
+        let filtered_indices: Vec<usize> = self.visible_mod_indices();
 
         // ── Mod list ──
         let list_area = Rect {
             x: inner.x,
-            y: inner.y + 2,
+            y: inner.y,
             width: inner.width,
-            height: inner.height.saturating_sub(2),
+            height: inner.height,
         };
 
         if filtered_indices.is_empty() {
@@ -202,12 +175,6 @@ impl App {
 
         let cols = ModColumns::compute(list_area.width);
         let selected = self.mods_state.selected();
-        let hovered = hovered_index(
-            self,
-            list_area,
-            self.mods_state.offset(),
-            filtered_indices.len(),
-        );
 
         // Header row
         let header_rect = Rect {
@@ -217,24 +184,24 @@ impl App {
             height: 1,
         };
         let header_style = self.theme.card_comment();
+        let toggle_w = cols.name - cols.toggle;
+        let name_w = cols.version - cols.name;
+        let version_w = cols.size - cols.version;
+        let size_w = cols.date - cols.size;
+        let date_w = list_area.width.saturating_sub(cols.date);
         let header_line = Line::from(vec![
+            Span::styled(cell("On/Off", toggle_w, false), header_style),
+            Span::styled(cell("Name", name_w, false), header_style),
+            Span::styled(cell("Version", version_w, false), header_style),
             Span::styled(
-                truncate("  On/Off", (cols.name - cols.toggle) as usize),
+                if size_w > 0 {
+                    format!("{} ", cell("Size", size_w - 1, true))
+                } else {
+                    String::new()
+                },
                 header_style,
             ),
-            Span::styled(
-                truncate("  Name", (cols.version - cols.name) as usize),
-                header_style,
-            ),
-            Span::styled(
-                truncate("  Version", (cols.size - cols.version) as usize),
-                header_style,
-            ),
-            Span::styled(
-                truncate("  Size", (cols.date - cols.size) as usize),
-                header_style,
-            ),
-            Span::styled("  Date", header_style),
+            Span::styled(cell("Date", date_w, false), header_style),
         ]);
         frame.render_widget(
             Paragraph::new(header_line).style(self.theme.card()),
@@ -249,15 +216,35 @@ impl App {
             height: list_area.height.saturating_sub(1),
         };
         self.mods_visible = data_area.height as usize;
+        // Hover is measured against the data area (below the header row):
+        // using `list_area` would map the mouse to the row one below.
+        let hovered = hovered_index(
+            self,
+            data_area,
+            self.mods_state.offset(),
+            filtered_indices.len(),
+        );
 
         let items: Vec<ListItem> = filtered_indices
             .iter()
             .map(|&idx| {
                 let module = &self.installed_mods[idx];
-                let toggle = if module.enabled {
-                    Span::styled("  \u{25CF} ", self.theme.accent())
+                let display_idx = filtered_indices.iter().position(|&i| i == idx).unwrap_or(0);
+                let marker = if selected == Some(display_idx) {
+                    "\u{25B8} "
                 } else {
-                    Span::styled("  \u{25CB} ", self.theme.dim())
+                    "  "
+                };
+                let toggle = if module.enabled {
+                    Span::styled(
+                        cell(&format!("{marker}\u{25CF}"), toggle_w, false),
+                        self.theme.accent(),
+                    )
+                } else {
+                    Span::styled(
+                        cell(&format!("{marker}\u{25CB}"), toggle_w, false),
+                        self.theme.dim(),
+                    )
                 };
 
                 let display_name = if module.mod_name.is_empty() {
@@ -295,7 +282,6 @@ impl App {
                     module.install_date.clone()
                 };
 
-                let display_idx = filtered_indices.iter().position(|&i| i == idx).unwrap_or(0);
                 let row_style = row_style(self, display_idx, selected, hovered);
                 let dim_style = if selected == Some(display_idx) {
                     Style::default()
@@ -311,27 +297,23 @@ impl App {
 
                 ListItem::new(Line::from(vec![
                     toggle,
+                    Span::styled(cell(&display_name, name_w, false), row_style),
+                    Span::styled(cell(&version_text, version_w, false), dim_style),
                     Span::styled(
-                        format!("  {}", truncate(&display_name, (cols.version - cols.name - 2) as usize)),
-                        row_style,
-                    ),
-                    Span::styled(
-                        format!("  {}", truncate(&version_text, (cols.size - cols.version - 2) as usize)),
+                        if size_w > 0 {
+                            format!("{} ", cell(&size_text, size_w - 1, true))
+                        } else {
+                            String::new()
+                        },
                         dim_style,
                     ),
-                    Span::styled(
-                        format!("  {}", truncate(&size_text, (cols.date - cols.size - 2) as usize)),
-                        dim_style,
-                    ),
-                    Span::styled(format!("  {date_text}"), dim_style),
+                    Span::styled(cell(&date_text, date_w, true), dim_style),
                 ]))
                 .style(row_style)
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_symbol("\u{25B8} ")
-            .highlight_style(self.theme.row_selected());
+        let list = List::new(items).highlight_style(self.theme.row_selected());
         frame.render_stateful_widget(list, data_area, &mut self.mods_state);
         register_rows(
             &mut self.hitboxes,
@@ -348,12 +330,7 @@ impl App {
             match key.code {
                 KeyCode::Esc | KeyCode::Enter => {
                     self.mods_search_focused = false;
-                }
-                KeyCode::Backspace => {
-                    self.mods_search_query.pop();
-                }
-                KeyCode::Char(c) => {
-                    self.mods_search_query.push(c);
+                    self.edit.end_drag();
                 }
                 _ => {}
             }
@@ -361,7 +338,12 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char('t') => self.mods_search_focused = !self.mods_search_focused,
+            KeyCode::Char('t') => {
+                self.mods_search_focused = !self.mods_search_focused;
+                if self.mods_search_focused {
+                    self.edit.reset_with(&self.mods_search_query);
+                }
+            }
             KeyCode::Char('s') => {
                 self.browse.kind = crate::views::browse::BrowseKind::Mods;
                 self.browse.save_cache();
@@ -373,7 +355,7 @@ impl App {
             _ => {}
         }
 
-        let len = self.installed_mods.len();
+        let len = self.visible_mod_indices().len();
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => move_sel(&mut self.mods_state, len, 1),
             KeyCode::Up | KeyCode::Char('k') => move_sel(&mut self.mods_state, len, -1),

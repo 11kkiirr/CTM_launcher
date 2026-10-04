@@ -731,6 +731,35 @@ fn env_label(raw: &str, lang: crate::i18n::Lang) -> Option<String> {
     Some(crate::i18n::tr_string(lang, key))
 }
 
+/// Index of the first version compatible with `game_version` + `loader`
+/// (raw index into `versions`, NOT a display position).
+///
+/// Falls back to the first version matching the game version alone, then to
+/// index 0 (the newest version) — never silently preselects a build made for
+/// a different Minecraft than the instance uses.
+pub(crate) fn first_compatible_index(
+    versions: &[Version],
+    game_version: Option<&str>,
+    loader: Option<&str>,
+) -> usize {
+    let mut gv_only = None;
+    for (idx, ver) in versions.iter().enumerate() {
+        let gv_ok = game_version
+            .map(|gv| ver.game_versions.iter().any(|v| v == gv))
+            .unwrap_or(true);
+        let ld_ok = loader
+            .map(|ld| ver.loaders.iter().any(|v| v == ld))
+            .unwrap_or(true);
+        if gv_ok && ld_ok {
+            return idx;
+        }
+        if gv_ok && gv_only.is_none() {
+            gv_only = Some(idx);
+        }
+    }
+    gv_only.unwrap_or(0)
+}
+
 impl App {
     /// Whether the selected instance already has this Modrinth project
     /// installed (mods by jar id/slug, RP/shaders by folder/file name).
@@ -858,6 +887,21 @@ impl App {
             width: search_w,
             height: 3,
         };
+        // Fill the middle row: the text starts one column right of the edge,
+        // so without this the first cell would show the dark page background.
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                " ".repeat(search_rect.width as usize),
+                Style::default().bg(search_bg),
+            ))
+            .style(Style::default().bg(search_bg)),
+            Rect {
+                x: search_rect.x,
+                y: bar_row,
+                width: search_rect.width,
+                height: 1,
+            },
+        );
         // Green accent bar on the left when focused
         if search_focused && search_rect.width > 0 {
             let bar = Rect {
@@ -872,39 +916,56 @@ impl App {
                 bar,
             );
         }
-        let search_label = self.tr("dialog.filter");
-        let query_part = if self.browse.search_input.is_empty() && self.browse.query.is_empty() {
-            Span::styled(
+        let both_empty = self.browse.search_input.is_empty() && self.browse.query.is_empty();
+        let mut line_spans: Vec<Span<'static>> = Vec::new();
+        if search_focused {
+            line_spans.extend(self.edit.edit_spans(
+                &self.browse.search_input,
+                true,
+                Style::default().fg(self.theme.green).bg(search_bg),
+                Style::default().fg(self.theme.green).bg(search_bg),
+                self.theme.selection_bg,
+            ));
+        } else if both_empty {
+            line_spans.push(Span::styled(
+                self.tr("dialog.search"),
+                Style::default().fg(self.theme.muted).bg(search_bg),
+            ));
+            line_spans.push(Span::styled(
                 self.tr("browse.search_placeholder"),
                 Style::default().fg(self.theme.muted).bg(search_bg),
-            )
-        } else if search_focused {
-            Span::styled(
-                format!("{}█", self.browse.search_input),
-                Style::default().fg(self.theme.green).bg(search_bg),
-            )
+            ));
         } else if !self.browse.query.is_empty() {
-            Span::styled(
-                &self.browse.query,
+            line_spans.push(Span::styled(
+                self.browse.query.clone(),
                 Style::default().fg(self.theme.fg).bg(search_bg),
-            )
+            ));
         } else {
-            Span::styled(
-                &self.browse.search_input,
+            line_spans.push(Span::styled(
+                self.browse.search_input.clone(),
                 Style::default().fg(self.theme.fg).bg(search_bg),
-            )
+            ));
+        }
+        let search_line = Line::from(line_spans);
+        let bar_x = search_rect.x + 1;
+        let bar_w = search_rect.width.saturating_sub(1);
+        // Horizontal scroll: keep the caret (while typing) or the tail (idle)
+        // visible when the text is longer than the field.
+        let anchor = if search_focused {
+            self.edit.cursor
+        } else if both_empty {
+            0
+        } else if !self.browse.query.is_empty() {
+            self.browse.query.chars().count()
+        } else {
+            self.browse.search_input.chars().count()
         };
-        let search_line = Line::from(vec![
-            Span::styled(
-                search_label,
-                Style::default().fg(if search_focused { self.theme.green } else { self.theme.muted }).bg(search_bg),
-            ),
-            query_part,
-        ]);
-        let bar_x = if search_focused { search_rect.x + 1 } else { search_rect.x };
-        let bar_w = if search_focused { search_rect.width.saturating_sub(1) } else { search_rect.width };
+        let visible = bar_w as usize;
+        let scroll_x = anchor.saturating_sub(visible.saturating_sub(1)) as u16;
         frame.render_widget(
-            Paragraph::new(search_line).style(Style::default().bg(search_bg)),
+            Paragraph::new(search_line)
+                .style(Style::default().bg(search_bg))
+                .scroll((0, scroll_x)),
             Rect {
                 x: bar_x,
                 y: bar_row,
@@ -2261,8 +2322,17 @@ impl App {
         }
     }
 
+    fn detail_card(&mut self, frame: &mut Frame, area: Rect, focused: bool) -> Rect {
+        let inner = crate::views::card(self, frame, area, focused);
+        Rect {
+            x: inner.x + 1,
+            width: inner.width.saturating_sub(1),
+            ..inner
+        }
+    }
+
     fn render_detail_description(&mut self, frame: &mut Frame, area: Rect, project: &Project) {
-        let inner = crate::views::card(self, frame, area, self.browse.focus == BrowseFocus::Body);
+        let inner = self.detail_card(frame, area, self.browse.focus == BrowseFocus::Body);
         if inner.height == 0 {
             return;
         }
@@ -2676,7 +2746,7 @@ impl App {
     }
 
     fn render_detail_changelog(&mut self, frame: &mut Frame, area: Rect) {
-        let inner = crate::views::card(self, frame, area, self.browse.focus == BrowseFocus::Body);
+        let inner = self.detail_card(frame, area, self.browse.focus == BrowseFocus::Body);
         if inner.height == 0 {
             return;
         }
@@ -2776,7 +2846,7 @@ impl App {
     }
 
     fn render_detail_gallery(&mut self, frame: &mut Frame, area: Rect, project: &Project) {
-        let inner = crate::views::card(self, frame, area, false);
+        let inner = self.detail_card(frame, area, false);
         if inner.height == 0 || inner.width == 0 {
             return;
         }
@@ -2909,8 +2979,7 @@ impl App {
 
     fn render_detail_versions(&mut self, frame: &mut Frame, area: Rect, project: &Project) {
         let _ = project;
-        let inner = crate::views::card(
-            self,
+        let inner = self.detail_card(
             frame,
             area,
             self.browse.focus == BrowseFocus::Versions,
@@ -2919,30 +2988,7 @@ impl App {
             return;
         }
 
-        let instance_gv = self
-            .selected_instance()
-            .map(|i| i.metadata.game_version.clone());
-        let instance_loader = self
-            .selected_instance()
-            .map(|i| i.metadata.loader.as_str().to_string());
-
-        let mut compatible: Vec<usize> = Vec::new();
-        let mut incompatible: Vec<usize> = Vec::new();
-        for (idx, ver) in self.browse.versions.iter().enumerate() {
-            let gv_match = instance_gv
-                .as_ref()
-                .map(|gv| ver.game_versions.iter().any(|v| v == gv))
-                .unwrap_or(true);
-            let ld_match = instance_loader
-                .as_ref()
-                .map(|ld| ver.loaders.iter().any(|v| v == ld))
-                .unwrap_or(true);
-            if gv_match && ld_match {
-                compatible.push(idx);
-            } else {
-                incompatible.push(idx);
-            }
-        }
+        let (compatible, ordered) = self.browse_version_order();
 
         let header_rect = Rect {
             x: inner.x,
@@ -2968,13 +3014,13 @@ impl App {
         let list_h = inner.height.saturating_sub(1);
         let visible = list_h as usize;
 
-        let mut ordered: Vec<usize> = compatible.clone();
-        ordered.extend(incompatible.iter());
-
-        let start = self
-            .browse
-            .version_selected
-            .saturating_sub(visible.saturating_sub(1));
+        // Scroll by display position in `ordered`, not by raw version index:
+        // otherwise a selection past a compatible/incompatible split jumps.
+        let sel_pos = ordered
+            .iter()
+            .position(|&i| i == self.browse.version_selected)
+            .unwrap_or(0);
+        let start = sel_pos.saturating_sub(visible.saturating_sub(1));
         for row in 0..visible {
             let list_idx = start + row;
             let Some(&idx) = ordered.get(list_idx) else {
@@ -3104,11 +3150,17 @@ impl App {
     fn key_browse_list(&mut self, key: KeyEvent) {
         // Tab toggles between sidebar, search, and list focus.
         if key.code == KeyCode::Tab {
+            if self.browse.focus == BrowseFocus::Search {
+                self.edit.end_drag();
+            }
             self.browse.focus = match self.browse.focus {
                 BrowseFocus::Search => BrowseFocus::Sidebar,
                 BrowseFocus::Sidebar => BrowseFocus::List,
                 BrowseFocus::List | _ => BrowseFocus::Search,
             };
+            if self.browse.focus == BrowseFocus::Search {
+                self.edit.reset_with(&self.browse.search_input);
+            }
             return;
         }
 
@@ -3117,18 +3169,14 @@ impl App {
             match key.code {
                 KeyCode::Esc => {
                     self.browse.focus = BrowseFocus::List;
+                    self.edit.end_drag();
                 }
                 KeyCode::Enter => {
                     self.browse.query = self.browse.search_input.trim().to_string();
                     self.browse_close_detail();
                     self.browse_load_first_page();
                     self.browse.focus = BrowseFocus::List;
-                }
-                KeyCode::Backspace => {
-                    self.browse.search_input.pop();
-                }
-                KeyCode::Char(c) => {
-                    self.browse.search_input.push(c);
+                    self.edit.end_drag();
                 }
                 _ => {}
             }
@@ -3320,12 +3368,46 @@ impl App {
     }
 
     pub(crate) fn browse_version_move(&mut self, delta: i32) {
-        let len = self.browse.versions.len();
-        if len == 0 {
+        let (_, ordered) = self.browse_version_order();
+        if ordered.is_empty() {
             return;
         }
-        let next = (self.browse.version_selected as i32 + delta).clamp(0, len as i32 - 1) as usize;
-        self.browse.version_selected = next;
+        let cur = ordered
+            .iter()
+            .position(|&i| i == self.browse.version_selected)
+            .unwrap_or(0);
+        let next = (cur as i32 + delta).clamp(0, ordered.len() as i32 - 1) as usize;
+        self.browse.version_selected = ordered[next];
+    }
+
+    /// Display order of `browse.versions`: compatible builds first, then the
+    /// rest (same order the version list is rendered in). Returns
+    /// `(compatible_raw_indices, ordered_raw_indices)`.
+    pub(crate) fn browse_version_order(&self) -> (Vec<usize>, Vec<usize>) {
+        let instance_gv = self
+            .selected_instance()
+            .map(|i| i.metadata.game_version.as_str());
+        let instance_ld = self
+            .selected_instance()
+            .map(|i| i.metadata.loader.as_str());
+        let mut compatible: Vec<usize> = Vec::new();
+        let mut incompatible: Vec<usize> = Vec::new();
+        for (idx, ver) in self.browse.versions.iter().enumerate() {
+            let gv_ok = instance_gv
+                .map(|gv| ver.game_versions.iter().any(|v| v == gv))
+                .unwrap_or(true);
+            let ld_ok = instance_ld
+                .map(|ld| ver.loaders.iter().any(|v| v == ld))
+                .unwrap_or(true);
+            if gv_ok && ld_ok {
+                compatible.push(idx);
+            } else {
+                incompatible.push(idx);
+            }
+        }
+        let mut ordered = compatible.clone();
+        ordered.extend(incompatible.iter());
+        (compatible, ordered)
     }
 
     fn browse_scroll_body(&mut self, delta: i32) {

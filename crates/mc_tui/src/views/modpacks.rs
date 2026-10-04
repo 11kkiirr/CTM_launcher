@@ -43,11 +43,11 @@ impl App {
         );
 
         if self.selected_project.is_some() {
-            self.render_project(frame, chunks[1]);
-            self.render_project_info(frame, chunks[3]);
+            self.render_project(frame, crate::views::left_gutter(chunks[1]));
+            self.render_project_info(frame, crate::views::left_gutter(chunks[3]));
         } else {
-            self.render_search_results(frame, chunks[1]);
-            self.render_search_info(frame, chunks[3]);
+            self.render_search_results(frame, crate::views::left_gutter(chunks[1]));
+            self.render_search_info(frame, crate::views::left_gutter(chunks[3]));
         }
     }
 
@@ -58,35 +58,11 @@ impl App {
             return;
         }
 
-        let suffix = if self.search_query.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "{}  ·  {} results",
-                self.search_query,
-                self.search_results.len()
-            )
-        };
-        frame.render_widget(
-            Paragraph::new(section_title(
-                self.tr("nav.modpacks"),
-                &suffix,
-                &self.theme,
-            ))
-            .style(self.theme.card()),
-            Rect {
-                x: inner.x,
-                y: inner.y,
-                width: inner.width,
-                height: 1,
-            },
-        );
-
         let list_area = Rect {
             x: inner.x,
-            y: inner.y + 1,
+            y: inner.y,
             width: inner.width,
-            height: inner.height.saturating_sub(1),
+            height: inner.height,
         };
         self.search_visible = list_area.height as usize;
         let selected = self.search_state.selected();

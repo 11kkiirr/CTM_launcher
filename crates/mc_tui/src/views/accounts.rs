@@ -8,7 +8,7 @@ use ratatui::Frame;
 
 use crate::app::{App, ButtonId, Focus, HitAction};
 use crate::views::{
-    buttons_row, card, hovered_index, jump, move_sel, register_rows, row_style, section_title,
+    buttons_row, card, hovered_index, jump, move_sel, register_rows, row_style,
 };
 
 impl App {
@@ -43,8 +43,8 @@ impl App {
             ],
         );
 
-        self.render_account_list(frame, chunks[1]);
-        self.render_account_details(frame, chunks[3]);
+        self.render_account_list(frame, crate::views::left_gutter(chunks[1]));
+        self.render_account_details(frame, crate::views::left_gutter(chunks[3]));
     }
 
     fn render_account_list(&mut self, frame: &mut Frame, area: Rect) {
@@ -55,23 +55,11 @@ impl App {
         }
 
         let account_count = self.accounts.accounts().len();
-        let title = self.tr("accounts.title").to_string();
-        frame.render_widget(
-            Paragraph::new(section_title(&title, &account_count.to_string(), &self.theme))
-                .style(self.theme.card()),
-            Rect {
-                x: inner.x,
-                y: inner.y,
-                width: inner.width,
-                height: 1,
-            },
-        );
-
         let list_area = Rect {
             x: inner.x,
-            y: inner.y + 1,
+            y: inner.y,
             width: inner.width,
-            height: inner.height.saturating_sub(1),
+            height: inner.height,
         };
         self.accounts_visible = list_area.height as usize;
         let active_id = self.accounts.active_id().map(str::to_string);
