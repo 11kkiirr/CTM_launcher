@@ -379,6 +379,9 @@ pub async fn write_json<T: Serialize>(path: impl AsRef<Path>, value: &T) -> Resu
 }
 
 /// Write bytes to a temporary sibling then rename into place.
+///
+/// The temporary file is created owner-only (`0600`) so token-bearing files
+/// such as `accounts.json` never land on disk world-readable.
 pub async fn atomic_write(path: impl AsRef<Path>, data: &[u8]) -> Result<()> {
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
@@ -386,8 +389,24 @@ pub async fn atomic_write(path: impl AsRef<Path>, data: &[u8]) -> Result<()> {
     }
     let tmp = path.with_extension("tmp");
     tokio::fs::write(&tmp, data).await?;
+    harden_file_permissions(&tmp);
     tokio::fs::rename(&tmp, path).await?;
     Ok(())
+}
+
+/// Restrict a file to its owner (`0600`), best effort.
+///
+/// No-op on non-Unix platforms; missing files are ignored.
+pub fn harden_file_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if path.exists() {
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// Reject archive entries containing `..`, absolute or prefix components.

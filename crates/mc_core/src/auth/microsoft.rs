@@ -11,11 +11,11 @@ use serde::Deserialize;
 use crate::auth::{Account, AccountKind};
 use crate::error::{CoreError, Result};
 
-/// Public client id registered by Prism Launcher for the consumers tenant.
-/// The old Minecraft Launcher id (`00000000402b5328`) was revoked by
-/// Microsoft (AADSTS700016).  Override with `MicrosoftAuth::with_client_id`
-/// if you register your own Azure application.
-pub const DEFAULT_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
+/// Public client id of CTMLauncher's own Azure application (registered by the
+/// project owner, personal/Microsoft accounts, device code flow).  Override
+/// with `MicrosoftAuth::with_client_id` if you build against your own Azure
+/// application.
+pub const DEFAULT_CLIENT_ID: &str = "d7ef1c45-36cd-4853-be00-7c9ca2565670";
 
 const DEVICE_CODE_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode";
 const TOKEN_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";

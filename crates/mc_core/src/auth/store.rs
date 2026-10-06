@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::Account;
 use crate::error::Result;
-use crate::util::{read_json_or_default, write_json};
+use crate::util::{harden_file_permissions, read_json_or_default, write_json};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct AccountsFile {
@@ -25,9 +25,12 @@ pub struct AccountStore {
 
 impl AccountStore {
     /// Load the store from `path`, treating a missing file as empty.
+    ///
+    /// Also tightens the file to `0600` — refresh tokens live in here.
     pub async fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let data: AccountsFile = read_json_or_default(&path).await?;
+        harden_file_permissions(&path);
         Ok(Self { path, data })
     }
 
@@ -107,6 +110,30 @@ mod tests {
         let mut reloaded = reloaded;
         reloaded.remove(&alex_id).await.unwrap();
         assert_eq!(reloaded.active().unwrap().username, "Steve");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn accounts_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("ctm-test-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("accounts.json");
+
+        let mut store = AccountStore::load(&path).await.unwrap();
+        store.upsert(Account::offline("Steve")).await.unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "accounts.json must be owner-only");
+
+        // A file written by an older build with lax permissions is fixed on load.
+        std::fs::write(&path, b"{\"active\":null,\"accounts\":[]}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let reloaded = AccountStore::load(&path).await.unwrap();
+        assert!(reloaded.accounts().is_empty());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "stale accounts.json must be tightened");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

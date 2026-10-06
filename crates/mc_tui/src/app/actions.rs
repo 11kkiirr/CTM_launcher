@@ -1940,10 +1940,26 @@ pub(crate) fn start_microsoft_login(&mut self) {
         let _ = tx.send(EngineEvent::ProgressDone);
         let _ = tx.send(EngineEvent::DeviceCode(Box::new(prompt.clone())));
 
+        let _ = tx.send(EngineEvent::Status("Waiting for sign-in...".into()));
+        let token = match auth.poll_for_token(&prompt).await {
+            Ok(token) => token,
+            Err(err) => {
+                let _ = tx.send(EngineEvent::Error(format!("Login failed: {err}")));
+                return;
+            }
+        };
+        let _ = tx.send(EngineEvent::DeviceCodeWorking);
         let _ = tx.send(EngineEvent::Status(
             "Completing Xbox/Minecraft login...".into(),
         ));
-        match auth.login_device_code(&prompt).await {
+        match auth
+            .complete_login(
+                &token.access_token,
+                token.refresh_token,
+                token.expires_in,
+            )
+            .await
+        {
             Ok(account) => {
                 let _ = tx.send(EngineEvent::Authenticated(Box::new(account)));
             }

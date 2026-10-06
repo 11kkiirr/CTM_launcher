@@ -854,7 +854,7 @@ impl App {
                     self.overlay = None;
                 }
             }
-            Overlay::DeviceCode(_) => {
+            Overlay::DeviceCode { .. } => {
                 if key.code == KeyCode::Esc {
                     self.overlay = None;
                 }

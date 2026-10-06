@@ -320,7 +320,10 @@ pub enum Overlay {
         title: String,
         lines: Vec<String>,
     },
-    DeviceCode(Box<DeviceCodePrompt>),
+    DeviceCode {
+        prompt: Box<DeviceCodePrompt>,
+        status: String,
+    },
     Picker(VersionPicker),
     Wizard(crate::wizard::CreateWizard),
 }

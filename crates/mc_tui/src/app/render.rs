@@ -831,7 +831,7 @@ pub(crate) fn render_overlay(&mut self, frame: &mut Frame, area: Rect) {
             crate::widgets::render_popup(frame, popup, &title, rendered, &self.theme);
             self.push_hitbox(popup, HitAction::Overlay(OverlayAction::MessageClose));
         }
-        Overlay::DeviceCode(prompt) => {
+        Overlay::DeviceCode { prompt, status } => {
             let popup = crate::widgets::centered_rect(64, 40, area);
             let lines = vec![
                 Line::from(Span::styled(
@@ -848,10 +848,7 @@ pub(crate) fn render_overlay(&mut self, frame: &mut Frame, area: Rect) {
                 Line::from(""),
                 Line::from(Span::styled(prompt.message.clone(), self.theme.dim())),
                 Line::from(""),
-                Line::from(Span::styled(
-                    self.tr("dialog.ms_waiting"),
-                    self.theme.accent(),
-                )),
+                Line::from(Span::styled(status.clone(), self.theme.accent())),
             ];
             crate::widgets::render_popup(
                 frame,

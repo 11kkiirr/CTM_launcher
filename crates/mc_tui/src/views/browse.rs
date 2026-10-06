@@ -10,18 +10,22 @@ use std::collections::{HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use mc_core::modrinth::{Member, Project, SearchHit, Version};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
-use ratatui_image::{Resize, StatefulImage};
+use ratatui_image::{FilterType, Resize, StatefulImage};
 
 use crate::app::{App, HitAction};
 use crate::md::{render_md_full, MdAlign};
 use crate::views::{
-    action_cell, begin_action_row, pill_cell, row_widths, truncate,
+    accent_bar, action_cell, begin_action_row, pill_cell, row_widths, truncate,
 };
+
+/// Gallery preview/thumbnail scaling: fill the box keeping the aspect ratio,
+/// upscaling small uploads so the big preview is actually big.
+const GALLERY_RESIZE: Resize = Resize::Scale(Some(FilterType::Triangle));
 
 /// The content category the browser covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -758,6 +762,18 @@ pub(crate) fn first_compatible_index(
         }
     }
     gv_only.unwrap_or(0)
+}
+
+/// Center `size` inside `area`, clamped to the area so the result always fits.
+fn center_in(area: Rect, size: Rect) -> Rect {
+    let width = size.width.min(area.width);
+    let height = size.height.min(area.height);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
 }
 
 impl App {
@@ -2865,77 +2881,153 @@ impl App {
             .browse
             .gallery_selected
             .min(project.gallery.len() - 1);
-        let preview_h = (inner.height / 2).clamp(6, 12).min(inner.height);
+        const THUMB_W: u16 = 16;
+        const THUMB_H: u16 = 6;
+        const THUMB_GAP: u16 = 1;
+        const MIN_PREVIEW_H: u16 = 4;
+        let sel = self.browse.gallery_selected;
+        let strip_h = if inner.height >= MIN_PREVIEW_H + THUMB_H + 2 {
+            THUMB_H
+        } else {
+            0
+        };
+        let caption_h = if strip_h > 0 {
+            1
+        } else {
+            u16::from(inner.height > MIN_PREVIEW_H)
+        };
+        let gap_h = u16::from(strip_h > 0);
+        let preview_h = inner.height - strip_h - caption_h - gap_h;
         let preview = Rect {
             height: preview_h,
             ..inner
         };
-        let grid = Rect {
-            y: preview.y + preview_h,
-            height: inner.height.saturating_sub(preview_h),
-            ..inner
-        };
-        let sel = self.browse.gallery_selected;
         if let Some(image) = project.gallery.get(sel) {
-            let caption = image
+            self.render_gallery_scaled(
+                frame,
+                preview,
+                &format!("preview::{}", image.url),
+                &image.url,
+                &format!("#{}", sel + 1),
+            );
+        }
+        if caption_h > 0 {
+            let head = format!("#{}/{}  ", sel + 1, project.gallery.len());
+            let desc = project.gallery[sel]
                 .description
                 .clone()
                 .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| format!("#{sel}"));
-            self.render_gallery_image(frame, preview, &image.url, &caption);
+                .unwrap_or_default();
+            let avail = inner.width.saturating_sub(head.chars().count() as u16) as usize;
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(head, self.theme.accent()),
+                    Span::styled(truncate(&desc, avail), self.theme.card_dim()),
+                ]))
+                .style(self.theme.card()),
+                Rect {
+                    y: preview.y + preview_h,
+                    height: 1,
+                    ..inner
+                },
+            );
         }
-        const THUMB_W: u16 = 18;
-        const THUMB_H: u16 = 7;
-        let cols = (grid.width / THUMB_W).max(1) as usize;
-        self.browse.gallery_cols = cols;
-        let rows = (grid.height / THUMB_H) as usize;
-        if rows == 0 {
+        if strip_h == 0 {
             return;
         }
-        let row_count = project.gallery.len().div_ceil(cols);
-        self.browse.gallery_scroll = self
-            .browse
-            .gallery_scroll
-            .min(row_count.saturating_sub(rows));
-        for row in 0..rows {
-            let gi_row = self.browse.gallery_scroll + row;
-            for col in 0..cols {
-                let gi = gi_row * cols + col;
-                let Some(image) = project.gallery.get(gi) else {
-                    break;
-                };
-                let cell = Rect {
-                    x: grid.x + col as u16 * THUMB_W,
-                    y: grid.y + row as u16 * THUMB_H,
-                    width: THUMB_W.min(grid.width.saturating_sub(col as u16 * THUMB_W)),
-                    height: THUMB_H,
-                };
-                if cell.width == 0 {
-                    continue;
-                }
-                let selected = gi == sel;
-                if selected {
-                    frame.render_widget(
-                        Block::default().style(Style::default().bg(self.theme.selection_bg)),
-                        cell,
-                    );
-                }
-                let img_area = if selected {
-                    Rect {
-                        x: cell.x + 1,
-                        y: cell.y,
-                        width: cell.width.saturating_sub(2),
-                        ..cell
+        let strip = Rect {
+            y: inner.y + inner.height - strip_h,
+            height: strip_h,
+            ..inner
+        };
+        let cols = ((inner.width + THUMB_GAP) / (THUMB_W + THUMB_GAP)).max(1) as usize;
+        self.browse.gallery_cols = cols;
+        let len = project.gallery.len();
+        self.browse.gallery_scroll = self.browse.gallery_scroll.min(len.saturating_sub(cols));
+        let start = self.browse.gallery_scroll;
+        for col in 0..cols {
+            let gi = start + col;
+            let Some(image) = project.gallery.get(gi) else {
+                break;
+            };
+            let x = inner.x + col as u16 * (THUMB_W + THUMB_GAP);
+            if x >= inner.x + inner.width {
+                break;
+            }
+            let cell = Rect {
+                x,
+                y: strip.y,
+                width: THUMB_W.min(inner.x + inner.width - x),
+                height: strip_h,
+            };
+            let selected = gi == sel;
+            let bg = if selected {
+                self.theme.selection_bg
+            } else if self.is_hovered(cell) {
+                self.theme.hover_bg
+            } else {
+                self.theme.panel
+            };
+            frame.render_widget(Block::default().style(Style::default().bg(bg)), cell);
+            if selected {
+                accent_bar(frame, cell, &self.theme);
+            }
+            let img_area = Rect {
+                x: cell.x + 1,
+                y: cell.y + 1,
+                width: cell.width.saturating_sub(2),
+                height: cell.height.saturating_sub(2),
+            };
+            self.render_gallery_scaled(
+                frame,
+                img_area,
+                &format!("thumb::{}", image.url),
+                &image.url,
+                &format!("#{}", gi + 1),
+            );
+            self.push_hitbox(cell, HitAction::BrowseGallery(gi));
+        }
+    }
+
+    fn render_gallery_scaled(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        key: &str,
+        url: &str,
+        fallback: &str,
+    ) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        if self.ensure_image_protocol_key(key, url) {
+            let fit = self
+                .browse_protocols
+                .get(key)
+                .map(|proto| proto.size_for(GALLERY_RESIZE.clone(), area));
+            if let Some(fit) = fit {
+                let dest = center_in(area, fit);
+                if dest.width > 0 && dest.height > 0 {
+                    if let Some(proto) = self.browse_protocols.get_mut(key) {
+                        frame.render_stateful_widget(
+                            StatefulImage::default().resize(GALLERY_RESIZE.clone()),
+                            dest,
+                            proto,
+                        );
+                        return;
                     }
-                } else {
-                    cell
-                };
-                if img_area.width > 0 {
-                    self.render_gallery_image(frame, img_area, &image.url, &format!("#{gi}"));
                 }
-                self.push_hitbox(cell, HitAction::BrowseGallery(gi));
             }
         }
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                truncate(fallback, area.width as usize),
+                Style::default().fg(self.theme.muted).bg(self.theme.panel),
+            ))
+            .style(self.theme.card())
+            .alignment(Alignment::Center),
+            area,
+        );
     }
 
     fn render_gallery_image(&mut self, frame: &mut Frame, area: Rect, url: &str, fallback: &str) {
@@ -2963,7 +3055,11 @@ impl App {
     }
 
     fn ensure_image_protocol(&mut self, url: &str) -> bool {
-        if self.browse_protocols.contains_key(url) {
+        self.ensure_image_protocol_key(url, url)
+    }
+
+    fn ensure_image_protocol_key(&mut self, key: &str, url: &str) -> bool {
+        if self.browse_protocols.contains_key(key) {
             return true;
         }
         let Some(img) = self.browse_images.get(url) else {
@@ -2973,7 +3069,7 @@ impl App {
             return false;
         };
         let protocol = self.picker.new_resize_protocol(dynamic);
-        self.browse_protocols.insert(url.to_string(), protocol);
+        self.browse_protocols.insert(key.to_string(), protocol);
         true
     }
 
@@ -3260,10 +3356,7 @@ impl App {
             DetailTab::Versions => self.browse_version_move(delta),
             DetailTab::Description => self.browse_scroll_body(delta),
             DetailTab::Changelog => self.browse_scroll_changelog(delta),
-            DetailTab::Gallery => {
-                let cols = self.browse.gallery_cols.max(1) as i32;
-                self.browse_gallery_move(delta * cols);
-            }
+            DetailTab::Gallery => self.browse_gallery_move(delta),
         }
     }
 
@@ -3274,10 +3367,7 @@ impl App {
                 DetailTab::Versions => self.browse_version_move(delta * 3),
                 DetailTab::Description => self.browse_scroll_body(delta * 3),
                 DetailTab::Changelog => self.browse_scroll_changelog(delta * 3),
-                DetailTab::Gallery => {
-                    let next = (self.browse.gallery_scroll as i32 + delta).max(0) as usize;
-                    self.browse.gallery_scroll = next;
-                }
+                DetailTab::Gallery => self.browse_gallery_move(delta),
             }
         } else {
             self.browse_wheel(delta);
@@ -3493,9 +3583,11 @@ impl App {
             return;
         }
         let cols = self.browse.gallery_cols.max(1);
-        let sel_row = self.browse.gallery_selected / cols;
-        if sel_row < self.browse.gallery_scroll {
-            self.browse.gallery_scroll = sel_row;
+        let sel = self.browse.gallery_selected;
+        if sel < self.browse.gallery_scroll {
+            self.browse.gallery_scroll = sel;
+        } else if sel >= self.browse.gallery_scroll + cols {
+            self.browse.gallery_scroll = sel + 1 - cols;
         }
     }
 

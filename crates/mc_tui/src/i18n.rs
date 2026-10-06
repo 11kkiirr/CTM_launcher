@@ -321,6 +321,10 @@ fn en(key: &str) -> std::borrow::Cow<'static, str> {
         "dialog.ms_url" => "1. Open the URL below in a browser:",
         "dialog.ms_code" => "2. Enter this code:",
         "dialog.ms_waiting" => "Waiting for sign-in... Esc to dismiss",
+        "dialog.ms_working" => "Completing Xbox/Minecraft login... Esc to dismiss",
+        "dialog.ms_failed" => "Sign-in failed",
+        "dialog.ms_appreg" =>
+            "This client ID is not approved by Mojang yet. Submit it for review: https://aka.ms/mce-reviewappid (usually takes a few weeks).",
         "dialog.filter_logs" => "Filter Logs",
         "dialog.minecraft_version" => "Minecraft Version",
         "dialog.loader_version" => "Loader Version",
@@ -826,6 +830,10 @@ fn uk(key: &str) -> Option<&'static str> {
         "dialog.ms_url" => "1. Відкрийте URL у браузері:",
         "dialog.ms_code" => "2. Введіть цей код:",
         "dialog.ms_waiting" => "Очікування входу... Esc — закрити",
+        "dialog.ms_working" => "Завершення входу через Xbox/Minecraft... Esc — закрити",
+        "dialog.ms_failed" => "Помилка входу",
+        "dialog.ms_appreg" =>
+            "Цей client ID ще не схвалено Mojang. Надішліть його на перевірку: https://aka.ms/mce-reviewappid (зазвичай займає до 3-4 тижнів).",
         "dialog.filter_logs" => "Фільтр логів",
         "dialog.minecraft_version" => "Версія Minecraft",
         "dialog.loader_version" => "Версія лоадера",
@@ -1337,6 +1345,10 @@ fn ru(key: &str) -> Option<&'static str> {
         "dialog.ms_url" => "1. Откройте URL в браузере:",
         "dialog.ms_code" => "2. Введите этот код:",
         "dialog.ms_waiting" => "Ожидание входа... Esc — закрыть",
+        "dialog.ms_working" => "Завершение входа через Xbox/Minecraft... Esc — закрыть",
+        "dialog.ms_failed" => "Ошибка входа",
+        "dialog.ms_appreg" =>
+            "Этот client ID ещё не одобрен Mojang. Отправьте его на проверку: https://aka.ms/mce-reviewappid (обычно занимает 3-4 недели).",
         "dialog.filter_logs" => "Фильтр логов",
         "dialog.minecraft_version" => "Версия Minecraft",
         "dialog.loader_version" => "Версия лоадера",

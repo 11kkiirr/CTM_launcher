@@ -1260,14 +1260,120 @@ mod tests {
             2,
             "gallery thumbs missing hitboxes"
         );
+        let text = buffer_text(&terminal);
+        assert!(text.contains("#1/2"), "gallery caption missing: {text}");
+        assert!(
+            app.browse_protocols
+                .contains_key("preview::https://img.modrinth.com/g1.png"),
+            "gallery preview protocol missing"
+        );
+        assert!(
+            app.browse_protocols
+                .contains_key("thumb::https://img.modrinth.com/g1.png"),
+            "gallery thumb protocol missing"
+        );
         app.dispatch_hit(HitAction::BrowseGallery(1));
         assert_eq!(app.browse.gallery_selected, 1);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let sel_thumb = app
+            .hitboxes
+            .iter()
+            .find(|h| h.action == HitAction::BrowseGallery(1))
+            .map(|h| h.rect)
+            .expect("selected thumb hitbox");
+        assert_eq!(
+            terminal.backend().buffer()[(sel_thumb.x, sel_thumb.y)].bg,
+            app.theme.selection_bg,
+            "selected thumb must be highlighted"
+        );
 
         app.dispatch_hit(HitAction::BrowseDetailTab(0));
         assert_eq!(
             app.browse.detail_tab,
             crate::views::browse::DetailTab::Description
         );
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn gallery_strip_scrolls_horizontally() {
+        let mut app = App::new(temp_paths(), reqwest::Client::new()).await.unwrap();
+        app.nav = Nav::Browse;
+        for i in 0..8 {
+            app.browse_images
+                .insert(format!("https://img.modrinth.com/big{i}.png"), raster(64, 36));
+        }
+        app.browse.detail = Some(Project {
+            id: "big".into(),
+            slug: "big".into(),
+            title: "Big Gallery".into(),
+            description: "gallery".into(),
+            body: "body".into(),
+            project_type: "mod".into(),
+            categories: Vec::new(),
+            additional_categories: Vec::new(),
+            client_side: "".into(),
+            server_side: "".into(),
+            downloads: 1,
+            followers: 0,
+            icon_url: None,
+            color: None,
+            issues_url: None,
+            source_url: None,
+            wiki_url: None,
+            discord_url: None,
+            game_versions: Vec::new(),
+            loaders: Vec::new(),
+            versions: Vec::new(),
+            published: String::new(),
+            updated: String::new(),
+            license: None,
+            gallery: (0..8)
+                .map(|i| mc_core::modrinth::GalleryImage {
+                    url: format!("https://img.modrinth.com/big{i}.png"),
+                    description: None,
+                    featured: false,
+                })
+                .collect(),
+        });
+        app.browse_select_tab(1);
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let cols = app.browse.gallery_cols;
+        assert!(
+            (2..8).contains(&cols),
+            "unexpected thumb column count: {cols}"
+        );
+        let visible = |app: &App| -> Vec<usize> {
+            app.hitboxes
+                .iter()
+                .filter_map(|h| match h.action {
+                    HitAction::BrowseGallery(idx) => Some(idx),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(visible(&app).len(), cols, "strip must show one full row");
+        assert_eq!(app.browse.gallery_scroll, 0);
+        assert!(buffer_text(&terminal).contains("#1/8"), "caption missing");
+
+        app.dispatch_hit(HitAction::BrowseGallery(7));
+        assert_eq!(app.browse.gallery_selected, 7);
+        assert_eq!(app.browse.gallery_scroll, 8 - cols, "strip must follow");
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let shown = visible(&app);
+        assert_eq!(shown.len(), cols, "strip row must stay full");
+        assert_eq!(shown.last().copied(), Some(7), "selected thumb visible");
+
+        app.browse_scroll(-1);
+        assert_eq!(app.browse.gallery_selected, 6, "wheel moves selection");
+        app.browse_scroll(1);
+        assert_eq!(app.browse.gallery_selected, 7);
+
+        let mut tiny = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        tiny.draw(|frame| app.render(frame)).unwrap();
 
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);
     }
@@ -3884,6 +3990,77 @@ mod tests {
             crate::views::browse::first_compatible_index(&versions, Some("1.19"), Some("fabric")),
             0,
             "nothing matches: fall back to the newest build"
+        );
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn device_code_overlay_tracks_status_and_shows_errors() {
+        let mut app = App::new(temp_paths(), reqwest::Client::new()).await.unwrap();
+        let prompt = mc_core::auth::DeviceCodePrompt {
+            user_code: "ABCD-EFGH".into(),
+            device_code: "device".into(),
+            verification_uri: "https://www.microsoft.com/link".into(),
+            expires_in: 900,
+            interval: 5,
+            message: "To sign in, open the page and enter the code.".into(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        let prompt_reopen = || mc_core::auth::DeviceCodePrompt {
+            user_code: "IJKL-MNOP".into(),
+            device_code: "device".into(),
+            verification_uri: "https://www.microsoft.com/link".into(),
+            expires_in: 900,
+            interval: 5,
+            message: String::new(),
+        };
+
+        app.handle_engine_event(EngineEvent::DeviceCode(Box::new(prompt)));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("ABCD-EFGH"), "user code must be visible");
+        assert!(
+            text.contains(app.tr("dialog.ms_waiting")),
+            "waiting status must be visible"
+        );
+
+        app.handle_engine_event(EngineEvent::DeviceCodeWorking);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(
+            buffer_text(&terminal).contains(app.tr("dialog.ms_working")),
+            "status must flip once the browser step finishes"
+        );
+
+        app.handle_engine_event(EngineEvent::Error(
+            "Login failed: XSTS 2148916233".into(),
+        ));
+        assert!(
+            matches!(app.overlay, Some(Overlay::Message { .. })),
+            "a failed login must replace the waiting popup with a persistent error"
+        );
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("XSTS 2148916233"), "error text must stay visible");
+        assert!(text.contains(app.tr("dialog.ms_failed")));
+        assert!(text.contains(app.tr("dialog.close")));
+
+        app.overlay = None;
+        app.handle_engine_event(EngineEvent::DeviceCode(Box::new(prompt_reopen())));
+        app.handle_engine_event(EngineEvent::Error(
+            "Login failed: authentication error: Minecraft services login failed: { \"errorMessage\" : \"Invalid app registration, see https://aka.ms/AppRegInfo for more information\"}".into(),
+        ));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("aka.ms/mce-reviewappid"),
+            "unapproved client id must point at the Mojang review form"
+        );
+
+        app.handle_engine_event(EngineEvent::DeviceCode(Box::new(prompt_reopen())));
+        assert!(
+            matches!(app.overlay, Some(Overlay::DeviceCode { .. })),
+            "a later attempt must be able to reopen the prompt"
         );
 
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);

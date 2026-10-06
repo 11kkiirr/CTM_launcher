@@ -201,7 +201,14 @@ impl App {
                 self.crash_analysis = analysis;
             }
             EngineEvent::DeviceCode(prompt) => {
-                self.overlay = Some(Overlay::DeviceCode(prompt));
+                let status = self.tr("dialog.ms_waiting").to_string();
+                self.overlay = Some(Overlay::DeviceCode { prompt, status });
+            }
+            EngineEvent::DeviceCodeWorking => {
+                let status = self.tr("dialog.ms_working").to_string();
+                if let Some(Overlay::DeviceCode { status: slot, .. }) = &mut self.overlay {
+                    *slot = status;
+                }
             }
             EngineEvent::Authenticated(account) => {
                 self.overlay = None;
@@ -223,7 +230,17 @@ impl App {
                 self.java_installations = list;
             }
             EngineEvent::Toast(message) => self.set_toast(message, false),
-            EngineEvent::Error(message) => self.set_toast(message, true),
+            EngineEvent::Error(message) => {
+                if matches!(self.overlay, Some(Overlay::DeviceCode { .. })) {
+                    let mut lines = vec![message.clone()];
+                    if message.contains("Invalid app registration") {
+                        lines.push(String::new());
+                        lines.push(self.tr("dialog.ms_appreg").to_string());
+                    }
+                    self.overlay = Some(Overlay::message(self.tr("dialog.ms_failed"), lines));
+                }
+                self.set_toast(message, true);
+            }
             EngineEvent::ResourcePacks(items) => {
                 self.resource_packs = items;
                 let len = self.visible_rp_indices().len();

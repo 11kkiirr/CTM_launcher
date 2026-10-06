@@ -76,6 +76,8 @@ pub enum EngineEvent {
     Crash(Option<CrashAnalysis>),
     /// A device-code prompt is ready for display.
     DeviceCode(Box<DeviceCodePrompt>),
+    /// The user finished sign-in in the browser; the exchange is running.
+    DeviceCodeWorking,
     /// A Microsoft account completed authentication.
     Authenticated(Box<Account>),
     /// Java runtimes were discovered.
