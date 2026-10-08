@@ -202,7 +202,7 @@ Never block the draw loop on network/FS.
 - `DEFAULT_CLIENT_ID` is the owner's own Azure app: `d7ef1c45-36cd-4853-be00-7c9ca2565670` (public client, `/consumers/` tenant, scope `XboxLive.signin offline_access`). Azure portal requirements that must stay enabled: **Allow public client flows = Yes**, delegated permission **Xbox Live → XboxLive.signin**, supported account types must include personal Microsoft accounts. Override via `MicrosoftAuth::with_client_id` for forks.
 - Tokens live only in `accounts.json`, written `0600` via `util::harden_file_permissions` (also tightened on `AccountStore::load`). Never log tokens.
 - Offline auth in `auth/offline.rs`.
-- **Mojang allowlist:** `api.minecraftservices.com` only accepts client IDs on Mojang's allowlist. A correct registration still fails at `/authentication/login_with_xbox` with `403 Invalid app registration` (OAuth → Xbox → XSTS all succeed) until the ID is approved. Submit for review via `https://aka.ms/mce-reviewappid` (help article: `https://aka.ms/AppRegInfo` → `help.minecraft.net/hc/en-us/articles/16254801392141`); review reportedly takes weeks. While pending, the device-code popup turns into an error dialog that appends the `dialog.ms_appreg` hint — this is not a bug. Offline accounts keep working.
+- **Mojang allowlist:** `api.minecraftservices.com` only accepts client IDs on Mojang's allowlist. Client ID `d7ef1c45…` went through the official review form `https://aka.ms/mce-reviewappid` (help: `https://aka.ms/AppRegInfo`) and was **approved 2026-10-06** — Microsoft sign-in works end to end. If the `403 Invalid app registration` error ever comes back, the ID was dropped from the list: resubmit via the same form. The `dialog.ms_appreg` hint appended to that error dialog exists for exactly that case (do not delete it).
 
 ---
 
@@ -271,7 +271,6 @@ Never block the draw loop on network/FS.
   - English async toasts (only some paths are fully async-friendly).
   - Java runtime list is not scrollable when long.
   - MS refresh token is a plaintext `0600` file — no OS keyring integration.
-  - Microsoft login fails with `403 Invalid app registration` until Mojang approves client ID `d7ef1c45…` (`https://aka.ms/mce-reviewappid`), review pending.
   - README is still a stub.
 - Do not commit unless explicitly asked. Do not amend/force-push. Stage only intended files.
 

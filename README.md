@@ -93,7 +93,7 @@ Security and privacy properties:
 - The launcher performs **no telemetry, analytics, crash reporting or ad loading**, and contacts no third-party servers other than the official ones listed below.
 - You can delete your account from the launcher at any time; removing it deletes the stored tokens.
 
-> **Note:** Minecraft Services only accepts client IDs on Mojang's allowlist. CTMLauncher's client ID has been submitted for review through the official process (`https://aka.ms/mce-reviewappid`). Until that review completes, Microsoft sign-in ends with `403 Invalid app registration` on the final step — this is expected and independent of any local configuration. Offline accounts are unaffected.
+> **Note:** Minecraft Services only accepts client IDs on Mojang's allowlist. CTMLauncher's client ID went through Mojang's official review process (`https://aka.ms/mce-reviewappid`) and is approved — Microsoft sign-in works end to end.
 
 ## Network endpoints contacted
 
@@ -153,7 +153,6 @@ Built on **tokio**, **reqwest** (rustls), **ratatui/crossterm** and **serde**. T
 
 ## Roadmap / known limitations
 
-- Microsoft sign-in is pending Mojang's client-ID allowlist review (link above).
 - The interface is keyboard + mouse driven; touch/mobile terminals are out of scope.
 - OS keyring integration for stored refresh tokens is planned (currently `0600` file).
 
