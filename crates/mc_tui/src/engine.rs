@@ -26,6 +26,10 @@ pub enum EngineEvent {
     Started {
         command: String,
         version: String,
+        /// Display name of the launched instance (for toasts / presence).
+        instance: String,
+        /// Second presence line, e.g. `Fabric 1.21.1 · Pack Name`.
+        state: String,
         handle: Box<ProcessHandle>,
         logs: Box<LogReceiver>,
     },

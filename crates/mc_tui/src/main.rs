@@ -52,16 +52,35 @@ async fn main() -> Result<()> {
     // and its font size. The query briefly toggles raw mode off internally, so
     // re-enable it afterwards. Fall back to half-blocks when the query fails or
     // times out, so images still render on plain terminals.
-    app.picker = match ratatui_image::picker::Picker::from_query_stdio() {
-        Ok(picker) => picker,
-        Err(_) => ratatui_image::picker::Picker::halfblocks(),
+    let queried = match ratatui_image::picker::Picker::from_query_stdio() {
+        Ok(picker) => Some(picker),
+        Err(err) => {
+            if std::env::var_os("CTM_IMAGE_LOG").is_some() {
+                eprintln!("[images] capability query failed: {err}; falling back to half-blocks");
+            }
+            None
+        }
     };
+    let picker = queried.unwrap_or_else(ratatui_image::picker::Picker::halfblocks);
+    if std::env::var_os("CTM_IMAGE_LOG").is_some() {
+        eprintln!(
+            "[images] protocol={:?} font={:?} caps={:?} TERM={:?} kitty_env={} wezterm_env={}",
+            picker.protocol_type(),
+            picker.font_size(),
+            picker.capabilities(),
+            std::env::var("TERM").ok(),
+            std::env::var_os("KITTY_WINDOW_ID").is_some(),
+            std::env::var_os("WEZTERM_EXECUTABLE").is_some(),
+        );
+    }
+    app.picker = picker;
     enable_raw_mode()?;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let result = app.run(&mut terminal).await;
+    app.shutdown_presence();
 
     disable_raw_mode()?;
     execute!(

@@ -494,7 +494,7 @@ impl App {
                     );
                     if is_text_or_slider {
                         self.begin_settings_row_edit();
-                    } else if matches!((self.nav, idx), (Nav::Launcher, 4..=6) | (Nav::Jvm, 4)) {
+                    } else if matches!((self.nav, idx), (Nav::Launcher, 4..=6 | 9) | (Nav::Jvm, 4)) {
                         self.toggle_selected_bool_row();
                     }
                 }

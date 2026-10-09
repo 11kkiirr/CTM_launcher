@@ -15,6 +15,7 @@ pub mod launch;
 pub mod logs;
 pub mod modpack;
 pub mod modrinth;
+pub mod presence;
 pub mod skins;
 pub mod util;
 pub mod version;

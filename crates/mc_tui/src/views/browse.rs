@@ -691,6 +691,17 @@ fn marquee_offset(step: u64, max: usize) -> usize {
     }
 }
 
+/// Rows a `panel!` section actually gets after its top cap: the caller mirrors
+/// this to bound its own loops, because the macro body cannot see the height
+/// clamped inside the macro (macro hygiene).
+fn panel_fit(y: u16, bottom: u16, want: u16) -> Option<u16> {
+    if y >= bottom || want == 0 {
+        return None;
+    }
+    let h = want.min(bottom.saturating_sub(y.saturating_add(1)));
+    (h > 0).then_some(h)
+}
+
 /// Wrap `items` into chip rows (` item ` on a raised background).
 fn chip_lines(
     items: &[String],
@@ -1990,9 +2001,9 @@ impl App {
         macro_rules! panel {
             ($h:expr, $body:block) => {{
                 let want: u16 = $h;
-                if y >= bottom || want == 0 {
+                let Some(h) = panel_fit(y, bottom, want) else {
                     return;
-                }
+                };
                 let cap_style = Style::default()
                     .fg(self.theme.panel_alt)
                     .bg(self.theme.panel);
@@ -2010,10 +2021,6 @@ impl App {
                     },
                 );
                 y += 1;
-                let h = want.min(bottom.saturating_sub(y));
-                if h == 0 {
-                    return;
-                }
                 let rect = Rect {
                     x: card_x,
                     y,
@@ -2084,8 +2091,13 @@ impl App {
                 ]));
             }
         }
-        panel!(compat.len() as u16, {
+        let want = compat.len() as u16;
+        let h = panel_fit(y, bottom, want).unwrap_or(0);
+        panel!(want, {
             for (i, line) in compat.into_iter().enumerate() {
+                if i as u16 >= h {
+                    break;
+                }
                 frame.render_widget(
                     Paragraph::new(line).style(card_bg),
                     Rect {
@@ -2100,8 +2112,9 @@ impl App {
 
         let links = self.project_links(project);
         if !links.is_empty() {
-            let h = 1 + links.len() as u16;
-            panel!(h, {
+            let want = 1 + links.len() as u16;
+            let h = panel_fit(y, bottom, want).unwrap_or(0);
+            panel!(want, {
                 frame.render_widget(
                     Paragraph::new(Span::styled(
                         self.tr("browse.links"),
@@ -2117,6 +2130,9 @@ impl App {
                 );
                 for (idx, (label, url)) in links.iter().enumerate() {
                     let row_y = y + 1 + idx as u16;
+                    if row_y >= y + h {
+                        break;
+                    }
                     let chip = format!(" {label} ");
                     let chip_w = (chip.chars().count() as u16).min(cw);
                     let chip_rect = Rect {
@@ -2188,8 +2204,9 @@ impl App {
         tags.extend(project.additional_categories.clone());
         if !tags.is_empty() {
             let tag_lines = chip_lines(&tags, cw as usize, chip_bg, |_| chip_fg);
-            let h = 1 + tag_lines.len() as u16;
-            panel!(h, {
+            let want = 1 + tag_lines.len() as u16;
+            let h = panel_fit(y, bottom, want).unwrap_or(0);
+            panel!(want, {
                 frame.render_widget(
                     Paragraph::new(Span::styled(
                         self.tr("browse.tags"),
@@ -2204,6 +2221,9 @@ impl App {
                     },
                 );
                 for (i, line) in tag_lines.into_iter().enumerate() {
+                    if i as u16 + 1 >= h {
+                        break;
+                    }
                     frame.render_widget(
                         Paragraph::new(line).style(card_bg),
                         Rect {
@@ -2218,7 +2238,9 @@ impl App {
         }
         if let Some(license) = project.license.as_ref() {
             let name = truncate(&license.name, cw as usize);
-            panel!(2, {
+            let want = 2u16;
+            let h = panel_fit(y, bottom, want).unwrap_or(0);
+            panel!(want, {
                 frame.render_widget(
                     Paragraph::new(Span::styled(
                         self.tr("browse.license"),
@@ -2232,21 +2254,24 @@ impl App {
                         height: 1,
                     },
                 );
-                frame.render_widget(
-                    Paragraph::new(Span::styled(name, self.theme.dim())).style(card_bg),
-                    Rect {
-                        x: cx,
-                        y: y + 1,
-                        width: cw,
-                        height: 1,
-                    },
-                );
+                if h >= 2 {
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(name, self.theme.dim())).style(card_bg),
+                        Rect {
+                            x: cx,
+                            y: y + 1,
+                            width: cw,
+                            height: 1,
+                        },
+                    );
+                }
             });
         }
         if !self.browse.members.is_empty() {
             let members = self.browse.members.clone();
-            let h = 1 + 2 * members.len() as u16;
-            panel!(h, {
+            let want = 1 + 2 * members.len() as u16;
+            let h = panel_fit(y, bottom, want).unwrap_or(0);
+            panel!(want, {
                 frame.render_widget(
                     Paragraph::new(Span::styled(
                         self.tr("browse.creators"),
@@ -2262,6 +2287,9 @@ impl App {
                 );
                 for (i, member) in members.iter().enumerate() {
                     let my = y + 1 + 2 * i as u16;
+                    if my + 2 > y + h {
+                        break;
+                    }
                     let avatar = Rect {
                         x: cx,
                         y: my,
@@ -2903,11 +2931,15 @@ impl App {
             ..inner
         };
         if let Some(image) = project.gallery.get(sel) {
+            // The strip keeps the 350px CDN thumbnail; the big preview pulls
+            // the original upload lazily, one image at a time.
+            let full = image.full_url().to_string();
+            self.browse_fetch_image(&full);
             self.render_gallery_scaled(
                 frame,
                 preview,
-                &format!("preview::{}", image.url),
-                &image.url,
+                &format!("preview::{full}"),
+                &full,
                 &format!("#{}", sel + 1),
             );
         }

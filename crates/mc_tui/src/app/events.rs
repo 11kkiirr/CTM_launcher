@@ -33,6 +33,8 @@ impl App {
             EngineEvent::Started {
                 command,
                 version,
+                instance,
+                state,
                 handle,
                 logs,
             } => {
@@ -44,6 +46,9 @@ impl App {
                     logs: *logs,
                     version: version.clone(),
                     started: Instant::now(),
+                    started_unix: super::now_unix(),
+                    instance,
+                    state,
                 });
                 self.set_toast(crate::i18n::tr_string(self.lang(), "toast.launched").replace("{}", &version), false);
                 self.nav = Nav::Logs;

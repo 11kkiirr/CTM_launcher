@@ -29,6 +29,12 @@ use crate::wizard::BuildKind;
 /// The Azure application (client) id used for Microsoft device-code auth.
 pub const CLIENT_ID: &str = mc_core::auth::microsoft::DEFAULT_CLIENT_ID;
 
+/// Discord Application id for Rich Presence ("Playing CTMLauncher").
+///
+/// Register an application in the Discord Developer Portal and use its
+/// Application id here. Presence stays inert while the id is empty.
+pub const DISCORD_APP_ID: &str = "1557789779439915018";
+
 /// Height in rows of a chunky sidebar navigation block button.
 pub(crate) const NAV_BUTTON_HEIGHT: u16 = 3;
 
@@ -315,6 +321,12 @@ pub struct RunningProcess {
     pub logs: LogReceiver,
     pub version: String,
     pub started: Instant,
+    /// Unix time (seconds) when the process was started, for presence elapsed.
+    pub started_unix: u64,
+    /// Instance display name (for presence / toasts).
+    pub instance: String,
+    /// Second presence line, e.g. `Fabric 1.21.1 · Pack Name`.
+    pub state: String,
 }
 
 pub struct App {
@@ -445,6 +457,11 @@ pub struct App {
     pub stop_requested: bool,
     pub last_command: Option<String>,
 
+    /// Discord Rich Presence worker; `None` when the app id is not configured.
+    pub presence: Option<mc_core::presence::PresenceHandle>,
+    /// Last activity pushed to the presence worker (dedup).
+    pub presence_last: Option<mc_core::presence::PresenceActivity>,
+
     pub java_installations: Vec<JavaInstallation>,
     pub settings_field: usize,
     /// Inline settings editor: `(field_index, text_buffer)` while typing.
@@ -569,6 +586,12 @@ impl App {
             running: None,
             stop_requested: false,
             last_command: None,
+            presence: if DISCORD_APP_ID.is_empty() {
+                None
+            } else {
+                Some(mc_core::presence::spawn(DISCORD_APP_ID))
+            },
+            presence_last: None,
             java_installations: Vec::new(),
             settings_field: 0,
             settings_edit: None,
@@ -655,7 +678,73 @@ impl App {
         changed |= self.progress.is_some();
         changed |= self.browse_link_tick();
         changed |= self.running.is_some() && self.tick % 30 == 0;
+        self.sync_presence();
         changed
+    }
+
+    /// Current Discord presence activity, or `None` when it must be cleared.
+    pub(crate) fn presence_activity(&self) -> Option<mc_core::presence::PresenceActivity> {
+        match &self.running {
+            Some(running) => {
+                self.playing_presence(&running.instance, &running.state, running.started_unix)
+            }
+            None => {
+                if self.settings.discord_presence {
+                    // Discord handles are public; keep the idle line fixed in
+                    // English and drop the current-page state line.
+                    Some(mc_core::presence::PresenceActivity::new(
+                        "Idle in CTMLauncher",
+                        "",
+                    ))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Activity for a running instance: `Playing {instance}` + loader line.
+    pub(crate) fn playing_presence(
+        &self,
+        instance: &str,
+        state: &str,
+        started_unix: u64,
+    ) -> Option<mc_core::presence::PresenceActivity> {
+        if !self.settings.discord_presence {
+            return None;
+        }
+        let details = self.trs("presence.playing").replacen("{}", instance, 1);
+        Some(
+            mc_core::presence::PresenceActivity::new(details, state.to_string())
+                .started_at(started_unix),
+        )
+    }
+
+    /// Push the current activity to the presence worker (deduplicated).
+    pub(crate) fn sync_presence(&mut self) {
+        let Some(handle) = self.presence.as_ref() else {
+            return;
+        };
+        match self.presence_activity() {
+            Some(activity) => {
+                if self.presence_last.as_ref() != Some(&activity) {
+                    self.presence_last = Some(activity.clone());
+                    handle.set(activity);
+                }
+            }
+            None => {
+                if self.presence_last.take().is_some() {
+                    handle.clear();
+                }
+            }
+        }
+    }
+
+    /// Tell the presence worker to clear the activity and exit.
+    pub(crate) fn shutdown_presence(&mut self) {
+        if let Some(handle) = self.presence.take() {
+            handle.shutdown();
+        }
     }
 
     fn animate_scrolls(&mut self) -> bool {
@@ -793,8 +882,16 @@ pub(crate) fn split_args(input: &str) -> Vec<String> {
 pub(crate) fn settings_field_count(nav: Nav) -> usize {
     match nav {
         Nav::Jvm => 7,
-        _ => 9,
+        _ => 10,
     }
+}
+
+/// Current unix time in whole seconds (for presence timestamps).
+pub(crate) fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl App {
@@ -1007,6 +1104,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn presence_activity_idle_game_and_toggle() {
+        let mut app = App::new(temp_paths(), reqwest::Client::new()).await.unwrap();
+        app.toast = None;
+
+        let idle = app.presence_activity().expect("on by default");
+        assert_eq!(idle.details, "Idle in CTMLauncher");
+        assert!(idle.state.is_empty());
+        assert!(idle.started_unix.is_none());
+
+        app.nav = Nav::Browse;
+        let idle = app.presence_activity().unwrap();
+        assert_eq!(idle.details, "Idle in CTMLauncher");
+        assert!(idle.state.is_empty());
+
+        let playing = app
+            .playing_presence("My Pack", "Fabric 1.21.1 · FO", 1_700_000_000)
+            .unwrap();
+        assert_eq!(playing.details, "Playing My Pack");
+        assert_eq!(playing.state, "Fabric 1.21.1 · FO");
+        assert_eq!(playing.started_unix, Some(1_700_000_000));
+
+        app.settings.discord_presence = false;
+        assert!(app.presence_activity().is_none());
+        assert!(app.playing_presence("x", "y", 0).is_none());
+        app.settings.discord_presence = true;
+
+        // Empty DISCORD_APP_ID means no worker; sync must stay a quiet no-op.
+        app.presence = None;
+        app.sync_presence();
+        app.sync_presence();
+        assert!(!app.on_tick());
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn settings_screen_shows_discord_presence_row() {
+        let mut app = App::new(temp_paths(), reqwest::Client::new()).await.unwrap();
+        app.nav = Nav::Launcher;
+        app.settings_field = 9;
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("Discord Presence"),
+            "interface section must list the new toggle"
+        );
+
+        app.toggle_setting(9);
+        assert!(!app.settings.discord_presence);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
     async fn sidebar_power_button_launches_when_idle() {
         let mut app = App::new(temp_paths(), reqwest::Client::new()).await.unwrap();
         app.instance_manager
@@ -1172,11 +1325,13 @@ mod tests {
             gallery: vec![
                 mc_core::modrinth::GalleryImage {
                     url: "https://img.modrinth.com/g1.png".into(),
+                    raw_url: None,
                     description: None,
                     featured: true,
                 },
                 mc_core::modrinth::GalleryImage {
                     url: "https://img.modrinth.com/g2.png".into(),
+                    raw_url: None,
                     description: None,
                     featured: false,
                 },
@@ -1332,6 +1487,7 @@ mod tests {
             gallery: (0..8)
                 .map(|i| mc_core::modrinth::GalleryImage {
                     url: format!("https://img.modrinth.com/big{i}.png"),
+                    raw_url: None,
                     description: None,
                     featured: false,
                 })
@@ -4063,6 +4219,107 @@ mod tests {
             "a later attempt must be able to reopen the prompt"
         );
 
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn detail_sidebar_clamps_creators_panel() {
+        let mut app = App::new(temp_paths(), reqwest::Client::new()).await.unwrap();
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+        app.nav = Nav::Browse;
+        app.browse.detail = Some(Project {
+            id: "p1".into(),
+            slug: "demo".into(),
+            title: "Demo".into(),
+            description: "Short summary".into(),
+            body: "Hello".into(),
+            project_type: "mod".into(),
+            categories: Vec::new(),
+            additional_categories: Vec::new(),
+            client_side: String::new(),
+            server_side: String::new(),
+            downloads: 1,
+            followers: 0,
+            icon_url: None,
+            color: None,
+            issues_url: None,
+            source_url: None,
+            wiki_url: None,
+            discord_url: None,
+            game_versions: Vec::new(),
+            loaders: Vec::new(),
+            versions: Vec::new(),
+            published: String::new(),
+            updated: String::new(),
+            license: None,
+            gallery: Vec::new(),
+        });
+        app.browse.members = (0..6)
+            .map(|i| mc_core::modrinth::Member {
+                role: "Member".into(),
+                user: mc_core::modrinth::MemberUser {
+                    username: format!("user{i}"),
+                    avatar_url: Some(format!("https://example.com/a{i}.png")),
+                },
+            })
+            .collect();
+        // 100x20: the sidebar fits only 4 of the 6 two-row member blocks; the
+        // unclamped loop used to draw the 6th avatar at y == 20 → buffer panic.
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("user0"), "first member must render");
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn detail_renders_lone_pipe_body() {
+        let mut app = App::new(temp_paths(), reqwest::Client::new()).await.unwrap();
+        app.instance_manager
+            .create("Demo", "1.21.1", LoaderType::Fabric, Some("0.15.7".into()))
+            .await
+            .unwrap();
+        app.reload_instances();
+        app.select_instance(0);
+        app.nav = Nav::Browse;
+        let body = "[CurseForge](https://legacy.curseforge.com/minecraft/mc-mods/simple-voice-chat)\n|\n[Discord](https://discord.gg/4dH2zwTmyX)"
+            .to_string();
+        app.browse.detail = Some(Project {
+            id: "p1".into(),
+            slug: "simple-voice-chat".into(),
+            title: "Simple Voice Chat".into(),
+            description: "Short summary".into(),
+            body,
+            project_type: "mod".into(),
+            categories: Vec::new(),
+            additional_categories: Vec::new(),
+            client_side: String::new(),
+            server_side: String::new(),
+            downloads: 1,
+            followers: 0,
+            icon_url: None,
+            color: None,
+            issues_url: None,
+            source_url: None,
+            wiki_url: None,
+            discord_url: None,
+            game_versions: Vec::new(),
+            loaders: Vec::new(),
+            versions: Vec::new(),
+            published: String::new(),
+            updated: String::new(),
+            license: None,
+            gallery: Vec::new(),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("CurseForge"), "body must render");
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);
     }
 }

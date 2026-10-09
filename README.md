@@ -69,6 +69,10 @@ CTMLauncher runs entirely inside your terminal: create and organize instances, i
 - **Offline accounts** for local/offline play.
 - Account store is a local JSON file written with `0600` permissions.
 
+### Discord Rich Presence
+- Optional: advertise "Playing `<instance>`" (with loader and pack name) or idle status in Discord.
+- Enabled by default via the app's registered Discord Application id; can be toggled in Launcher Settings.
+
 ### Terminal-first UX
 - Borderless, flat, dark card design with a single accent colour — no box-drawing chrome.
 - **Full mouse support**: every actionable region is clickable (buttons, rows, sliders, tabs).

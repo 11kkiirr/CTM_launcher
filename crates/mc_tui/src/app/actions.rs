@@ -734,6 +734,8 @@ pub(crate) fn launch_selected(&mut self) {
     let paths = self.paths.clone();
     let tx = self.engine_tx.clone();
     let progress = self.progress_callback();
+    let presence_instance = instance.name().to_string();
+    let presence_state = mc_core::presence::instance_state(&instance.metadata);
     self.progress = Some((None, format!("Preparing {}", instance.name())));
 
     tokio::spawn(async move {
@@ -800,6 +802,8 @@ pub(crate) fn launch_selected(&mut self) {
                 let _ = tx.send(EngineEvent::Started {
                     command: plan.display(),
                     version: version_id,
+                    instance: presence_instance,
+                    state: presence_state,
                     handle: Box::new(handle),
                     logs: Box::new(logs),
                 });
@@ -1457,7 +1461,7 @@ pub(crate) fn browse_fetch_image(&mut self, url: &str) {
     let modrinth = self.modrinth.clone();
     let tx = self.engine_tx.clone();
     tokio::spawn(async move {
-        let data = modrinth.get_image_bytes(&key, 6 * 1024 * 1024).await.ok();
+        let data = modrinth.get_image_bytes(&key, 16 * 1024 * 1024).await.ok();
         let _ = tx.send(EngineEvent::BrowseImage {
             url: key,
             data,
@@ -2444,7 +2448,8 @@ pub(crate) fn open_settings_form(&mut self) {
         .push_bool(tr("settings.confirm_quit"), s.confirm_quit)
         .push_bool(tr("settings.auto_scroll"), s.log_auto_scroll)
         .push_choice(tr("settings.ascii_anchor"), anchor_options, anchor_index)
-        .push_choice(tr("settings.language"), lang_options, lang_index);
+        .push_choice(tr("settings.language"), lang_options, lang_index)
+        .push_bool(tr("settings.discord_presence"), s.discord_presence);
     self.overlay = Some(Overlay::Form(form));
 }
 
@@ -2452,7 +2457,7 @@ pub(crate) fn apply_launcher_settings_form(&mut self, form: &Form) {
     use crate::settings::AsciiBgAnchor;
     // Field order must match `open_settings_form`.
     let f = &form.fields;
-    if f.len() >= 9 {
+    if f.len() >= 10 {
         let path = f[0].value.trim();
         self.settings.java_path = if path.is_empty() {
             None
@@ -2484,6 +2489,9 @@ pub(crate) fn apply_launcher_settings_form(&mut self, form: &Form) {
         if let Some(l) = Lang::from_native_label(&f[8].value) {
             self.settings.language = l;
         }
+        if let crate::forms::FieldKind::Bool(v) = f[9].kind {
+            self.settings.discord_presence = v;
+        }
     }
     self.save_settings_async();
     self.set_toast(self.tr("toast.settings_saved"), false);
@@ -2495,6 +2503,7 @@ pub(crate) fn toggle_setting(&mut self, field: usize) {
         4 => self.settings.show_progress = !self.settings.show_progress,
         5 => self.settings.confirm_quit = !self.settings.confirm_quit,
         6 => self.settings.log_auto_scroll = !self.settings.log_auto_scroll,
+        9 => self.settings.discord_presence = !self.settings.discord_presence,
         _ => return,
     }
     self.save_settings_async();

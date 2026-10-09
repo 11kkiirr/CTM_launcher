@@ -189,11 +189,23 @@ fn push_patch_run(out: &mut Vec<String>, major: u64, minor: u64, start: u64, end
 /// A screenshot/preview attached to a project.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GalleryImage {
+    /// 350px CDN thumbnail — fine for the strip, too small for the preview.
     pub url: String,
+    /// Original full-resolution upload; prefer it for the large preview.
+    /// Falls back to [`Self::url`] when the API omits it.
+    #[serde(default)]
+    pub raw_url: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
     pub featured: bool,
+}
+
+impl GalleryImage {
+    /// Best URL for a full-size render: the original upload when present.
+    pub fn full_url(&self) -> &str {
+        self.raw_url.as_deref().unwrap_or(&self.url)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -364,5 +376,16 @@ mod tests {
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].role, "Owner");
         assert_eq!(members[0].user.username, "jellysquid3");
+    }
+
+    #[test]
+    fn gallery_prefers_raw_url_for_full_size() {
+        let raw = r#"{"url":"https://cdn.modrinth.com/data/x/images/h_350.webp","raw_url":"https://cdn.modrinth.com/data/x/images/h.png","description":"d","featured":true}"#;
+        let img: GalleryImage = serde_json::from_str(raw).unwrap();
+        assert_eq!(img.full_url(), "https://cdn.modrinth.com/data/x/images/h.png");
+
+        let bare = r#"{"url":"https://cdn.modrinth.com/data/x/images/h_350.webp"}"#;
+        let img: GalleryImage = serde_json::from_str(bare).unwrap();
+        assert_eq!(img.full_url(), img.url);
     }
 }

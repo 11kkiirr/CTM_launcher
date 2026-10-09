@@ -361,6 +361,10 @@ pub fn render_md_full(text: &str, width: usize, theme: &Theme) -> MdFull {
             para.push(t.to_string());
             j += 1;
         }
+        if j == i {
+            para.push(lines[i].trim().to_string());
+            j = i + 1;
+        }
         if prev_blank {
             out.push(Line::default());
         }
@@ -1657,6 +1661,21 @@ mod tests {
         assert_eq!(l.url, "https://c.e/x");
         let text = plain(&lines);
         assert_eq!(text[0], "see docs now");
+    }
+
+    #[test]
+    fn lone_pipe_line_renders_without_hanging() {
+        let (lines, _images, links, _, _) = render_md_full(
+            "[CurseForge](https://c.e/cf)\n|\n[Discord](https://c.e/dc)",
+            80,
+            &theme(),
+        );
+        assert_eq!(links.len(), 2, "both links must survive");
+        let text = plain(&lines);
+        assert!(
+            text.iter().any(|l| l.trim() == "|"),
+            "lone pipe line renders as text: {text:?}"
+        );
     }
 
     #[test]

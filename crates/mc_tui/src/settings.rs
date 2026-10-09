@@ -81,6 +81,9 @@ pub struct LauncherSettings {
     /// UI language.
     #[serde(default)]
     pub language: Lang,
+    /// Whether Discord Rich Presence is advertised while the launcher runs.
+    #[serde(default = "default_true")]
+    pub discord_presence: bool,
 }
 
 fn default_min_memory() -> u32 {
@@ -105,6 +108,7 @@ impl Default for LauncherSettings {
             log_auto_scroll: true,
             ascii_bg_anchor: AsciiBgAnchor::BottomRight,
             language: Lang::default(),
+            discord_presence: default_true(),
         }
     }
 }

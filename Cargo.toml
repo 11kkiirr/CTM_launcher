@@ -42,6 +42,9 @@ flate2 = "1"
 # Paths
 directories = "5"
 
+# Discord Rich Presence (local IPC)
+discord-rich-presence = "1.1"
+
 # Utilities
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 sha1 = "0.10"

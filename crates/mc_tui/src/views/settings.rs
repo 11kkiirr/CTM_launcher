@@ -16,12 +16,13 @@ use crate::views::settings_ui::{
 };
 use crate::views::{buttons_row, truncate};
 
-const FIELD_COUNT: usize = 9;
+const FIELD_COUNT: usize = 10;
 
 type SectionFields = Vec<(usize, FieldKind, &'static str)>;
 
 /// Launcher settings grouped into two panels.
-/// Field indices: 0 path · 1 min · 2 max · 3 gc · 4–6 bools · 7 anchor · 8 lang.
+/// Field indices: 0 path · 1 min · 2 max · 3 gc · 4–6 bools · 7 anchor ·
+/// 8 lang · 9 discord presence.
 #[allow(clippy::type_complexity)]
 fn launcher_sections() -> Vec<(&'static str, SectionFields)> {
     vec![
@@ -42,6 +43,7 @@ fn launcher_sections() -> Vec<(&'static str, SectionFields)> {
                 (6, FieldKind::Bool, "settings.auto_scroll"),
                 (7, FieldKind::Choice, "settings.ascii_anchor"),
                 (8, FieldKind::Choice, "settings.language"),
+                (9, FieldKind::Bool, "settings.discord_presence"),
             ],
         ),
     ]
@@ -142,6 +144,11 @@ impl App {
             },
             s.ascii_bg_anchor.label_lang(lang),
             s.language.native_label().to_string(),
+            if s.discord_presence {
+                crate::i18n::tr_string(lang, "common.yes")
+            } else {
+                crate::i18n::tr_string(lang, "common.no")
+            },
         ];
 
         // ── Measure ──
@@ -688,7 +695,7 @@ impl App {
             KeyCode::Enter => match self.settings_field {
                 0..=2 => self.begin_settings_edit(),
                 3 | 7 | 8 => self.settings_open_dropdown(),
-                4..=6 => self.toggle_setting(self.settings_field),
+                4..=6 | 9 => self.toggle_setting(self.settings_field),
                 _ => {}
             },
             KeyCode::Char(' ') => self.toggle_setting(self.settings_field),
