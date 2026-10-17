@@ -6,8 +6,10 @@
 pub mod detect;
 pub mod modrinth_app;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+#[cfg(not(unix))]
+use crate::error::CoreError;
 use crate::instance::{InstanceManager, LoaderType};
 use crate::util::Paths;
 use crate::Result;
@@ -86,11 +88,7 @@ pub async fn import_external(
         tokio::fs::remove_dir_all(&game_dir).await?;
     }
 
-    // Create symlink: .minecraft/ -> source directory.
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&external.source_path, &game_dir)?;
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&external.source_path, &game_dir)?;
+    let linked = link_game_dir(&external.source_path, &game_dir).await?;
 
     // Copy icon if present.
     if let Some(icon) = &external.icon_path {
@@ -102,7 +100,7 @@ pub async fn import_external(
 
     // Record provenance + linked source.
     let mut metadata = instance.metadata.clone();
-    metadata.linked_source = Some(external.source_path.clone());
+    metadata.linked_source = linked.then(|| external.source_path.clone());
     metadata.modpack = Some(crate::instance::ModpackOrigin {
         name: format!("{} import", external.launcher.label()),
         version: None,
@@ -112,4 +110,85 @@ pub async fn import_external(
     updated.save().await?;
 
     Ok(instance)
+}
+
+async fn link_game_dir(source: &Path, target: &Path) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(source, target)?;
+        Ok(true)
+    }
+
+    #[cfg(windows)]
+    {
+        if std::os::windows::fs::symlink_dir(source, target).is_ok() {
+            Ok(true)
+        } else {
+            copy_game_dir(source, target).await?;
+            Ok(false)
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        copy_game_dir(source, target).await?;
+        Ok(false)
+    }
+}
+
+#[cfg(not(unix))]
+async fn copy_game_dir(source: &Path, target: &Path) -> Result<()> {
+    let source = source.to_path_buf();
+    let target = target.to_path_buf();
+    tokio::task::spawn_blocking(move || copy_game_dir_sync(&source, &target))
+        .await
+        .map_err(|err| CoreError::Instance(format!("external import worker failed: {err}")))??;
+    Ok(())
+}
+
+#[cfg(any(not(unix), test))]
+fn copy_game_dir_sync(source: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(target)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_game_dir_sync(&source_path, &target_path)?;
+        } else {
+            std::fs::copy(source_path, target_path)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::copy_game_dir_sync;
+
+    #[test]
+    fn copy_game_dir_preserves_nested_content() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("ctm-import-copy-{nonce}"));
+        let source = root.join("source");
+        let target = root.join("target");
+        std::fs::create_dir_all(source.join("nested")).unwrap();
+        std::fs::write(source.join("options.txt"), "options").unwrap();
+        std::fs::write(source.join("nested/mod.jar"), "mod").unwrap();
+
+        copy_game_dir_sync(&source, &target).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("options.txt")).unwrap(),
+            "options"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("nested/mod.jar")).unwrap(),
+            "mod"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

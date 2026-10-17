@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=CTMLauncher
+GenericName=Minecraft Launcher
+Comment=Terminal Minecraft launcher
+Exec=ctmlauncher
+Icon=ctmlauncher
+Terminal=true
+Categories=Game;
+Keywords=Minecraft;Modrinth;Prism;Java;
+StartupNotify=true

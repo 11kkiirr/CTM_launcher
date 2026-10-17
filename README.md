@@ -139,6 +139,24 @@ cargo test  -p mc_core -p mc_tui  # unit + UI render tests
 cargo clippy -p mc_tui            # lint
 ```
 
+### Run from the desktop
+
+CTMLauncher is a terminal application, so a desktop launch opens it in a terminal window while keeping the normal full-screen TUI experience.
+
+**Linux:** download the `ctmlauncher-*-linux-x86_64.tar.gz` release, extract it and run `./install.sh` from the extracted folder. It installs the binary in `~/.local/bin`, the desktop entry in the XDG application menu and the application icon. You can then start **CTMLauncher** from the desktop environment just like any other application.
+
+**Windows:** download and extract `ctmlauncher-*-windows-x86_64.zip`, then run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-shortcut.ps1
+```
+
+The script creates CTMLauncher shortcuts on the desktop and in the Start menu. The shortcut points directly to `ctmlauncher.exe`; do not move or delete the extracted folder afterwards.
+
+### Publishing a release
+
+Pushing a version tag such as `v0.1.0` runs the release workflow. It tests and builds native Linux and Windows binaries, packages the desktop integration files above, and creates a GitHub Release with both archives.
+
 ---
 
 ## Architecture

@@ -12,7 +12,7 @@ use crate::app::App;
 /// Dark page-bg gutter on the left of every settings panel.
 pub(crate) const SIDE_PAD: u16 = 2;
 /// Dark page-bg rows between section panels.
-pub(crate) const PANEL_GAP: u16 = 0;
+pub(crate) const PANEL_GAP: u16 = 1;
 /// Fixed label column width (cells) so values always start on the same column.
 pub(crate) const LABEL_W: u16 = 22;
 /// Gap between the label cell and the value/track column.
@@ -36,31 +36,44 @@ pub(crate) enum FieldKind {
     Bool,
 }
 
-/// Detect total system RAM in MB (Linux `/proc/meminfo`, else fallback).
+/// Detect total system RAM in MB, reserving a small amount for the OS.
 pub(crate) fn system_ram_mb() -> u32 {
     static CACHED: OnceLock<u32> = OnceLock::new();
-        *CACHED.get_or_init(|| {
-        let mut mb = 0u32;
-        if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
-            for line in text.lines() {
-                if let Some(rest) = line.strip_prefix("MemTotal:") {
-                    if let Some(kb) = rest.split_whitespace().next() {
-                        if let Ok(v) = kb.parse::<u64>() {
-                            mb = (v / 1024) as u32;
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-        if mb < 1024 {
-            mb = 8192;
-        }
-        // Leave a little headroom for OS + launcher itself.
+    *CACHED.get_or_init(|| {
+        let mb = detected_system_ram_mb().filter(|mb| *mb >= 1024).unwrap_or(8192);
         let usable = mb.saturating_sub(512);
-        // Snap down to 1024 grid.
         ((usable / RAM_STEP) * RAM_STEP).max(RAM_MIN + RAM_STEP)
     })
+}
+
+#[cfg(target_os = "linux")]
+fn detected_system_ram_mb() -> Option<u32> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kb = text
+        .lines()
+        .find_map(|line| line.strip_prefix("MemTotal:"))?
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()?;
+    u32::try_from(kb / 1024).ok()
+}
+
+#[cfg(windows)]
+fn detected_system_ram_mb() -> Option<u32> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    let mut status = MEMORYSTATUSEX::default();
+    status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+        return None;
+    }
+    u32::try_from(status.ullTotalPhys / 1024 / 1024).ok()
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn detected_system_ram_mb() -> Option<u32> {
+    None
 }
 
 /// Effective slider ceiling: never above real RAM (with a small reserve).
@@ -533,5 +546,11 @@ mod tests {
         assert_eq!(format_scale_mb(512), "512");
         assert_eq!(format_scale_mb(1024), "1");
         assert_eq!(format_scale_mb(15360), "15");
+    }
+
+    #[test]
+    fn settings_panels_keep_symmetric_gutters_and_a_gap() {
+        assert_eq!(SIDE_PAD, 2);
+        assert_eq!(PANEL_GAP, 1);
     }
 }

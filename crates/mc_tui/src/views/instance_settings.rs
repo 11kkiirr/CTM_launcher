@@ -117,7 +117,7 @@ impl App {
         }
 
         let panel_x = body.x + SIDE_PAD;
-        let panel_w = body.width.saturating_sub(SIDE_PAD);
+        let panel_w = body.width.saturating_sub(SIDE_PAD * 2);
         if panel_w < 8 {
             return;
         }

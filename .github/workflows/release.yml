@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: |
+          value=$(awk '/^\[workspace.package\]/{found=1; next} found && /^version = / {gsub(/"/, "", $3); print $3; exit}' Cargo.toml)
+          test -n "$value"
+          if [ "${GITHUB_REF_TYPE:-}" = tag ] && [ "v$value" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match workspace version $value" >&2
+            exit 1
+          fi
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            id: linux-x86_64
+            executable: ctmlauncher
+            extension: tar.gz
+          - os: windows-latest
+            id: windows-x86_64
+            executable: ctmlauncher.exe
+            extension: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -q -p mc_core -p mc_tui
+      - run: cargo build -q --release -p mc_tui
+      - name: Package Linux archive
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bundle="ctmlauncher-${{ needs.metadata.outputs.version }}-${{ matrix.id }}"
+          mkdir -p "dist/$bundle"
+          cp "target/release/${{ matrix.executable }}" "dist/$bundle/ctmlauncher"
+          cp packaging/linux/ctmlauncher.desktop packaging/linux/install.sh assets/ctmlauncher.svg "dist/$bundle"
+          chmod +x "dist/$bundle/ctmlauncher" "dist/$bundle/install.sh"
+          tar -czf "dist/$bundle.${{ matrix.extension }}" -C dist "$bundle"
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bundle = "ctmlauncher-${{ needs.metadata.outputs.version }}-${{ matrix.id }}"
+          New-Item -ItemType Directory -Force -Path "dist/$bundle" | Out-Null
+          Copy-Item "target/release/${{ matrix.executable }}" "dist/$bundle/ctmlauncher.exe"
+          Copy-Item packaging/windows/install-shortcut.ps1 "dist/$bundle"
+          Compress-Archive -Path "dist/$bundle" -DestinationPath "dist/$bundle.${{ matrix.extension }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ctmlauncher-${{ matrix.id }}
+          path: dist/*.${{ matrix.extension }}
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [metadata, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release/*

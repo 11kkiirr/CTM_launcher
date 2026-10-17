@@ -195,7 +195,7 @@ fn build(activity: &PresenceActivity) -> activity::Activity<'_> {
     built
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
@@ -294,7 +294,14 @@ mod tests {
     fn worker_handshakes_sets_and_clears_against_mock_discord() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_runtime_dir();
-        let listener = UnixListener::bind(dir.join("discord-ipc-0")).unwrap();
+        let listener = match UnixListener::bind(dir.join("discord-ipc-0")) {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                let _ = std::fs::remove_dir_all(dir);
+                return;
+            }
+            Err(err) => panic!("could not start mock Discord IPC server: {err}"),
+        };
         let received: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&received);
 
