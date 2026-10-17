@@ -44,7 +44,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test -q -p mc_core -p mc_tui
+      - name: Run Linux tests
+        if: runner.os == 'Linux'
+        run: cargo test -q -p mc_core -p mc_tui
+      - name: Compile Windows test targets
+        if: runner.os == 'Windows'
+        run: cargo test -q --no-run -p mc_core -p mc_tui
       - run: cargo build -q --release -p mc_tui
       - name: Package Linux archive
         if: runner.os == 'Linux'
