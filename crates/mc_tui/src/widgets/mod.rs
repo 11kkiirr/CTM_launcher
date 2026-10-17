@@ -1,6 +1,7 @@
 //! Reusable, mouse-aware widgets.
 
 pub mod button;
+pub mod loading;
 pub mod popup;
 pub mod progress;
 

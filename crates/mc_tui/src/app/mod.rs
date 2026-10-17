@@ -450,6 +450,9 @@ pub struct App {
     pub local_images: HashMap<String, mc_core::img::RgbaImage>,
     pub local_protocols: HashMap<String, ratatui_image::protocol::StatefulProtocol>,
     pub local_image_requested: HashSet<String>,
+    /// Keys (URLs/paths) with an in-flight fetch or decode. Non-empty keeps
+    /// the loading placeholder animation ticking.
+    pub image_loading: HashSet<String>,
 
     pub crash_analysis: Option<CrashAnalysis>,
 
@@ -582,6 +585,7 @@ impl App {
             local_images: HashMap::new(),
             local_protocols: HashMap::new(),
             local_image_requested: HashSet::new(),
+            image_loading: HashSet::new(),
             crash_analysis: None,
             running: None,
             stop_requested: false,
@@ -676,6 +680,7 @@ impl App {
             }
         }
         changed |= self.progress.is_some();
+        changed |= !self.image_loading.is_empty();
         changed |= self.browse_link_tick();
         changed |= self.running.is_some() && self.tick % 30 == 0;
         self.sync_presence();
@@ -4274,6 +4279,49 @@ mod tests {
         terminal.draw(|frame| app.render(frame)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("user0"), "first member must render");
+        let _ = std::fs::remove_dir_all(&app.paths.data_dir);
+    }
+
+    #[tokio::test]
+    async fn browse_image_event_semantics() {
+        let mut app = App::new(temp_paths(), reqwest::Client::new()).await.unwrap();
+
+        app.browse.image_requested.insert("https://x/net.png".into());
+        app.handle_engine_event(EngineEvent::BrowseImage {
+            url: "https://x/net.png".into(),
+            image: None,
+            fetched: false,
+        });
+        assert!(
+            !app.browse.image_requested.contains("https://x/net.png"),
+            "network failure must allow a retry"
+        );
+
+        app.browse.image_requested.insert("https://x/bad.png".into());
+        app.handle_engine_event(EngineEvent::BrowseImage {
+            url: "https://x/bad.png".into(),
+            image: None,
+            fetched: true,
+        });
+        assert!(
+            app.browse.image_requested.contains("https://x/bad.png"),
+            "undecodable bytes must not be re-fetched forever"
+        );
+        assert!(app.browse_images.get("https://x/bad.png").is_none());
+
+        app.browse.body_dirty = false;
+        app.handle_engine_event(EngineEvent::BrowseImage {
+            url: "https://x/ok.png".into(),
+            image: Some(mc_core::img::RgbaImage {
+                width: 4,
+                height: 4,
+                pixels: vec![0u8; 64],
+            }),
+            fetched: true,
+        });
+        assert!(app.browse_images.contains_key("https://x/ok.png"));
+        assert!(app.browse.body_dirty, "a loaded image re-expands the body");
+
         let _ = std::fs::remove_dir_all(&app.paths.data_dir);
     }
 

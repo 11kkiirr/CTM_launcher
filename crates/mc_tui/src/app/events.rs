@@ -127,23 +127,15 @@ impl App {
                 self.browse_protocols.clear();
                 self.browse_fetch_images();
             }
-            EngineEvent::BrowseImage { url, data } => {
-                let mut loaded = false;
-                match &data {
-                    Some(bytes) => {
-                        if let Some(img) = crate::images::decode_rgba(bytes) {
-                            self.browse_images.insert(url.clone(), img);
-                            loaded = true;
-                        }
-                    }
-                    None => {
-                        // Network failure: forget the attempt so a later
-                        // re-expand retries instead of pinning the placeholder.
-                        self.browse.image_requested.remove(&url);
-                    }
-                }
-                if loaded {
+            EngineEvent::BrowseImage { url, image, fetched } => {
+                self.image_loading.remove(&url);
+                if let Some(img) = image {
+                    self.browse_images.insert(url, img);
                     self.browse.body_dirty = true;
+                } else if !fetched {
+                    // Network failure: forget the attempt so a later
+                    // re-expand retries instead of pinning the placeholder.
+                    self.browse.image_requested.remove(&url);
                 }
             }
             EngineEvent::VersionList { target, versions } => {
@@ -273,6 +265,7 @@ impl App {
                 _ => {}
             },
             EngineEvent::LocalImage { path, img } => {
+                self.image_loading.remove(&path);
                 if let Some(img) = img {
                     self.local_image_requested.remove(&path);
                     self.local_images.insert(path, img);

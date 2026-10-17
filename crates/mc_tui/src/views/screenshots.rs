@@ -174,8 +174,10 @@ impl App {
                         );
                     }
                 }
+            } else if self.image_loading.contains(&path_str) {
+                crate::widgets::loading::skeleton(frame, img_area, bg, &self.theme, self.tick);
             } else {
-                // Placeholder while loading.
+                // Missing or undecodable file.
                 let loading_style = if selected {
                     self.theme.accent()
                 } else {

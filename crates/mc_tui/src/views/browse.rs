@@ -1680,8 +1680,12 @@ impl App {
             return;
         }
 
-        // Colour swatch when no image loaded yet.
-        self.render_card_icon_fallback(frame, area, color);
+        if self.image_loading.contains(url.as_str()) {
+            crate::widgets::loading::spinner(frame, area, bg, &self.theme, self.tick);
+        } else {
+            // Colour swatch when no image is available.
+            self.render_card_icon_fallback(frame, area, color);
+        }
     }
 
     fn render_card_icon_fallback(
@@ -2941,6 +2945,7 @@ impl App {
                 &format!("preview::{full}"),
                 &full,
                 &format!("#{}", sel + 1),
+                false,
             );
         }
         if caption_h > 0 {
@@ -3016,6 +3021,7 @@ impl App {
                 &format!("thumb::{}", image.url),
                 &image.url,
                 &format!("#{}", gi + 1),
+                true,
             );
             self.push_hitbox(cell, HitAction::BrowseGallery(gi));
         }
@@ -3028,6 +3034,7 @@ impl App {
         key: &str,
         url: &str,
         fallback: &str,
+        shimmer: bool,
     ) {
         if area.width == 0 || area.height == 0 {
             return;
@@ -3050,6 +3057,26 @@ impl App {
                     }
                 }
             }
+        }
+        if self.image_loading.contains(url) {
+            if shimmer {
+                crate::widgets::loading::skeleton(
+                    frame,
+                    area,
+                    self.theme.panel,
+                    &self.theme,
+                    self.tick,
+                );
+            } else {
+                crate::widgets::loading::spinner(
+                    frame,
+                    area,
+                    self.theme.panel,
+                    &self.theme,
+                    self.tick,
+                );
+            }
+            return;
         }
         frame.render_widget(
             Paragraph::new(Span::styled(
@@ -3075,6 +3102,16 @@ impl App {
                 );
                 return;
             }
+        }
+        if self.image_loading.contains(url) {
+            crate::widgets::loading::spinner(
+                frame,
+                area,
+                self.theme.panel,
+                &self.theme,
+                self.tick,
+            );
+            return;
         }
         frame.render_widget(
             Paragraph::new(Span::styled(
@@ -3235,7 +3272,17 @@ impl App {
                 return;
             }
         }
-        self.render_browse_icon_fallback(frame, area, project, color);
+        if self.image_loading.contains(url.as_str()) {
+            crate::widgets::loading::spinner(
+                frame,
+                area,
+                self.theme.panel,
+                &self.theme,
+                self.tick,
+            );
+        } else {
+            self.render_browse_icon_fallback(frame, area, project, color);
+        }
     }
 
     /// Placeholder when no icon image is available or the terminal lacks

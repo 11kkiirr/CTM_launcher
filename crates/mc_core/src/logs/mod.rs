@@ -144,6 +144,66 @@ fn log_regex() -> &'static Regex {
     })
 }
 
+fn xml_event_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?s)<log4j:Event\s+logger="(?P<logger>[^"]*)"\s+timestamp="(?P<ts>-?\d+)"\s+level="(?P<level>[^"]*)"\s+thread="(?P<thread>[^"]*)".*?<log4j:Message>\s*(?:<!\[CDATA\[(?P<cdata>.*?)\]\]>|(?P<plain>.*?))\s*</log4j:Message>"#,
+        )
+        .expect("valid xml event regex")
+    })
+}
+
+fn decode_xml_entities(input: &str) -> String {
+    if !input.contains('&') {
+        return input.to_string();
+    }
+    input
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+}
+
+fn format_epoch_millis(ms: i64) -> Option<String> {
+    use chrono::{Local, TimeZone};
+    Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .map(|dt| dt.format("%H:%M:%S").to_string())
+}
+
+/// Parse a single complete `<log4j:Event>…</log4j:Event>` fragment.
+///
+/// The vanilla client writes log4j's `LegacyXMLLayout` to stdout (while
+/// `logs/latest.log` uses a plain `PatternLayout`), so a live launch produces
+/// XML events instead of the usual `[time] [thread/level]: msg` lines. This
+/// rehydrates those events into normal entries.
+pub fn parse_log4j_xml(event: &str) -> Option<LogEntry> {
+    let caps = xml_event_regex().captures(event)?;
+    let get = |name: &str| caps.name(name).map(|m| m.as_str());
+    let message = match get("cdata").or_else(|| get("plain")) {
+        Some(text) => decode_xml_entities(text),
+        None => String::new(),
+    };
+    let message = strip_ansi(&message);
+    let timestamp = get("ts")
+        .and_then(|ts| ts.parse::<i64>().ok())
+        .and_then(format_epoch_millis);
+    let thread = get("thread").filter(|s| !s.is_empty()).map(str::to_string);
+    let target = get("logger").filter(|s| !s.is_empty()).map(str::to_string);
+    Some(LogEntry {
+        level: LogLevel::parse(get("level").unwrap_or_default()),
+        timestamp,
+        thread,
+        target,
+        message: message.clone(),
+        raw: message,
+    })
+}
+
 /// Parse a raw log line into a structured entry.
 ///
 /// ANSI escapes are stripped first so control bytes never reach the UI.
@@ -227,6 +287,8 @@ impl LogFilter {
 pub struct LogBuffer {
     entries: VecDeque<LogEntry>,
     capacity: usize,
+    /// Partial `<log4j:Event>` while a live XML event spans several lines.
+    xml_acc: Option<String>,
     pub filter: LogFilter,
     pub paused: bool,
 }
@@ -236,6 +298,7 @@ impl LogBuffer {
         Self {
             entries: VecDeque::with_capacity(capacity.min(4096)),
             capacity,
+            xml_acc: None,
             filter: LogFilter::default(),
             paused: false,
         }
@@ -253,8 +316,45 @@ impl LogBuffer {
     }
 
     /// Parse and push a raw line.
+    ///
+    /// Live launches pipe the vanilla client's stdout, which uses log4j's
+    /// `LegacyXMLLayout` (multi-line, pretty-printed). Those fragments are
+    /// accumulated until `</log4j:Event>` closes the event and then converted
+    /// to a normal entry. Plain lines pass straight through.
     pub fn push_line(&mut self, raw: &str) {
-        self.push(parse_line(raw));
+        if self.xml_acc.is_none() && !raw.trim_start().starts_with("<log4j:Event") {
+            self.push(parse_line(raw));
+            return;
+        }
+
+        {
+            let acc = self.xml_acc.get_or_insert_with(String::new);
+            if !acc.is_empty() {
+                acc.push('\n');
+            }
+            acc.push_str(raw);
+        }
+
+        const CLOSE: &str = "</log4j:Event>";
+        while let Some(end) = self.xml_acc.as_ref().and_then(|s| s.find(CLOSE)) {
+            let stop = end + CLOSE.len();
+            let event: String = self.xml_acc.as_ref().map(|s| s[..stop].to_string()).unwrap();
+            if let Some(acc) = self.xml_acc.as_mut() {
+                acc.drain(..stop);
+            }
+            match parse_log4j_xml(&event) {
+                Some(entry) => self.push(entry),
+                None => self.push(parse_line(event.trim())),
+            }
+        }
+
+        // Drop whitespace-only leftovers; cap a runaway unclosed event.
+        if self.xml_acc.as_ref().is_some_and(|s| s.trim().is_empty()) {
+            self.xml_acc = None;
+        } else if self.xml_acc.as_ref().is_some_and(|s| s.len() > 262_144) {
+            let text = self.xml_acc.take().unwrap_or_default();
+            self.push(parse_line(text.trim()));
+        }
     }
 
     /// Iterate entries that pass the current filter.
@@ -265,6 +365,7 @@ impl LogBuffer {
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.xml_acc = None;
     }
 
     pub fn len(&self) -> usize {
@@ -567,6 +668,56 @@ mod tests {
         assert!(!filter.matches(&error_other));
         filter.search = None;
         assert!(filter.matches(&error_other));
+    }
+
+    #[test]
+    fn parses_log4j_xml_event() {
+        let event = "<log4j:Event logger=\"FabricLoader/GameProvider\" timestamp=\"1791745661249\" level=\"INFO\" thread=\"main\">\n    <log4j:Message><![CDATA[Loading Minecraft 26.3]]></log4j:Message>\n  </log4j:Event>";
+        let entry = parse_log4j_xml(event).unwrap();
+        assert_eq!(entry.level, LogLevel::Info);
+        assert_eq!(entry.thread.as_deref(), Some("main"));
+        assert_eq!(entry.target.as_deref(), Some("FabricLoader/GameProvider"));
+        assert_eq!(entry.message, "Loading Minecraft 26.3");
+        assert!(entry.timestamp.is_some());
+    }
+
+    #[test]
+    fn parses_full_legacy_xml_event() {
+        let event = "<log4j:Event logger=\"FabricLoader/Resolution\" timestamp=\"1791745661660\" level=\"WARN\" thread=\"main\">\n  <log4j:Message><![CDATA[Warnings were found!\n - Mod 'X' recommends any version of y, which is missing!\n - You should install any version of y.]]></log4j:Message>\n  <log4j:Properties>\n    <log4j:Data name=\"log4j2.isWebapp\" value=\"false\"/>\n  </log4j:Properties>\n  <log4j:LocationInfo class=\"C\" method=\"m\" file=\"F\" line=\"1\"/>\n</log4j:Event>";
+        let entry = parse_log4j_xml(event).unwrap();
+        assert_eq!(entry.level, LogLevel::Warn);
+        assert_eq!(entry.target.as_deref(), Some("FabricLoader/Resolution"));
+        assert_eq!(
+            entry.message,
+            "Warnings were found!\n - Mod 'X' recommends any version of y, which is missing!\n - You should install any version of y."
+        );
+    }
+
+    #[test]
+    fn buffer_accumulates_multiline_xml() {
+        let mut buffer = LogBuffer::new(10);
+        buffer.push_line(
+            "<log4j:Event logger=\"A\" timestamp=\"1791745661249\" level=\"INFO\" thread=\"main\">",
+        );
+        buffer.push_line("    <log4j:Message><![CDATA[Warnings were found!");
+        buffer.push_line(" - missing mod]]></log4j:Message>");
+        assert_eq!(buffer.len(), 0, "incomplete event must not be pushed");
+        buffer.push_line("</log4j:Event>");
+        assert_eq!(buffer.len(), 1);
+        let entry = buffer.visible().next().unwrap();
+        assert_eq!(entry.message, "Warnings were found!\n - missing mod");
+        assert_eq!(entry.level, LogLevel::Info);
+        assert_eq!(entry.thread.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn xml_then_plain_lines_mix() {
+        let mut buffer = LogBuffer::new(10);
+        buffer.push_line("<log4j:Event logger=\"A\" timestamp=\"1791745661249\" level=\"WARN\" thread=\"main\"><log4j:Message><![CDATA[one]]></log4j:Message></log4j:Event>");
+        buffer.push_line("[12:00:00] [main/ERROR]: plain");
+        assert_eq!(buffer.len(), 2);
+        let levels: Vec<_> = buffer.visible().map(|e| e.level).collect();
+        assert_eq!(levels, vec![LogLevel::Warn, LogLevel::Error]);
     }
 
     #[test]

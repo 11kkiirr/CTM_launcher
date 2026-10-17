@@ -46,6 +46,18 @@ pub fn decode_rgba(data: &[u8]) -> Option<RgbaImage> {
     decode_svg(data)
 }
 
+/// Maximum edge kept for fetched browse images. Terminal image protocols
+/// never resolve more than ~2048px, and the cap bounds memory plus the
+/// one-time protocol build copy for multi-megapixel photos.
+pub const BROWSE_MAX_DIM: u32 = 2048;
+
+/// Decode fetched browse bytes and downscale to [`BROWSE_MAX_DIM`].
+/// Runs on the blocking pool — never call it on the UI thread.
+pub fn decode_browse(data: &[u8]) -> Option<RgbaImage> {
+    decode_rgba(data)
+        .map(|img| mc_core::img::fit_image(&img, BROWSE_MAX_DIM, BROWSE_MAX_DIM))
+}
+
 /// Rasterize an SVG document to an RGBA raster at its intrinsic size.
 ///
 /// SVG bytes are sniffed (XML prolog / root tag) before parsing so non-SVG
@@ -232,6 +244,91 @@ mod tests {
     fn svg_size_cap_rejects_huge_documents() {
         let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100000" height="100000"><rect width="100000" height="100000" fill="red"/></svg>"#;
         assert!(decode_svg(svg).is_none(), "huge svg must be rejected");
+    }
+
+    #[test]
+    fn decode_browse_caps_large_rasters() {
+        let src = image::DynamicImage::new_rgba8(3000, 10);
+        let mut png = Vec::new();
+        src.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encode png");
+        let img = decode_browse(&png).expect("png decodes");
+        assert_eq!(img.width, BROWSE_MAX_DIM, "3000px scales down to the cap");
+        assert_eq!(img.height, 6, "aspect ratio preserved");
+        assert_eq!(img.pixels.len(), img.width as usize * img.height as usize * 4);
+    }
+
+    #[test]
+    fn decode_browse_keeps_small_rasters() {
+        let src = image::DynamicImage::new_rgba8(64, 32);
+        let mut png = Vec::new();
+        src.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encode png");
+        let img = decode_browse(&png).expect("png decodes");
+        assert_eq!((img.width, img.height), (64, 32));
+        assert!(decode_browse(b"not an image").is_none());
+    }
+
+    #[test]
+    fn tmp_bench_kitty_render() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect as RRect;
+        use ratatui::widgets::StatefulWidget;
+        use ratatui_image::picker::{Picker, ProtocolType};
+        use ratatui_image::{Resize, StatefulImage};
+        use std::time::Instant;
+
+        let mut picker = Picker::halfblocks();
+        picker.set_protocol_type(ProtocolType::Kitty);
+
+        fn bench(
+            picker: &Picker,
+            name: &str,
+            src: image::DynamicImage,
+            resize: Resize,
+            area: RRect,
+        ) {
+            let t = Instant::now();
+            let mut proto = picker.new_resize_protocol(src);
+            let build = t.elapsed();
+            let mut buf = Buffer::empty(RRect::new(0, 0, area.width, area.height));
+            let t = Instant::now();
+            StatefulWidget::render(StatefulImage::default().resize(resize.clone()), area, &mut buf, &mut proto);
+            let first = t.elapsed();
+            let transmit = buf.cell((area.x, area.y)).map(|c| c.symbol().len()).unwrap_or(0);
+            let t = Instant::now();
+            StatefulWidget::render(StatefulImage::default().resize(resize.clone()), area, &mut buf, &mut proto);
+            let second = t.elapsed();
+            let moved = RRect::new(1, 1, area.width, area.height);
+            let mut buf2 = Buffer::empty(RRect::new(0, 0, area.width + 1, area.height + 1));
+            let t = Instant::now();
+            StatefulWidget::render(StatefulImage::default().resize(resize), moved, &mut buf2, &mut proto);
+            let position_change = t.elapsed();
+            println!(
+                "{name}: build={build:?} first={first:?} second={second:?} moved={position_change:?} transmit={transmit}"
+            );
+        }
+
+        let big = || {
+            image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(
+                2048,
+                1152,
+                |x, y| image::Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255]),
+            ))
+        };
+        let small = || {
+            image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(
+                512,
+                288,
+                |x, y| image::Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255]),
+            ))
+        };
+
+        bench(&picker, "fit/2048 src, 100x40 area", big(), Resize::Fit(None), RRect::new(0, 0, 100, 40));
+        bench(&picker, "fit/512 src, 100x40 area", small(), Resize::Fit(None), RRect::new(0, 0, 100, 40));
+        bench(&picker, "fit/2048 src, 40x15 area", big(), Resize::Fit(None), RRect::new(0, 0, 40, 15));
+        bench(&picker, "scaleTri/2048 src, 100x40 area", big(), Resize::Scale(Some(ratatui_image::FilterType::Triangle)), RRect::new(0, 0, 100, 40));
+        bench(&picker, "fit/2048 src, 4x3 icon area", big(), Resize::Fit(None), RRect::new(0, 0, 4, 3));
     }
 }
 

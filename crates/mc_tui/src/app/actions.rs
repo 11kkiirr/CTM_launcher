@@ -1458,13 +1458,24 @@ pub(crate) fn browse_fetch_image(&mut self, url: &str) {
     if !self.browse.image_requested.insert(key.clone()) {
         return;
     }
+    self.image_loading.insert(key.clone());
     let modrinth = self.modrinth.clone();
     let tx = self.engine_tx.clone();
     tokio::spawn(async move {
         let data = modrinth.get_image_bytes(&key, 16 * 1024 * 1024).await.ok();
+        let fetched = data.is_some();
+        let image = match data {
+            Some(bytes) => tokio::task::spawn_blocking(move || {
+                crate::images::decode_browse(&bytes)
+            })
+            .await
+            .unwrap_or(None),
+            None => None,
+        };
         let _ = tx.send(EngineEvent::BrowseImage {
             url: key,
-            data,
+            image,
+            fetched,
         });
     });
 }
@@ -1486,6 +1497,7 @@ pub(crate) fn load_local_image(&mut self, path: &str) {
     if !self.local_image_requested.insert(path.to_string()) {
         return;
     }
+    self.image_loading.insert(path.to_string());
     let key = path.to_string();
     let path_buf = PathBuf::from(path);
     let tx = self.engine_tx.clone();

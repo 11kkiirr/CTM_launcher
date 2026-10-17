@@ -163,6 +163,14 @@ impl App {
                         );
                     }
                 }
+            } else if self.image_loading.contains(&path_str) {
+                crate::widgets::loading::spinner(
+                    frame,
+                    icon_rect,
+                    bg,
+                    &self.theme,
+                    self.tick,
+                );
             } else {
                 let loading_style = if selected {
                     self.theme.accent()

@@ -49,11 +49,13 @@ pub enum EngineEvent {
         versions: Vec<Version>,
         members: Vec<Member>,
     },
-    /// A fetched browser image (icon / gallery preview). The raw bytes are
-    /// kept so terminals with image support can display the original file.
+    /// A fetched browser image (icon / gallery preview), decoded off the UI
+    /// thread on the blocking pool. `fetched` is false when the download
+    /// itself failed (retryable); a failed decode of real bytes is not.
     BrowseImage {
         url: String,
-        data: Option<Vec<u8>>,
+        image: Option<mc_core::img::RgbaImage>,
+        fetched: bool,
     },
     /// Version list for the version picker overlay.
     VersionList {
